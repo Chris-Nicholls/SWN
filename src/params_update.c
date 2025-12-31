@@ -328,7 +328,7 @@ void init_param_object(o_params *t_params){
 
 	// Phase modulation (Cruinn-style) - per channel
 	for (chan=0; chan<NUM_CHANNELS; chan++) {
-		t_params->phase_spread_amt[chan] = 0.0f;
+		t_params->phase_spread_amt[chan] = 1.0f;
 		t_params->phase_mod_lfo_speed[chan] = DEFAULT_PHASE_MOD_LFO_SPEED;
 		t_params->phase_mod_lfo_shape[chan] = 10;  // Sine (index 10 in lfo_wavetable)
 	}
