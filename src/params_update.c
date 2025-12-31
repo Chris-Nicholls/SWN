@@ -326,6 +326,12 @@ void init_param_object(o_params *t_params){
 	for (uint8_t i=0; i<(MAX_TOTAL_SPHERES/8); i++)
 		t_params->enabled_spheres[i]=0xFF;
 
+	// Phase modulation (Cruinn-style) - per channel
+	for (chan=0; chan<NUM_CHANNELS; chan++) {
+		t_params->phase_spread_amt[chan] = 0.0f;
+		t_params->phase_mod_lfo_speed[chan] = DEFAULT_PHASE_MOD_LFO_SPEED;
+		t_params->phase_mod_lfo_shape[chan] = 0;  // Sine
+	}
 }
 
 void init_calc_params(void)
@@ -1790,6 +1796,30 @@ void read_nav_encoder(uint8_t dim){
 	enc = pop_encoder_q(WT_ENCODERS[dim]);
 
 	if(enc) {
+		// Press Spread (TRANSPOSE) + turn Depth = adjust phase spread amount
+		if (dim == 0 && rotary_pressed(rotm_TRANSPOSE)) {
+			if (macro_states.all_af_buttons_released) {
+				// Global: adjust all unlocked channels
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					if (!params.osc_param_lock[i]) {
+						params.phase_spread_amt[i] += enc * PHASE_SPREAD_SCALING;
+						params.phase_spread_amt[i] = _CLAMP_F(params.phase_spread_amt[i], 0, MAX_PHASE_SPREAD);
+					}
+				}
+			} else {
+				// Individual: adjust only pressed channels
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					if (button_pressed(i)) {
+						params.phase_spread_amt[i] += enc * PHASE_SPREAD_SCALING;
+						params.phase_spread_amt[i] = _CLAMP_F(params.phase_spread_amt[i], 0, MAX_PHASE_SPREAD);
+						calc_params.already_handled_button[i] = 1;
+					}
+				}
+			}
+			start_ongoing_display_phase_spread();
+			return;
+		}
+
 		if ((ui_mode == WTEDITING) && (!macro_states.all_af_buttons_released))
 		{
 			if	 (dim == 0){for (i = 0; i < WT_DIM_SIZE; i++){update_wt_fx_params(i,					wt_osc.m0[1][0],	wt_osc.m0[2][0],	enc);}}

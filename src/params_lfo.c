@@ -43,9 +43,11 @@
 #include "ui_modes.h"
 #include "wavetable_recording.h"
 #include "wavetable_editing.h"
+#include "oscillator.h"
 
 
 extern o_params params;
+extern o_wt_osc wt_osc;
 extern o_calc_params calc_params;
 extern o_led_cont led_cont;
 extern o_macro_states 	macro_states;
@@ -429,6 +431,32 @@ void read_lfo_speed(int16_t turn)
 
 	if (!turn) return;
 
+	// Press Spread (TRANSPOSE) + turn LFO Speed = adjust phase modulation LFO rate
+	if (rotary_pressed(rotm_TRANSPOSE)) {
+		if (macro_states.all_af_buttons_released) {
+			// Global: adjust all unlocked channels
+			for (i = 0; i < NUM_CHANNELS; i++) {
+				if (!params.osc_param_lock[i]) {
+					params.phase_mod_lfo_speed[i] += turn * PHASE_MOD_LFO_SPEED_SCALING;
+					params.phase_mod_lfo_speed[i] = _CLAMP_F(params.phase_mod_lfo_speed[i], MIN_PHASE_MOD_LFO_SPEED, MAX_PHASE_MOD_LFO_SPEED);
+					wt_osc.phase_mod_lfo_inc[i] = (0.5f * params.phase_mod_lfo_speed[i] * phase_spread_speed_mult[i]) / F_SAMPLERATE;
+				}
+			}
+		} else {
+			// Individual: adjust only pressed channels
+			for (i = 0; i < NUM_CHANNELS; i++) {
+				if (button_pressed(i)) {
+					params.phase_mod_lfo_speed[i] += turn * PHASE_MOD_LFO_SPEED_SCALING;
+					params.phase_mod_lfo_speed[i] = _CLAMP_F(params.phase_mod_lfo_speed[i], MIN_PHASE_MOD_LFO_SPEED, MAX_PHASE_MOD_LFO_SPEED);
+					wt_osc.phase_mod_lfo_inc[i] = (0.5f * params.phase_mod_lfo_speed[i] * phase_spread_speed_mult[i]) / F_SAMPLERATE;
+					calc_params.already_handled_button[i] = 1;
+				}
+			}
+		}
+		start_ongoing_display_phase_spread();
+		return;
+	}
+
 	// FINE
 	turn_amt = turn;
 	fine_pressed = switch_pressed(FINE_BUTTON);
@@ -569,6 +597,28 @@ void read_LFO_shape(void)
 
 	if(enc)
 	{
+		// Press Spread (TRANSPOSE) + turn LFO Shape = adjust phase modulation LFO shape
+		if (rotary_pressed(rotm_TRANSPOSE)) {
+			if (macro_states.all_af_buttons_released) {
+				// Global: adjust all unlocked channels
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					if (!params.osc_param_lock[i]) {
+						params.phase_mod_lfo_shape[i] = _WRAP_I16(params.phase_mod_lfo_shape[i] + enc, 0, NUM_LFO_SHAPES);
+					}
+				}
+			} else {
+				// Individual: adjust only pressed channels
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					if (button_pressed(i)) {
+						params.phase_mod_lfo_shape[i] = _WRAP_I16(params.phase_mod_lfo_shape[i] + enc, 0, NUM_LFO_SHAPES);
+						calc_params.already_handled_button[i] = 1;
+					}
+				}
+			}
+			start_ongoing_display_phase_spread();
+			return;
+		}
+
 		if (macro_states.all_af_buttons_released)
 		{
 			for (i = 0; i < NUM_CHANNELS; i++){
@@ -717,4 +767,3 @@ void set_all_lfo_mode(enum lfoModes mode)
 	for (uint8_t chan=0; chan<NUM_CHANNELS; chan++)
 		lfos.mode[chan] = mode;
 }
-

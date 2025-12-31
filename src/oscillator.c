@@ -46,6 +46,13 @@
 #include "math_util.h"
 #include "gpio_pins.h"
 #include "wavetable_play_export.h"
+#include "lfo_wavetable_bank.h"
+
+// Per-channel LFO speed multipliers for organic drift (channels 0-5)
+// Slightly different rates create evolving phase relationships
+const float phase_spread_speed_mult[NUM_CHANNELS] = {
+    0.5f, 1.0f, 5.8f, 5.5f, 31.5f, 33.6f 
+};
 
 extern enum UI_Modes 	ui_mode;
 extern o_rotary 		rotary[NUM_ROTARIES];
@@ -82,6 +89,12 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	float 			audio_in_sum;
 	static uint8_t	audio_gate_ctr=0;
 
+	// Phase modulation variables
+	float			phase_mod_lfo_val;
+	float			phase_offset;
+	float			read_pos;
+	uint16_t		lfo_table_pos;
+
 	// DEBUG0_ON;
 
 	//Todo: use a separate callback for WTTTONE mode, and another one for WTRECORDING/WTMONITORING/WTREC_WAIT
@@ -92,6 +105,17 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
+		// Advance phase modulation LFO per channel (once per buffer for efficiency)
+		wt_osc.phase_mod_lfo_pos[chan] += wt_osc.phase_mod_lfo_inc[chan] * MONO_BUFSZ;
+		while (wt_osc.phase_mod_lfo_pos[chan] >= 1.0f) wt_osc.phase_mod_lfo_pos[chan] -= 1.0f;
+
+		// Get LFO value from shape table (0-255 from table, normalize to -1 to +1)
+		lfo_table_pos = (uint16_t)(wt_osc.phase_mod_lfo_pos[chan] * (LFO_TABLELEN - 1));
+		phase_mod_lfo_val = ((float)lfo_wavetable[params.phase_mod_lfo_shape[chan]][lfo_table_pos] / 127.5f) - 1.0f;
+
+		// Calculate phase offset for this channel (Cruinn-style phase spread)
+		phase_offset = params.phase_spread_amt[chan] * phase_mod_lfo_val;
+
 		read_level_and_pan(chan);
 		level_inc = (calc_params.level[chan] - prev_level[chan]) / MONO_BUFSZ;
 		interpolated_level = prev_level[chan];
@@ -107,10 +131,15 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 			while (wt_osc.wt_head_pos[chan] >= (float)WT_TABLELEN)
 				wt_osc.wt_head_pos[chan] -= (float)(WT_TABLELEN);
 
-			wt_osc.rh0[chan] 	= (uint16_t)(wt_osc.wt_head_pos[chan]);
+			// Apply phase offset to read position
+			read_pos = wt_osc.wt_head_pos[chan] + phase_offset;
+			while (read_pos >= (float)WT_TABLELEN) read_pos -= (float)WT_TABLELEN;
+			while (read_pos < 0.0f) read_pos += (float)WT_TABLELEN;
+
+			wt_osc.rh0[chan] 	= (uint16_t)(read_pos);
 			wt_osc.rh1[chan] 	= (wt_osc.rh0[chan] + 1) & (WT_TABLELEN-1);
-			wt_osc.rhd[chan] 	= wt_osc.wt_head_pos[chan] - (float)(wt_osc.rh0[chan]);
-			wt_osc.rhd_inv[chan] = 1.0 - wt_osc.rhd[chan];
+			wt_osc.rhd[chan] 	= read_pos - (float)(wt_osc.rh0[chan]);
+			wt_osc.rhd_inv[chan] = 1.0f - wt_osc.rhd[chan];
 
 			xfade0 = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan]] * wt_osc.rhd_inv[chan]) + (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan]] * wt_osc.rhd[chan]);
 
@@ -225,5 +254,10 @@ void init_wt_osc(void) {
 		wt_osc.wt_head_pos[i] 					= 0;
 		wt_osc.buffer_sel[i] 					= 0;
 		wt_osc.wt_interp_request[i]				= WT_INTERP_REQ_FORCE;
+
+		// Phase modulation LFO runtime state - per channel
+		// Spread initial phases so channels don't all hit zero at the same time
+		wt_osc.phase_mod_lfo_pos[i] = (float)i / NUM_CHANNELS;
+		wt_osc.phase_mod_lfo_inc[i] = (0.5f * phase_spread_speed_mult[i] / F_SAMPLERATE);  // ~0.5Hz default with per-channel variation
 	}
 }

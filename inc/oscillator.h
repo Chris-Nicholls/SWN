@@ -67,9 +67,16 @@ typedef struct o_wt_osc{
 	uint16_t 					rh1						[NUM_CHANNELS]		;
 	float 						rhd						[NUM_CHANNELS]		; 
 	float 						rhd_inv					[NUM_CHANNELS]		;
+
+	// Phase modulation LFO runtime state (not saved in presets) - per channel
+	float						phase_mod_lfo_pos	[NUM_CHANNELS];			// Current LFO position (0-1) per channel
+	float						phase_mod_lfo_inc	[NUM_CHANNELS];			// LFO increment per sample per channel
 	
 } o_wt_osc;
 
+
+// Per-channel LFO speed multipliers for organic drift
+extern const float phase_spread_speed_mult[NUM_CHANNELS];
 
 void	init_wt_osc(void);
 void 	process_audio_block_codec(int32_t *src, int32_t *dst);

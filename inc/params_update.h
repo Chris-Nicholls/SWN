@@ -88,6 +88,14 @@
 
 #define F_SCALING_MAX_VCACV_GAIN		1.0
 
+// Phase spread modulation scaling
+#define PHASE_SPREAD_SCALING			4.0f			// Scaling per encoder click
+#define MAX_PHASE_SPREAD				512.0f			// Maximum phase offset (samples)
+#define PHASE_MOD_LFO_SPEED_SCALING		0.1f			// Speed adjustment per encoder click
+#define MIN_PHASE_MOD_LFO_SPEED			0.1f			// Minimum speed multiplier
+#define MAX_PHASE_MOD_LFO_SPEED			10.0f			// Maximum speed multiplier
+#define DEFAULT_PHASE_MOD_LFO_SPEED		1.0f			// Default ~0.5Hz
+
 #define MAX_FINETUNE_WRAP 				(2160)
 #define MIN_FINETUNE_WRAP 				(-2160)
 
@@ -128,6 +136,7 @@ enum MuteNoteKeyStates {
 
 #define FW_V1_PADDING (NUM_CHANNELS*32 - MAX_TOTAL_SPHERES/8) //padding for future features in o_params
 #define FW_V2_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS)
+#define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS*2 + NUM_CHANNELS + 2)  // per-channel phase spread params + padding
 
 enum PanStates {
 	pan_INACTIVE,
@@ -215,7 +224,13 @@ typedef struct o_params{
 	//v2.0
 	float		pan						[NUM_CHANNELS];
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE];
+	//v2.x: Phase modulation
+	float		phase_spread_amt		[NUM_CHANNELS];	// Depth of phase spread modulation per channel
+	float		phase_mod_lfo_speed		[NUM_CHANNELS];	// LFO speed multiplier per channel (1.0 = ~0.5Hz)
+	uint8_t		phase_mod_lfo_shape		[NUM_CHANNELS];	// LFO shape index per channel (0-24)
+	uint8_t		_phase_mod_padding[2];				// Align to 4 bytes
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE];
 } o_params;
 
 
@@ -344,4 +359,3 @@ void 		set_num_sphere_filled(uint8_t num_filled);
 uint32_t 	abs(int32_t v);
 
 void 		read_selbus_buttons(void);
-
