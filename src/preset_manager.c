@@ -226,7 +226,7 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 		for (uint8_t i=0; i<NUM_CHANNELS; i++) {
 			t_params->phase_spread_amt[i] = 0.0f;
 			t_params->phase_mod_lfo_speed[i] = DEFAULT_PHASE_MOD_LFO_SPEED;
-			t_params->phase_mod_lfo_shape[i] = 0;  // Sine
+			t_params->phase_mod_lfo_shape[i] = 10;  // Sine (index 10 in lfo_wavetable)
 		}
 	}
 }
