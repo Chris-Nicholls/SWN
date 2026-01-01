@@ -167,8 +167,12 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 				UNUSED(*src++);  // ignore right channel input (not connected in hardware)
 
 				if (oscout_status) {
-					outL = (int32_t)(output_buffer_evens[i_sample] * system_settings.master_gain);
-					outR = (int32_t)(output_buffer_odds[i_sample] * system_settings.master_gain);
+					// Apply pregain and tanh soft clipping for phase spread volume compensation
+					float pregain = params.phase_spread_pregain;
+					float clippedL = tanhf(output_buffer_evens[i_sample] * pregain / 8388608.0f) * 8388608.0f;
+					float clippedR = tanhf(output_buffer_odds[i_sample] * pregain / 8388608.0f) * 8388608.0f;
+					outL = (int32_t)(clippedL * system_settings.master_gain);
+					outR = (int32_t)(clippedR * system_settings.master_gain);
 				}
 				if (audiomon_status) {
 					outL += audio_in_sample;

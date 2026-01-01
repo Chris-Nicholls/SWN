@@ -408,6 +408,14 @@ void update_lfo_gain(int16_t turn)
 	float  	turn_amt;
 	float 	gain[NUM_CHANNELS];
 
+	// Press Spread (TRANSPOSE) + Press LFO Speed (in gain mode) + turn = adjust phase spread pregain
+	if (rotary_pressed(rotm_TRANSPOSE)) {
+		params.phase_spread_pregain += turn * PHASE_SPREAD_PREGAIN_SCALING;
+		params.phase_spread_pregain = _CLAMP_F(params.phase_spread_pregain, MIN_PHASE_SPREAD_PREGAIN, MAX_PHASE_SPREAD_PREGAIN);
+		start_ongoing_display_phase_spread();
+		return;
+	}
+
 	turn_amt = turn * (switch_pressed(FINE_BUTTON) ? F_SCALING_FINE_LFO_GAIN : F_SCALING_LFO_GAIN);
 
 	for (i=0; i<NUM_CHANNELS; i++)
