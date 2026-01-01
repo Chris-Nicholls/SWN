@@ -51,7 +51,7 @@
 // Per-channel LFO speed multipliers for organic drift (channels 0-5)
 // Slightly different rates create evolving phase relationships
 const float phase_spread_speed_mult[NUM_CHANNELS] = {
-    0.5f, 1.0f, 5.8f, 5.5f, 31.5f, 33.6f 
+    0.95f, 1.0f, 1.95f, 2.1f, 3.57f, 3.84f 
 };
 
 extern enum UI_Modes 	ui_mode;
