@@ -439,13 +439,14 @@ void read_lfo_speed(int16_t turn)
 
 	if (!turn) return;
 
-	// Press Spread (TRANSPOSE) + turn LFO Speed = adjust phase modulation LFO rate
+	// Press Spread (TRANSPOSE) + turn LFO Speed = adjust phase modulation LFO rate (multiplicative)
 	if (rotary_pressed(rotm_TRANSPOSE)) {
+		float speed_factor = powf(PHASE_MOD_LFO_SPEED_MULT, (float)turn);
 		if (macro_states.all_af_buttons_released) {
 			// Global: adjust all unlocked channels
 			for (i = 0; i < NUM_CHANNELS; i++) {
 				if (!params.osc_param_lock[i]) {
-					params.phase_mod_lfo_speed[i] += turn * PHASE_MOD_LFO_SPEED_SCALING;
+					params.phase_mod_lfo_speed[i] *= speed_factor;
 					params.phase_mod_lfo_speed[i] = _CLAMP_F(params.phase_mod_lfo_speed[i], MIN_PHASE_MOD_LFO_SPEED, MAX_PHASE_MOD_LFO_SPEED);
 					wt_osc.phase_mod_lfo_inc[i] = (0.5f * params.phase_mod_lfo_speed[i] * phase_spread_speed_mult[i]) / F_SAMPLERATE;
 				}
@@ -454,7 +455,7 @@ void read_lfo_speed(int16_t turn)
 			// Individual: adjust only pressed channels
 			for (i = 0; i < NUM_CHANNELS; i++) {
 				if (button_pressed(i)) {
-					params.phase_mod_lfo_speed[i] += turn * PHASE_MOD_LFO_SPEED_SCALING;
+					params.phase_mod_lfo_speed[i] *= speed_factor;
 					params.phase_mod_lfo_speed[i] = _CLAMP_F(params.phase_mod_lfo_speed[i], MIN_PHASE_MOD_LFO_SPEED, MAX_PHASE_MOD_LFO_SPEED);
 					wt_osc.phase_mod_lfo_inc[i] = (0.5f * params.phase_mod_lfo_speed[i] * phase_spread_speed_mult[i]) / F_SAMPLERATE;
 					calc_params.already_handled_button[i] = 1;

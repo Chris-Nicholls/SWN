@@ -91,7 +91,7 @@
 // Phase spread modulation scaling
 #define PHASE_SPREAD_SCALING			4.0f			// Scaling per encoder click
 #define MAX_PHASE_SPREAD				512.0f			// Maximum phase offset (samples)
-#define PHASE_MOD_LFO_SPEED_SCALING		0.1f			// Speed adjustment per encoder click
+#define PHASE_MOD_LFO_SPEED_MULT		1.15f			// Speed multiplier per encoder click (~15% faster/slower)
 #define MIN_PHASE_MOD_LFO_SPEED			0.1f			// Minimum speed multiplier
 #define MAX_PHASE_MOD_LFO_SPEED			10.0f			// Maximum speed multiplier
 #define DEFAULT_PHASE_MOD_LFO_SPEED		1.0f			// Default ~0.5Hz
