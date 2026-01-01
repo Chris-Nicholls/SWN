@@ -30,6 +30,8 @@
 #include "UI_conditioning.h"
 #include "drivers/flashram_spidma.h"
 #include "globals.h"
+#include "oscillator.h"
+#include <math.h>
 #include "gpio_pins.h"
 #include "hardware_controls.h"
 #include "math_util.h"
@@ -192,6 +194,23 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 		if (version != preset_signature_vLatest[2])
 			update_preset_version(version, t_params, t_lfos);
 
+		// Safety validation for version 'C' presets that may have been saved with corrupted values
+		for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+			if (isnan(t_params->phase_spread_amt[i]) || isinf(t_params->phase_spread_amt[i]) ||
+				t_params->phase_spread_amt[i] < 0.0f || t_params->phase_spread_amt[i] > MAX_PHASE_SPREAD) {
+				t_params->phase_spread_amt[i] = 1.0f;
+			}
+			if (isnan(t_params->phase_mod_lfo_speed[i]) || isinf(t_params->phase_mod_lfo_speed[i]) ||
+				t_params->phase_mod_lfo_speed[i] < MIN_PHASE_MOD_LFO_SPEED || t_params->phase_mod_lfo_speed[i] > MAX_PHASE_MOD_LFO_SPEED) {
+				t_params->phase_mod_lfo_speed[i] = DEFAULT_PHASE_MOD_LFO_SPEED;
+			}
+			// phase_mod_lfo_shape is uint8_t and gets wrapped by % in compute_phase_mod_lfo, so always valid
+		}
+		if (isnan(t_params->phase_spread_pregain) || isinf(t_params->phase_spread_pregain) ||
+			t_params->phase_spread_pregain < MIN_PHASE_SPREAD_PREGAIN || t_params->phase_spread_pregain > MAX_PHASE_SPREAD_PREGAIN) {
+			t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
+		}
+
 		fix_wtsel_wtbank_offset();
 	}
 	else {
@@ -209,25 +228,26 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 
 void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 {
-	if (version==preset_signature_v1_0[2]) {
+	// v1.0 ('9'): Initialize enabled_spheres and pan
+	if (version < preset_signature_v1_2[2]) {
 		for (uint8_t i=0; i<MAX_TOTAL_SPHERES/8; i++)
 			t_params->enabled_spheres[i]=0xFF;
 		for (uint8_t i=0; i<NUM_CHANNELS; i++)
 			t_params->pan[i] = default_pan(i);
 	}
-	if (version==preset_signature_v1_2[2]) {
+	// v1.2 ('A'): Initialize pan
+	if (version == preset_signature_v1_2[2]) {
 		for (uint8_t i=0; i<NUM_CHANNELS; i++)
 			t_params->pan[i] = default_pan(i);
 	}
-	// Initialize phase modulation defaults for presets saved before v2.x
-	if (version==preset_signature_v1_0[2] || 
-		version==preset_signature_v1_2[2] ||
-		version==preset_signature_v2_0[2]) {
+	// Any version before 'C': Initialize phase modulation params (these fields didn't exist)
+	if (version < preset_signature_vLatest[2]) {
 		for (uint8_t i=0; i<NUM_CHANNELS; i++) {
 			t_params->phase_spread_amt[i] = 1.0f;
 			t_params->phase_mod_lfo_speed[i] = DEFAULT_PHASE_MOD_LFO_SPEED;
-			t_params->phase_mod_lfo_shape[i] = 10;  // Sine (index 10 in lfo_wavetable)
+			t_params->phase_mod_lfo_shape[i] = PHASE_MOD_LFO_SINE;
 		}
+		t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
 	}
 }
 
