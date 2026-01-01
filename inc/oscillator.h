@@ -29,9 +29,31 @@
 
 #pragma once
 #include <stm32f7xx.h>
+#include <math.h>
 
 #include "sphere.h"
 #include "globals.h"
+
+// Phase modulation LFO shapes
+#define PHASE_MOD_LFO_NUM_SHAPES 2
+enum PhaseModLfoShapes {
+	PHASE_MOD_LFO_SINE = 0,
+	PHASE_MOD_LFO_TRIANGLE = 1
+};
+
+// Compute phase modulation LFO value from position (0-1) and shape
+// Returns value in range -1 to +1
+static inline float compute_phase_mod_lfo(float pos, uint8_t shape) {
+	shape = shape % PHASE_MOD_LFO_NUM_SHAPES;  // Wrap to valid shapes
+	switch (shape) {
+		case PHASE_MOD_LFO_TRIANGLE:
+			// Triangle: rises 0->1 in first half, falls 1->0 in second half, then shift to -1 to +1
+			return (pos < 0.5f) ? (4.0f * pos - 1.0f) : (3.0f - 4.0f * pos);
+		case PHASE_MOD_LFO_SINE:
+		default:
+			return sinf(pos * 2.0f * 3.14159265f);
+	}
+}
 
 
 enum WtInterpRequests {
