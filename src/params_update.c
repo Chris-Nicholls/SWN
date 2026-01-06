@@ -48,6 +48,8 @@
 #include "quantz_scales.h"
 #include "wavetable_recording.h"
 #include "wavetable_editing.h"
+#include "oscillator.h"
+#include "hardware_controls.h"
 #include "ui_modes.h"
 #include "key_combos.h"
 #include "wavetable_saveload.h"
@@ -780,7 +782,7 @@ void set_master_gain(void)
 		last_slider_a = analog[A_SLIDER].lpf_val;
 
 		if (rotary_med_pressed(rotm_LFOSPEED) && rotary_med_pressed(rotm_OCT)){
-			new_gain = _SCALE_U2F(analog[A_SLIDER].bracketed_val, 0, 4095, 80.0, 24.0);
+			new_gain = _SCALE_U2F(analog[A_SLIDER].bracketed_val, 0, 4095, 80.0, 12.0);
 			system_settings.master_gain = 1.0/new_gain;
 		}
 	}
@@ -789,6 +791,13 @@ void set_master_gain(void)
 
 float read_vca_cv(uint8_t chan)
 {
+	// Resonator mode: use coherence as VCA instead of CV input
+	// Square to suppress weak coherences, amplify strong ones
+	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY)) {
+		float coh = wt_osc.coherence_env[chan];
+		return coh * RESONATOR_GAIN;
+	}
+
 	//No VCA CV if switch is set to V/oct, or if Key Mode is Key or Note
 	if ((params.voct_switch_state[chan] == SW_VOCT) || (params.key_sw[chan] != ksw_MUTE))
 		return 1.0;
@@ -1244,6 +1253,8 @@ void update_noise(uint8_t chan)
 
 
 void read_freq(void){
+
+	set_master_gain();
 
 	int16_t tmp1, tmp2, tmp3, tmp4;
 	static uint8_t reset_detuning_enabled = 1;

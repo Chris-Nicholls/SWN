@@ -41,6 +41,14 @@ enum PhaseModLfoShapes {
 	PHASE_MOD_LFO_TRIANGLE = 1
 };
 
+// Resonator mode constants
+#define RESONATOR_ATTACK_FREQ	500.0f								// Fast attack ~10ms
+#define RESONATOR_DECAY_FREQ	8.0f								// Slow decay ~500ms
+#define RESONATOR_ATTACK_ALPHA	(RESONATOR_ATTACK_FREQ / F_SAMPLERATE)	// ~0.00227
+#define RESONATOR_DECAY_ALPHA	(RESONATOR_DECAY_FREQ / F_SAMPLERATE)	// ~0.0000453
+#define RESONATOR_GAIN			32.0f								// Gain applied to coherence VCA
+#define RESONATOR_LED_SCALE		32.0f								// Scale coherence to 0-1 for LED display
+
 // Compute phase modulation LFO value from position (0-1) and shape
 // Returns value in range -1 to +1
 static inline float compute_phase_mod_lfo(float pos, uint8_t shape) {
@@ -93,6 +101,11 @@ typedef struct o_wt_osc{
 	// Phase modulation LFO runtime state (not saved in presets) - per channel
 	float						phase_mod_lfo_pos	[NUM_CHANNELS];			// Current LFO position (0-1) per channel
 	float						phase_mod_lfo_inc	[NUM_CHANNELS];			// LFO increment per sample per channel
+
+	// Resonator mode: quadrature coherence detection (pseudo-Hilbert)
+	float						coherence_dc_I		[NUM_CHANNELS];			// In-phase DC component (slow LPF)
+	float						coherence_dc_Q		[NUM_CHANNELS];			// Quadrature DC component (90° shifted)
+	float						coherence_env		[NUM_CHANNELS];			// Envelope of sqrt(I²+Q²)
 	
 } o_wt_osc;
 

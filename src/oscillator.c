@@ -47,6 +47,8 @@
 #include "gpio_pins.h"
 #include "wavetable_play_export.h"
 #include "lfo_wavetable_bank.h"
+#include "UI_conditioning.h"
+#include "hardware_controls.h"
 
 // Per-channel LFO speed multipliers for organic drift (channels 0-5)
 // Slightly different rates create evolving phase relationships
@@ -94,11 +96,27 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	float			phase_offset;
 	float			read_pos;
 
+	// Resonator mode variables
+	uint8_t			resonator_mode_active;
+	float			audio_in_buffer[MONO_BUFSZ];
+
 	// DEBUG0_ON;
 
 	//Todo: use a separate callback for WTTTONE mode, and another one for WTRECORDING/WTMONITORING/WTREC_WAIT
 	oscout_status = 	((ui_mode != WTRECORDING) && (ui_mode != WTMONITORING) && (ui_mode != WTREC_WAIT));
 	audiomon_status = 	((ui_mode == WTRECORDING) || (ui_mode == WTMONITORING) || (ui_mode == WTREC_WAIT) || (ui_mode == WTTTONE));
+
+	// Check if resonator mode is active (waveform input jack plugged)
+	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && oscout_status;
+
+	// Pre-read audio input buffer for resonator mode (needed for all channels)
+	if (resonator_mode_active) {
+		int32_t *src_temp = src;
+		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+			audio_in_buffer[i_sample] = (float)convert_s24_to_s32(*src_temp++) / 8388608.0f;
+			src_temp++;  // ignore right channel (not connected in hardware)
+		}
+	}
 
 	audio_in_sum = 0;
 
@@ -146,10 +164,48 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 				wt_osc.wt_xfade[chan] -= XFADE_INC;
 				xfade1 = wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan]] * wt_osc.rhd_inv[chan] + wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan]] * wt_osc.rhd[chan];
 
-				smpl = ((xfade0 * (1.0 - wt_osc.wt_xfade[chan])) + (xfade1 * wt_osc.wt_xfade[chan])) * interpolated_level;
+				// Raw oscillator output (before level)
+				smpl = (xfade0 * (1.0f - wt_osc.wt_xfade[chan])) + (xfade1 * wt_osc.wt_xfade[chan]);
 			} else {
-				smpl = xfade0  * interpolated_level;
+				smpl = xfade0;
 			}
+
+			// Resonator mode: quadrature ring-modulation for phase-independent coherence
+			// (VCA is applied in read_vca_cv() based on coherence_env)
+			if (resonator_mode_active) {
+				// Compute 90-degree phase shifted oscillator sample (quadrature)
+				float read_pos_Q = read_pos + (WT_TABLELEN / 4);
+				while (read_pos_Q >= (float)WT_TABLELEN) read_pos_Q -= (float)WT_TABLELEN;
+				uint16_t rh0_Q = (uint16_t)(read_pos_Q);
+				uint16_t rh1_Q = (rh0_Q + 1) & (WT_TABLELEN - 1);
+				float rhd_Q = read_pos_Q - (float)(rh0_Q);
+				float osc_Q = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0_Q] * (1.0f - rhd_Q)) +
+				              (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1_Q] * rhd_Q);
+
+				// Ring modulate both I (in-phase) and Q (quadrature) with input
+				float audio_norm = audio_in_buffer[i_sample];
+				float ring_mod_I = (smpl / 32768.0f) * audio_norm;
+				float ring_mod_Q = (osc_Q / 32768.0f) * audio_norm;
+
+				// Stage 1: Slow symmetric LPF extracts DC components
+				float dc_alpha = 100.0f / F_SAMPLERATE;
+				wt_osc.coherence_dc_I[chan] = dc_alpha * ring_mod_I + (1.0f - dc_alpha) * wt_osc.coherence_dc_I[chan];
+				wt_osc.coherence_dc_Q[chan] = dc_alpha * ring_mod_Q + (1.0f - dc_alpha) * wt_osc.coherence_dc_Q[chan];
+
+				// Compute phase-independent magnitude: sqrt(I² + Q²)
+				float dc_mag = sqrtf(wt_osc.coherence_dc_I[chan] * wt_osc.coherence_dc_I[chan] +
+				                     wt_osc.coherence_dc_Q[chan] * wt_osc.coherence_dc_Q[chan]);
+
+				// Stage 2: Fast attack / slow decay envelope on magnitude
+				if (dc_mag > wt_osc.coherence_env[chan]) {
+					wt_osc.coherence_env[chan] += RESONATOR_ATTACK_ALPHA * (dc_mag - wt_osc.coherence_env[chan]);
+				} else {
+					wt_osc.coherence_env[chan] += RESONATOR_DECAY_ALPHA * (dc_mag - wt_osc.coherence_env[chan]);
+				}
+			}
+
+			// Apply level after coherence calculation
+			smpl *= interpolated_level;
 			interpolated_level += level_inc;
 
 			output_buffer_evens[i_sample] += smpl * interpolated_pan;
@@ -167,8 +223,8 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 				if (oscout_status) {
 					// Apply pregain and tanh soft clipping for phase spread volume compensation
 					float pregain = params.phase_spread_pregain;
-					float clippedL = tanhf(output_buffer_evens[i_sample] * pregain / 8388608.0f) * 8388608.0f;
-					float clippedR = tanhf(output_buffer_odds[i_sample] * pregain / 8388608.0f) * 8388608.0f;
+					float clippedL = tanhf(output_buffer_evens[i_sample] * pregain / 8388608.0f/3) * 8388608.0f * 3 * 1.3130352855; // 1.3130352855 is 1 / tanf(1)
+					float clippedR = tanhf(output_buffer_odds[i_sample] * pregain / 8388608.0f/3) * 8388608.0f * 3 * 1.3130352855;
 					outL = (int32_t)(clippedL * system_settings.master_gain);
 					outR = (int32_t)(clippedR * system_settings.master_gain);
 				}
@@ -261,5 +317,10 @@ void init_wt_osc(void) {
 		// Spread initial phases so channels don't all hit zero at the same time
 		wt_osc.phase_mod_lfo_pos[i] = (float)i / NUM_CHANNELS;
 		wt_osc.phase_mod_lfo_inc[i] = (0.5f * phase_spread_speed_mult[i] / F_SAMPLERATE);  // ~0.5Hz default with per-channel variation
+
+		// Resonator mode coherence state (quadrature)
+		wt_osc.coherence_dc_I[i] = 0.0f;
+		wt_osc.coherence_dc_Q[i] = 0.0f;
+		wt_osc.coherence_env[i] = 0.0f;
 	}
 }

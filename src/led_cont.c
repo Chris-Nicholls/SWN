@@ -58,6 +58,10 @@
 #include "timekeeper.h"
 #include "ui_modes.h"
 #include "wavetable_play_export.h"
+#include "oscillator.h"
+#include "hardware_controls.h"
+#include "oscillator.h"
+#include "lfo_wavetable_bank.h"
 
 extern SystemCalibrations *system_calibrations;
 
@@ -75,6 +79,7 @@ extern 		o_lfos				lfos;
 extern		o_preset_manager	preset_mgr;
 extern 		o_spherebuf	 		spherebuf;
 extern		o_systemSettings	system_settings;
+extern		o_wt_osc			wt_osc;
 
 // Hardware
 extern 		o_monoLed   		monoLed[NUM_MONO_LED];
@@ -636,11 +641,22 @@ void calculate_lfo_leds(void)
 {
 	uint8_t chan=0;
 	float brightness;
+	uint8_t resonator_mode_active;
+
+	// Check if resonator mode is active (waveform input jack plugged)
+	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY);
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
+		// Resonator mode: show coherence levels when LFO->VCA is enabled
+		// Square to match VCA response curve
+		if (resonator_mode_active && lfos.to_vca[chan]) {
+			float coh = wt_osc.coherence_env[chan];
+			brightness = coh * coh * RESONATOR_LED_SCALE;
+			if (brightness > 1.0f) brightness = 1.0f;
+		}
 		// Audio rate and shape selection- -> LFO static brightness
-		if  ( (params.key_sw[chan] == ksw_MUTE) && (lfos.audio_mode[chan] || led_cont.lfoshape_timeout[chan]) ){
+		else if  ( (params.key_sw[chan] == ksw_MUTE) && (lfos.audio_mode[chan] || led_cont.lfoshape_timeout[chan]) ){
 			brightness 	= lfos.gain[chan];
 		}
 		else
