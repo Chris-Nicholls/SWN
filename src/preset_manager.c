@@ -51,7 +51,8 @@ o_preset_manager preset_mgr;
 char	preset_signature_v1_0[4] = {'P', 'R', '9', '\0'};
 char	preset_signature_v1_2[4] = {'P', 'R', 'A', '\0'};
 char	preset_signature_v2_0[4] = {'P', 'R', 'B', '\0'};
-char	preset_signature_vLatest[4] = {'P', 'R', 'C', '\0'};  // v2.x with phase modulation
+char	preset_signature_v2_x[4] = {'P', 'R', 'C', '\0'};  // v2.x with phase modulation
+char	preset_signature_vLatest[4] = {'P', 'R', 'D', '\0'};  // v2.x with resonator envelope
 
 static uint8_t cached_preset[sizeof(preset_signature_vLatest) + sizeof(o_params) + sizeof(o_lfos)];
 static uint8_t animation_enabled = 1;
@@ -241,13 +242,18 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 			t_params->pan[i] = default_pan(i);
 	}
 	// Any version before 'C': Initialize phase modulation params (these fields didn't exist)
-	if (version < preset_signature_vLatest[2]) {
+	if (version < preset_signature_v2_x[2]) {
 		for (uint8_t i=0; i<NUM_CHANNELS; i++) {
 			t_params->phase_spread_amt[i] = 1.0f;
 			t_params->phase_mod_lfo_speed[i] = DEFAULT_PHASE_MOD_LFO_SPEED;
 			t_params->phase_mod_lfo_shape[i] = PHASE_MOD_LFO_SINE;
 		}
 		t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
+	}
+	// Any version before 'D': Initialize resonator envelope params
+	if (version < preset_signature_vLatest[2]) {
+		t_params->resonator_attack_freq = 500.0f;
+		t_params->resonator_decay_freq = 8.0f;
 	}
 }
 
@@ -332,7 +338,8 @@ uint8_t check_preset_filled(uint32_t preset_num, char *version)
 		&& read_data[1] == preset_signature_vLatest[1]
 		&& (read_data[2] == preset_signature_vLatest[2] \
 			|| read_data[2] == preset_signature_v1_0[2] \
-			|| read_data[2] == preset_signature_v1_2[2])
+			|| read_data[2] == preset_signature_v1_2[2] \
+			|| read_data[2] == preset_signature_v2_x[2])
 		&& read_data[3] == preset_signature_vLatest[3] )
 	{
 		*version = read_data[2];

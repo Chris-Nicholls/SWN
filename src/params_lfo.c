@@ -439,6 +439,15 @@ void read_lfo_speed(int16_t turn)
 
 	if (!turn) return;
 
+	// Hold LFO->VCA + turn LFO Speed = adjust resonator attack
+	if (button_pressed(butm_LFOVCA_BUTTON)) {
+		float factor = powf(1.2f, (float)turn);
+		params.resonator_attack_freq *= factor;
+		params.resonator_attack_freq = _CLAMP_F(params.resonator_attack_freq, 10.0f, 2000.0f);
+		calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 1;
+		return;
+	}
+
 	// Press Spread (TRANSPOSE) + turn LFO Speed = adjust phase modulation LFO rate (multiplicative)
 	if (rotary_pressed(rotm_TRANSPOSE)) {
 		float speed_factor = powf(PHASE_MOD_LFO_SPEED_MULT, (float)turn);
@@ -606,6 +615,15 @@ void read_LFO_shape(void)
 
 	if(enc)
 	{
+		// Hold LFO->VCA + turn LFO Shape = adjust resonator decay
+		if (button_pressed(butm_LFOVCA_BUTTON)) {
+			float factor = powf(1.2f, (float)enc);
+			params.resonator_decay_freq *= factor;
+			params.resonator_decay_freq = _CLAMP_F(params.resonator_decay_freq, 1.0f, 1000.0f);
+			calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 1;
+			return;
+		}
+
 		// Press Spread (TRANSPOSE) + turn LFO Shape = adjust phase modulation LFO shape
 		if (rotary_pressed(rotm_TRANSPOSE)) {
 			if (macro_states.all_af_buttons_released) {

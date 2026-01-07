@@ -41,11 +41,6 @@ enum PhaseModLfoShapes {
 	PHASE_MOD_LFO_TRIANGLE = 1
 };
 
-// Resonator mode constants
-#define RESONATOR_ATTACK_FREQ	500.0f								// Fast attack ~10ms
-#define RESONATOR_DECAY_FREQ	8.0f								// Slow decay ~500ms
-#define RESONATOR_ATTACK_ALPHA	(RESONATOR_ATTACK_FREQ / F_SAMPLERATE)	// ~0.00227
-#define RESONATOR_DECAY_ALPHA	(RESONATOR_DECAY_FREQ / F_SAMPLERATE)	// ~0.0000453
 #define RESONATOR_GAIN			32.0f								// Gain applied to coherence VCA
 #define RESONATOR_LED_SCALE		32.0f								// Scale coherence to 0-1 for LED display
 

@@ -197,10 +197,12 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 				                     wt_osc.coherence_dc_Q[chan] * wt_osc.coherence_dc_Q[chan]);
 
 				// Stage 2: Fast attack / slow decay envelope on magnitude
+				float attack_alpha = params.resonator_attack_freq / F_SAMPLERATE;
+				float decay_alpha = params.resonator_decay_freq / F_SAMPLERATE;
 				if (dc_mag > wt_osc.coherence_env[chan]) {
-					wt_osc.coherence_env[chan] += RESONATOR_ATTACK_ALPHA * (dc_mag - wt_osc.coherence_env[chan]);
+					wt_osc.coherence_env[chan] += attack_alpha * (dc_mag - wt_osc.coherence_env[chan]);
 				} else {
-					wt_osc.coherence_env[chan] += RESONATOR_DECAY_ALPHA * (dc_mag - wt_osc.coherence_env[chan]);
+					wt_osc.coherence_env[chan] += decay_alpha * (dc_mag - wt_osc.coherence_env[chan]);
 				}
 			}
 
@@ -223,8 +225,8 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 				if (oscout_status) {
 					// Apply pregain and tanh soft clipping for phase spread volume compensation
 					float pregain = params.phase_spread_pregain;
-					float clippedL = tanhf(output_buffer_evens[i_sample] * pregain / 8388608.0f/3) * 8388608.0f * 3 * 1.3130352855; // 1.3130352855 is 1 / tanf(1)
-					float clippedR = tanhf(output_buffer_odds[i_sample] * pregain / 8388608.0f/3) * 8388608.0f * 3 * 1.3130352855;
+					float clippedL = tanhf(output_buffer_evens[i_sample] * pregain / 8388608.0f/4) * 8388608.0f * 4; 
+					float clippedR = tanhf(output_buffer_odds[i_sample] * pregain / 8388608.0f/4) * 8388608.0f * 4;
 					outL = (int32_t)(clippedL * system_settings.master_gain);
 					outR = (int32_t)(clippedR * system_settings.master_gain);
 				}

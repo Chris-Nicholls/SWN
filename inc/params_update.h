@@ -136,7 +136,7 @@ enum MuteNoteKeyStates {
 
 #define FW_V1_PADDING (NUM_CHANNELS*32 - MAX_TOTAL_SPHERES/8) //padding for future features in o_params
 #define FW_V2_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS)
-#define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS*2 + NUM_CHANNELS + 2 + sizeof(float))  // per-channel phase spread params + pregain + padding
+#define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS*2 + NUM_CHANNELS + 2 + sizeof(float) + sizeof(float)*2)  // per-channel phase spread params + pregain + resonator envelope + padding
 
 // Phase spread pregain constants
 #define DEFAULT_PHASE_SPREAD_PREGAIN 1.0f
@@ -236,6 +236,10 @@ typedef struct o_params{
 	uint8_t		phase_mod_lfo_shape		[NUM_CHANNELS];	// LFO shape index per channel (0-24)
 	uint8_t		_phase_mod_padding[2];				// Align to 4 bytes
 	float		phase_spread_pregain;				// Pre-clipping gain for phase spread output (global)
+
+	// Resonator envelope
+	float		resonator_attack_freq;				// Attack frequency in Hz (higher = faster)
+	float		resonator_decay_freq;				// Decay frequency in Hz (higher = faster)
 
 	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE];
 } o_params;

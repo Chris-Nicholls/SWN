@@ -335,6 +335,10 @@ void init_param_object(o_params *t_params){
 		t_params->phase_mod_lfo_shape[chan] = PHASE_MOD_LFO_SINE;  // Sine (0)
 	}
 	t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
+
+	// Resonator envelope defaults
+	t_params->resonator_attack_freq = 500.0f;  // Fast attack
+	t_params->resonator_decay_freq = 8.0f;     // Slow decay
 }
 
 void init_calc_params(void)
