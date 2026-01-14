@@ -42,6 +42,7 @@
 #include "timekeeper.h"
 #include "wavetable_saveload.h"
 #include "startup_preset_storage.h"
+#include "eq.h"
 
 extern o_params params;
 extern o_lfos lfos;
@@ -52,7 +53,8 @@ char	preset_signature_v1_0[4] = {'P', 'R', '9', '\0'};
 char	preset_signature_v1_2[4] = {'P', 'R', 'A', '\0'};
 char	preset_signature_v2_0[4] = {'P', 'R', 'B', '\0'};
 char	preset_signature_v2_x[4] = {'P', 'R', 'C', '\0'};  // v2.x with phase modulation
-char	preset_signature_vLatest[4] = {'P', 'R', 'D', '\0'};  // v2.x with resonator envelope
+char	preset_signature_v2_x2[4] = {'P', 'R', 'D', '\0'}; // v2.x with resonator envelope
+char	preset_signature_vLatest[4] = {'P', 'R', 'E', '\0'};  // v2.x2 with EQ
 
 static uint8_t cached_preset[sizeof(preset_signature_vLatest) + sizeof(o_params) + sizeof(o_lfos)];
 static uint8_t animation_enabled = 1;
@@ -220,6 +222,9 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 		init_lfo_object(t_lfos);
 	}
 
+	// Apply EQ settings from preset
+	eq_update_from_sliders(t_params->eq_slider_values);
+
 	init_wbrowse_morph();
 
 	resume_timer_IRQ(OSC_TIM_number);
@@ -251,9 +256,14 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 		t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
 	}
 	// Any version before 'D': Initialize resonator envelope params
-	if (version < preset_signature_vLatest[2]) {
+	if (version < preset_signature_v2_x2[2]) {
 		t_params->resonator_attack_freq = 500.0f;
 		t_params->resonator_decay_freq = 8.0f;
+	}
+	// Any version before 'E': Initialize EQ to flat
+	if (version < preset_signature_vLatest[2]) {
+		for (uint8_t i = 0; i < 6; i++)
+			t_params->eq_slider_values[i] = 2048;  // Flat EQ (center position)
 	}
 }
 
@@ -339,7 +349,8 @@ uint8_t check_preset_filled(uint32_t preset_num, char *version)
 		&& (read_data[2] == preset_signature_vLatest[2] \
 			|| read_data[2] == preset_signature_v1_0[2] \
 			|| read_data[2] == preset_signature_v1_2[2] \
-			|| read_data[2] == preset_signature_v2_x[2])
+			|| read_data[2] == preset_signature_v2_x[2] \
+			|| read_data[2] == preset_signature_v2_x2[2])
 		&& read_data[3] == preset_signature_vLatest[3] )
 	{
 		*version = read_data[2];

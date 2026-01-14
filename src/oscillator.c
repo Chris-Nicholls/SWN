@@ -47,6 +47,7 @@
 #include "gpio_pins.h"
 #include "wavetable_play_export.h"
 #include "lfo_wavetable_bank.h"
+#include "eq.h"
 #include "UI_conditioning.h"
 #include "hardware_controls.h"
 
@@ -216,32 +217,58 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 
 			if (chan==5)
 			{
-				outL=0;
-				outR=0;
-
 				audio_in_sample = convert_s24_to_s32(*src++);
 				UNUSED(*src++);  // ignore right channel input (not connected in hardware)
-
-				if (oscout_status) {
-					// Apply pregain and tanh soft clipping for phase spread volume compensation
-					float pregain = params.phase_spread_pregain;
-					float clippedL = tanhf(output_buffer_evens[i_sample] * pregain / 8388608.0f/4) * 8388608.0f * 4; 
-					float clippedR = tanhf(output_buffer_odds[i_sample] * pregain / 8388608.0f/4) * 8388608.0f * 4;
-					outL = (int32_t)(clippedL * system_settings.master_gain);
-					outR = (int32_t)(clippedR * system_settings.master_gain);
-				}
-				if (audiomon_status) {
-					outL += audio_in_sample;
-					outR += audio_in_sample;
-				}
-
-				*dst++ = compress(outL);
-				*dst++ = compress(outR);
-
+				
 				if (audio_in_sample<0)
 					audio_in_sum += audio_in_sample;
 			}
 		}
+	}
+
+	// Apply soft clipping to mixed output buffers
+	// Formula: out = tanh(x * pregain) / pregain
+	if (oscout_status) {
+		float pregain = params.phase_spread_pregain;
+		if (pregain < 0.05f) pregain = 0.05f; // Safety against div/0
+
+		float inv_pregain = 1.0f / pregain;
+
+		// 8388608 = 2^23 = max value for signed 24-bit audio
+		float scaler = 8388608.0f * 8.0f;
+		float inv_scaler = 1.0f / scaler;
+
+		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+			float in_even = output_buffer_evens[i_sample] * inv_scaler;
+			float in_odd = output_buffer_odds[i_sample] * inv_scaler;
+
+			output_buffer_evens[i_sample] = tanhf(in_even * pregain) * inv_pregain * scaler;
+			output_buffer_odds[i_sample] = tanhf(in_odd * pregain) * inv_pregain * scaler;
+		}
+	}
+
+	// Apply EQ after soft clipping
+	eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
+	
+	// Write output samples with compression
+	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
+	{
+		outL = 0;
+		outR = 0;
+		
+		if (oscout_status) {
+			outL = (int32_t)(output_buffer_evens[i_sample] * system_settings.master_gain);
+			outR = (int32_t)(output_buffer_odds[i_sample] * system_settings.master_gain);
+		}
+		if (audiomon_status) {
+			// Read audio input for monitoring modes (already read in chan==5 loop but need to re-read)
+			audio_in_sample = convert_s24_to_s32(src[i_sample * 2]);
+			outL += audio_in_sample;
+			outR += audio_in_sample;
+		}
+
+		*dst++ = compress(outL);
+		*dst++ = compress(outR);
 	}
 
 	//Requires: Min 4V trigger, min 0.25V/ms rise time (@5V = 20ms, @8V = 32ms), 20ms off time between pulses

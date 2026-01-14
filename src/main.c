@@ -70,6 +70,7 @@
 #include "UI_conditioning.h"
 #include "drivers/flashram_spidma.h"
 #include "sel_bus.h"
+#include "eq.h"
 
 
 
@@ -78,6 +79,7 @@ void SystemClock_Config(void);
 void SetVectorTable(uint32_t reset_address);
 
 extern enum 	UI_Modes ui_mode;
+extern o_params params;
 
 extern SystemCalibrations *system_calibrations;
 
@@ -244,6 +246,10 @@ int main(void)
 
 	init_compressor(COMPRESS_SIGNED_24BIT, 0.90);
 
+	// Initialize EQ (always active, flat response by default)
+	eq_init();
+	eq_update_from_sliders(params.eq_slider_values);
+
 	ui_mode = PLAY;
 
 	//Start Codec
@@ -356,4 +362,3 @@ void SetVectorTable(uint32_t reset_address)
 { 
 	SCB->VTOR = reset_address & (uint32_t)0x1FFFFF80;
 }
-

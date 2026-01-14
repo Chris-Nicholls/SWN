@@ -48,6 +48,7 @@
 #include "key_combos.h"
 
 #include "drivers/leds_pwm.h"
+#include "eq.h"
 #include "wavetable_recording.h"
 #include "wavetable_editing.h"
 #include "wavetable_saveload.h"
@@ -504,7 +505,32 @@ void update_mono_leds(void){
 		mono_led_off(mledm_SLIDER_D);
 		mono_led_off(mledm_SLIDER_E);
 		mono_led_off(mledm_SLIDER_F);
-	} else {
+	}
+	else if (switch_pressed(FINE_BUTTON))
+	{
+		// Fine held: LEDs show stored EQ position relative to center
+		// LED brightness indicates how far EQ is from flat (50%)
+		if (slider_pwm-- == 0)
+		{
+			slider_pwm = 32;  // 32 steps of brightness
+			for (i = 0; i < NUM_CHANNELS; i++) {
+				mono_led_off(i);
+			}
+		}
+		else
+		{
+			// Calculate brightness for each slider based on distance from center
+			for (i = 0; i < NUM_CHANNELS; i++) {
+				int16_t eq_val = (int16_t)params.eq_slider_values[i];
+				float distance = fabsf((float)(eq_val - EQ_SLIDER_MID)) / (float)EQ_SLIDER_MID;
+				float brightness = distance * system_settings.global_brightness;
+				if (brightness > 0.01f && (brightness * 32.0f > (32 - slider_pwm))) {
+					mono_led_on(i);
+				}
+			}
+		}
+	}
+	else {
 
 		if (slider_pwm-- == 0)
 		{
@@ -739,6 +765,10 @@ void calculate_led_ring(void){
 
 			case ONGOING_DISPLAY_SPHERE_SEL:
 				display_sphere_sel();
+				break;
+
+			case ONGOING_DISPLAY_PHASE_SPREAD:
+				display_phase_spread();
 				break;
 
 			default:
@@ -1053,6 +1083,68 @@ void display_finetune (void)
 	}
 }
 
+// Phase spread multipliers for display (matches oscillator.c)
+static const int8_t display_phase_spread_mult[NUM_CHANNELS] = {-3, -2, -1, 1, 2, 3};
+
+void display_phase_spread(void)
+{
+	uint8_t i, j;
+	float brightness;
+	float lfo_val;
+	float spread_offset;
+	uint8_t center_led, offset_led;
+	int8_t led_offset;
+
+	// Turn off all outer ring LEDs first
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color(&led_cont.outring[i], ledc_OFF);
+
+	// Display each channel
+	for (i = 0; i < NUM_CHANNELS; i++)
+	{
+		// Inner ring: shows channel color (solid = unlocked, flashing = locked)
+		if (params.osc_param_lock[i] && lock_flash_state())
+			brightness = 0.0f;
+		else
+			brightness = F_MAX_BRIGHTNESS;
+
+		j = rotate_origin(i, NUM_CHANNELS);
+		set_rgb_color_by_array(&led_cont.inring[j], CH_COLOR_MAP[i], brightness);
+
+		// Get current LFO value for this channel (same calculation as in oscillator.c)
+		lfo_val = compute_phase_mod_lfo(wt_osc.phase_mod_lfo_pos[i], params.phase_mod_lfo_shape[i]);
+
+		// Outer ring: animate based on LFO and spread amount
+		// Each channel has 3 LEDs: j*3, j*3+1, j*3+2
+		center_led = j * 3 + 1;
+
+		if (params.phase_spread_amt[i] > 0.0f) {
+			// Calculate the visual offset based on LFO and spread
+			spread_offset = lfo_val * display_phase_spread_mult[i];
+			
+			// Determine which LED to light based on spread direction
+			if (spread_offset < -0.5f) {
+				led_offset = -1;  // Left LED
+			} else if (spread_offset > 0.5f) {
+				led_offset = 1;   // Right LED
+			} else {
+				led_offset = 0;   // Center LED
+			}
+
+			offset_led = (center_led + led_offset + NUM_LED_OUTRING) % NUM_LED_OUTRING;
+
+			// Aqua color for phase spread, brightness based on spread amount
+			brightness = _CLAMP_F(params.phase_spread_amt[i] / MAX_PHASE_SPREAD, 0.2f, 1.0f);
+			set_rgb_color(&led_cont.outring[offset_led], ledc_AQUA);
+			led_cont.outring[offset_led].brightness = brightness;
+		} else {
+			// No spread - show center LED dimly
+			set_rgb_color(&led_cont.outring[center_led], ledc_WHITE);
+			led_cont.outring[center_led].brightness = 0.2f;
+		}
+	}
+}
+
 void display_fx(void)
 {
 	uint8_t slot_i, led;
@@ -1303,6 +1395,9 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SELBUS)
 		tick_down = 1;
 
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_PHASE_SPREAD && !rotary_pressed(rotm_TRANSPOSE))
+		tick_down = 1;
+
 	if (!tick_down)
 		return;
 
@@ -1386,6 +1481,11 @@ void start_ongoing_display_sphere_sel(void){
 void start_ongoing_display_selbus(void) {
 	led_cont.ongoing_display = ONGOING_DISPLAY_SELBUS;
 	led_cont.ongoing_timeout = PRESET_TIMER_LIMIT;
+}
+
+void start_ongoing_display_phase_spread(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_PHASE_SPREAD;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 
 void stop_all_displays(void){

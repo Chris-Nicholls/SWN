@@ -67,6 +67,7 @@
 #include "drivers/flashram_spidma.h"
 #include "wavetable_play_export.h"
 #include "preset_manager_selbus.h"
+#include "eq.h"
 
 extern o_wt_osc wt_osc;
 extern enum UI_Modes ui_mode;
@@ -339,6 +340,10 @@ void init_param_object(o_params *t_params){
 	// Resonator envelope defaults
 	t_params->resonator_attack_freq = 500.0f;  // Fast attack
 	t_params->resonator_decay_freq = 8.0f;     // Slow decay
+
+	// EQ defaults (flat)
+	for (chan = 0; chan < 6; chan++)
+		t_params->eq_slider_values[chan] = 2048;  // 50% = flat
 }
 
 void init_calc_params(void)
@@ -732,6 +737,15 @@ void read_level_and_pan(uint8_t chan)
 	if (slider_motion > 20)
 	{
 		last_slider_val[chan] = analog[A_SLIDER + chan].lpf_val;
+		
+		// Fine+slider: update EQ for this band (pick-up style)
+		if (switch_pressed(FINE_BUTTON))
+		{
+			params.eq_slider_values[chan] = (uint16_t)slider_val;
+			eq_update_from_sliders(params.eq_slider_values);
+			return;  // Don't process as level
+		}
+		
 		if (button_pressed(chan))
 		{
 			calc_params.already_handled_button[chan] = 1;
@@ -799,6 +813,7 @@ float read_vca_cv(uint8_t chan)
 	// Square to suppress weak coherences, amplify strong ones
 	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY)) {
 		float coh = wt_osc.coherence_env[chan];
+		coh = _CLAMP_F(coh-0.005, 0.0f, 2.0f);
 		return coh * RESONATOR_GAIN;
 	}
 
@@ -1285,7 +1300,13 @@ void read_freq(void){
 		// ----------------------------------------------
 
 		else if(tmp3){
-			if (switch_pressed(FINE_BUTTON)) { update_finetune (tmp3); }
+			// Press LFO Speed (in gain mode) + Turn Spread (TRANSPOSE) = adjust phase spread pregain
+			if (rotary_pressed(rotm_LFOSPEED)) {
+				params.phase_spread_pregain += tmp3 * PHASE_SPREAD_PREGAIN_SCALING;
+				params.phase_spread_pregain = _CLAMP_F(params.phase_spread_pregain, MIN_PHASE_SPREAD_PREGAIN, MAX_PHASE_SPREAD_PREGAIN);
+				start_ongoing_display_phase_spread();
+			}
+			else if (switch_pressed(FINE_BUTTON)) { update_finetune (tmp3); }
 			else							{ update_transpose(tmp3); }
 		}
 
@@ -1515,6 +1536,17 @@ void resync_audio_osc(uint8_t channels)
 
 
 
+// Fine-tune spread multipliers per channel (cents per encoder step)
+// Customize these values to change the spread pattern
+static const int8_t spread_finetune_mult[NUM_CHANNELS] = {
+	-3,  // Channel A
+	-2,  // Channel B
+	-1,  // Channel C
+	 1,  // Channel D
+	 2,  // Channel E
+	 3   // Channel F
+};
+
 void spread_finetune(int16_t tmp)
 {
 	int8_t i;
@@ -1524,10 +1556,7 @@ void spread_finetune(int16_t tmp)
 	{
 		if (!params.osc_param_lock[i])
 		{
-			if (i<=2)
-				params.finetune[i] += (i - 3) * tmp;
-			else
-				params.finetune[i] += (i - 2) * tmp;
+			params.finetune[i] += spread_finetune_mult[i] * tmp;
 
 			if (params.finetune[i]==0)
 				do_resync_osc += (1<<i);
