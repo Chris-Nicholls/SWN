@@ -67,9 +67,11 @@ ARCH_CFLAGS = 	-DARM_MATH_CM7 \
 				-DUSE_HAL_DRIVER \
 				-DSTM32F765xx
 
-OPTFLAG = -O3
+# Default optimization for release (Speed)
+OPTFLAG ?= -O3 -flto
+DEBUG_FLAG ?= -g3
 
-CFLAGS = -g3 -Wall \
+CFLAGS = $(DEBUG_FLAG) -Wall \
 	$(ARCH_CFLAGS) $(MCU) \
 	-I. $(INCLUDES) \
 	-fno-common \
@@ -77,6 +79,8 @@ CFLAGS = -g3 -Wall \
 	# -specs=nano.specs \
 
 DEPFLAGS = -MMD -MP -MF $(BUILDDIR)/$(basename $<).d
+
+
 
 CXXFLAGS=$(CFLAGS) \
 	-std=c++17 \
@@ -93,6 +97,7 @@ LDSCRIPT = $(DEVICE)/$(LOADFILE)
 
 LFLAGS =  -Wl,-Map,build/main.map,--cref \
 	-Wl,--gc-sections \
+	-flto \
 	$(MCU) \
 	-T $(LDSCRIPT)
 	# -specs=nano.specs -T $(LDSCRIPT) \
@@ -248,7 +253,7 @@ endif
 wav: fsk-wav
 
 fsk-wav: $(BIN)
-	export PYTHONPATH='.' && python stm_audio_bootloader/fsk/encoder.py \
+	export PYTHONPATH='.' && python3 stm_audio_bootloader/fsk/encoder.py \
 		-s 44100 -b 16 -n 8 -z 4 -p 256 -g 16384 -k 1800 \
 		$(BIN)
 
@@ -257,3 +262,7 @@ release: wav
 	mv "$(BUILDDIR)/$(BINARYNAME).wav" "$(FIRMWARE_RELEASE_DIR)/$(FIRMWARE_RELEASE_NAME)_$$RELEASEVERSION.wav" && \
 	zip -j "$(FIRMWARE_RELEASE_DIR)/$(FIRMWARE_RELEASE_NAME)_$$RELEASEVERSION.zip" "$(FIRMWARE_RELEASE_DIR)/$(FIRMWARE_RELEASE_NAME)_$$RELEASEVERSION.wav"
 
+.PHONY: dev
+dev: OPTFLAG = -Os -flto
+dev: DEBUG_FLAG = -g1
+dev: all
