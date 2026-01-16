@@ -37,7 +37,7 @@
 
 #define F_MIN_FREQ			(0.1)
 #define F_BASE_FREQ			16.35
-#define F_MAX_FREQ			(F_SAMPLERATE*3 - 36000.0) //96300.0
+#define F_MAX_FREQ			(F_SAMPLERATE / 2.0 - 100.0) // Nyquist limit with margin = 23900Hz @ 48kHz
 #define INIT_OCT			3	// C4 ~261Hz
 #define TTONE_OCT			2	// C2 ~87Hz
 #define TTONE_TRANSPOSE 	5	// F2 if oct at TTONE_OCT

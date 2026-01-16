@@ -55,8 +55,8 @@
 #define DEBUG_2_3_ENABLED
 
 
-#define SAMPLERATE 			44100
-#define F_SAMPLERATE 		44100.0
+#define SAMPLERATE 			48000
+#define F_SAMPLERATE 		48000.0
 
 #define NUM_INRING_LEDS		6
 #define NUM_OUTRING_LEDS	18
