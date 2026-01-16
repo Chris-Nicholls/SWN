@@ -87,15 +87,6 @@
 #define RANDOM_UPDATE_TIME				7
 
 #define F_SCALING_MAX_VCACV_GAIN		1.0
-
-// Phase spread modulation scaling
-#define PHASE_SPREAD_SCALING			4.0f			// Scaling per encoder click
-#define MAX_PHASE_SPREAD				512.0f			// Maximum phase offset (samples)
-#define PHASE_MOD_LFO_SPEED_MULT		1.15f			// Speed multiplier per encoder click (~15% faster/slower)
-#define MIN_PHASE_MOD_LFO_SPEED			0.1f			// Minimum speed multiplier
-#define MAX_PHASE_MOD_LFO_SPEED			10.0f			// Maximum speed multiplier
-#define DEFAULT_PHASE_MOD_LFO_SPEED		1.0f			// Default ~0.5Hz
-
 #define MAX_FINETUNE_WRAP 				(2160)
 #define MIN_FINETUNE_WRAP 				(-2160)
 
@@ -136,14 +127,15 @@ enum MuteNoteKeyStates {
 
 #define FW_V1_PADDING (NUM_CHANNELS*32 - MAX_TOTAL_SPHERES/8) //padding for future features in o_params
 #define FW_V2_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS)
-#define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS*2 + NUM_CHANNELS + 2 + sizeof(float) + sizeof(float)*2)  // per-channel phase spread params + pregain + resonator envelope + padding
+#define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float) + sizeof(float)*2)  // pregain + resonator envelope
+#define FW_UNISON_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(uint8_t)*NUM_CHANNELS)
 #define FW_V2X2_EQ_PARAMS_SIZE (sizeof(uint16_t) * 6)  // 6 EQ slider values
 
-// Phase spread pregain constants
-#define DEFAULT_PHASE_SPREAD_PREGAIN 1.0f
-#define MIN_PHASE_SPREAD_PREGAIN 0.1f
-#define MAX_PHASE_SPREAD_PREGAIN 4.0f
-#define PHASE_SPREAD_PREGAIN_SCALING 0.05f
+// Soft clip pregain constants
+#define DEFAULT_SOFT_CLIP_PREGAIN 0.05f
+#define MIN_SOFT_CLIP_PREGAIN 0.05f
+#define MAX_SOFT_CLIP_PREGAIN 2.0f
+#define SOFT_CLIP_PREGAIN_SCALING 0.05f
 
 enum PanStates {
 	pan_INACTIVE,
@@ -231,21 +223,20 @@ typedef struct o_params{
 	//v2.0
 	float		pan						[NUM_CHANNELS];
 
-	//v2.x: Phase modulation
-	float		phase_spread_amt		[NUM_CHANNELS];	// Depth of phase spread modulation per channel
-	float		phase_mod_lfo_speed		[NUM_CHANNELS];	// LFO speed multiplier per channel (1.0 = ~0.5Hz)
-	uint8_t		phase_mod_lfo_shape		[NUM_CHANNELS];	// LFO shape index per channel (0-24)
-	uint8_t		_phase_mod_padding[2];				// Align to 4 bytes
-	float		phase_spread_pregain;				// Pre-clipping gain for phase spread output (global)
-
 	// Resonator envelope
+	float		soft_clip_pregain;				// Pre-clipping gain for output soft clipper
 	float		resonator_attack_freq;				// Attack frequency in Hz (higher = faster)
 	float		resonator_decay_freq;				// Decay frequency in Hz (higher = faster)
+
+	// Unison mode (v2.x3)
+	float		unison_spread_amt		[NUM_CHANNELS];		// Detune amount (0.0 to 1.0)
+	uint8_t		unison_voice_count		[NUM_CHANNELS];		// Number of active voices (1 to MAX_UNISON_VOICES)
+
 
 	// EQ settings (v2.x2)
 	uint16_t	eq_slider_values[6];				// EQ slider positions (2048 = flat)
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE];
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE];
 } o_params;
 
 

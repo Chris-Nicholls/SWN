@@ -197,21 +197,10 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 		if (version != preset_signature_vLatest[2])
 			update_preset_version(version, t_params, t_lfos);
 
-		// Safety validation for version 'C' presets that may have been saved with corrupted values
-		for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
-			if (isnan(t_params->phase_spread_amt[i]) || isinf(t_params->phase_spread_amt[i]) ||
-				t_params->phase_spread_amt[i] < 0.0f || t_params->phase_spread_amt[i] > MAX_PHASE_SPREAD) {
-				t_params->phase_spread_amt[i] = 1.0f;
-			}
-			if (isnan(t_params->phase_mod_lfo_speed[i]) || isinf(t_params->phase_mod_lfo_speed[i]) ||
-				t_params->phase_mod_lfo_speed[i] < MIN_PHASE_MOD_LFO_SPEED || t_params->phase_mod_lfo_speed[i] > MAX_PHASE_MOD_LFO_SPEED) {
-				t_params->phase_mod_lfo_speed[i] = DEFAULT_PHASE_MOD_LFO_SPEED;
-			}
-			// phase_mod_lfo_shape is uint8_t and gets wrapped by % in compute_phase_mod_lfo, so always valid
-		}
-		if (isnan(t_params->phase_spread_pregain) || isinf(t_params->phase_spread_pregain) ||
-			t_params->phase_spread_pregain < MIN_PHASE_SPREAD_PREGAIN || t_params->phase_spread_pregain > MAX_PHASE_SPREAD_PREGAIN) {
-			t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
+
+		if (isnan(t_params->soft_clip_pregain) || isinf(t_params->soft_clip_pregain) ||
+			t_params->soft_clip_pregain < MIN_SOFT_CLIP_PREGAIN || t_params->soft_clip_pregain > MAX_SOFT_CLIP_PREGAIN) {
+			t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 		}
 
 		fix_wtsel_wtbank_offset();
@@ -246,15 +235,7 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 		for (uint8_t i=0; i<NUM_CHANNELS; i++)
 			t_params->pan[i] = default_pan(i);
 	}
-	// Any version before 'C': Initialize phase modulation params (these fields didn't exist)
-	if (version < preset_signature_v2_x[2]) {
-		for (uint8_t i=0; i<NUM_CHANNELS; i++) {
-			t_params->phase_spread_amt[i] = 1.0f;
-			t_params->phase_mod_lfo_speed[i] = DEFAULT_PHASE_MOD_LFO_SPEED;
-			t_params->phase_mod_lfo_shape[i] = PHASE_MOD_LFO_SINE;
-		}
-		t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
-	}
+
 	// Any version before 'D': Initialize resonator envelope params
 	if (version < preset_signature_v2_x2[2]) {
 		t_params->resonator_attack_freq = 500.0f;

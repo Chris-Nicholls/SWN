@@ -51,12 +51,6 @@
 #include "UI_conditioning.h"
 #include "hardware_controls.h"
 
-// Per-channel LFO speed multipliers for organic drift (channels 0-5)
-// Slightly different rates create evolving phase relationships
-const float phase_spread_speed_mult[NUM_CHANNELS] = {
-    0.95f, 1.0f, 1.95f, 2.1f, 3.57f, 3.84f 
-};
-
 extern enum UI_Modes 	ui_mode;
 extern o_rotary 		rotary[NUM_ROTARIES];
 extern o_params 		params;
@@ -76,7 +70,8 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	int16_t 		i_sample;
 	uint8_t 		chan;
 	float 			smpl;
-	float			xfade0, xfade1;
+	float 			fade_gain_current, fade_gain_prev;
+
 	int32_t			audio_in_sample, outL, outR;
 	float			output_buffer_evens[MONO_BUFSZ] = {0.f};
 	float			output_buffer_odds[MONO_BUFSZ] = {0.f};
@@ -92,9 +87,6 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	float 			audio_in_sum;
 	static uint8_t	audio_gate_ctr=0;
 
-	// Phase modulation variables
-	float			phase_mod_lfo_val;
-	float			phase_offset;
 	float			read_pos;
 
 	// Resonator mode variables
@@ -123,16 +115,6 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
-		// Advance phase modulation LFO per channel (once per buffer for efficiency)
-		wt_osc.phase_mod_lfo_pos[chan] += wt_osc.phase_mod_lfo_inc[chan] * MONO_BUFSZ;
-		while (wt_osc.phase_mod_lfo_pos[chan] >= 1.0f) wt_osc.phase_mod_lfo_pos[chan] -= 1.0f;
-
-		// Compute LFO value from position and shape (-1 to +1)
-		phase_mod_lfo_val = compute_phase_mod_lfo(wt_osc.phase_mod_lfo_pos[chan], params.phase_mod_lfo_shape[chan]);
-
-		// Calculate phase offset for this channel (Cruinn-style phase spread)
-		phase_offset = params.phase_spread_amt[chan] * phase_mod_lfo_val;
-
 		read_level_and_pan(chan);
 		level_inc = (calc_params.level[chan] - prev_level[chan]) / MONO_BUFSZ;
 		interpolated_level = prev_level[chan];
@@ -144,32 +126,79 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 
 		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
 		{
-			wt_osc.wt_head_pos[chan] += wt_osc.wt_head_pos_inc[chan];
-			while (wt_osc.wt_head_pos[chan] >= (float)WT_TABLELEN)
-				wt_osc.wt_head_pos[chan] -= (float)(WT_TABLELEN);
-
-			// Apply phase offset to read position
-			read_pos = wt_osc.wt_head_pos[chan] + phase_offset;
-			while (read_pos >= (float)WT_TABLELEN) read_pos -= (float)WT_TABLELEN;
-			while (read_pos < 0.0f) read_pos += (float)WT_TABLELEN;
-
-			wt_osc.rh0[chan] 	= (uint16_t)(read_pos);
-			wt_osc.rh1[chan] 	= (wt_osc.rh0[chan] + 1) & (WT_TABLELEN-1);
-			wt_osc.rhd[chan] 	= read_pos - (float)(wt_osc.rh0[chan]);
-			wt_osc.rhd_inv[chan] = 1.0f - wt_osc.rhd[chan];
-
-			xfade0 = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan]] * wt_osc.rhd_inv[chan]) + (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan]] * wt_osc.rhd[chan]);
-
-			if (wt_osc.wt_xfade[chan] > 0)
-			{
-				wt_osc.wt_xfade[chan] -= XFADE_INC;
-				xfade1 = wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan]] * wt_osc.rhd_inv[chan] + wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan]] * wt_osc.rhd[chan];
-
-				// Raw oscillator output (before level)
-				smpl = (xfade0 * (1.0f - wt_osc.wt_xfade[chan])) + (xfade1 * wt_osc.wt_xfade[chan]);
-			} else {
-				smpl = xfade0;
+			// ---------------------------------------------------------
+			// UNISON VOICE LOOP
+			// ---------------------------------------------------------
+			
+			smpl = 0.0f;
+			uint8_t voice_count = params.unison_voice_count[chan];
+			float voice_scale = 1.0f;
+			
+			// Simple gain compensation: 1/sqrt(N) to maintain roughly constant power
+			if (voice_count > 1) {
+				voice_scale = 1.0f / sqrtf((float)voice_count);
+				// boost slightly as sqrt can result in perceived volume drop
+				voice_scale *= 1.2f; 
 			}
+
+
+			// Crossfade logic (update once per sample)
+			if (wt_osc.wt_xfade[chan] > 0.0f) {
+				wt_osc.wt_xfade[chan] -= XFADE_INC;
+				if (wt_osc.wt_xfade[chan] < 0.0f) wt_osc.wt_xfade[chan] = 0.0f;
+				
+				fade_gain_prev = wt_osc.wt_xfade[chan];
+				fade_gain_current = 1.0f - fade_gain_prev;
+			} else {
+				fade_gain_prev = 0.0f;
+				// Calculate frequencies for new detuned voices (spread around base_inc)
+				// Use non-linear spacing for richer sound
+				// Factor scaling: Increased for wider unison
+				// Original: {0, -0.0012, 0.0012, -0.0028, 0.0028, -0.005, 0.005, -0.008};
+				static const float osc_detune_factors[8] = {0, -0.0024f, 0.0024f, -0.0056f, 0.0056f, -0.01f, 0.01f, -0.016f};
+
+				float base_inc = wt_osc.wt_head_pos_inc[chan][0]; // Assuming voice 0 holds the base increment
+				for (uint8_t v = 0; v < voice_count; v++) {
+					float detune_factor = 1.0f + (osc_detune_factors[v] * params.unison_spread_amt[chan] * 4.0f); // 4x scaling
+					wt_osc.wt_head_pos_inc[chan][v] = base_inc * detune_factor;
+				}
+			}
+
+			for (uint8_t v = 0; v < voice_count; v++) 
+			{
+				float voice_smpl = 0.0f;
+				
+				// Increment read head
+				wt_osc.wt_head_pos[chan][v] += wt_osc.wt_head_pos_inc[chan][v];
+				if (wt_osc.wt_head_pos[chan][v] >= WT_TABLELEN) wt_osc.wt_head_pos[chan][v] -= WT_TABLELEN;
+
+				// Calculate interpolation indices
+				read_pos = wt_osc.wt_head_pos[chan][v];
+				
+				wt_osc.rh0[chan][v] = (uint16_t)read_pos;
+				wt_osc.rh1[chan][v] = (wt_osc.rh0[chan][v] + 1) & (WT_TABLELEN - 1);
+				wt_osc.rhd[chan][v] = read_pos - (float)wt_osc.rh0[chan][v];
+				wt_osc.rhd_inv[chan][v] = 1.0f - wt_osc.rhd[chan][v];
+
+				// Read from wavetable (Crossfade between buffers)
+				float smpl_buff1 = wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan][v]] * wt_osc.rhd_inv[chan][v] + 
+								 wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan][v]] * wt_osc.rhd[chan][v];
+
+				if (fade_gain_prev > 0.0f) {
+					float smpl_buff2 = wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan][v]] * wt_osc.rhd_inv[chan][v] + 
+									 wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan][v]] * wt_osc.rhd[chan][v];
+
+					voice_smpl = smpl_buff1 * fade_gain_current + smpl_buff2 * fade_gain_prev;
+				} else {
+					voice_smpl = smpl_buff1;
+				}
+				
+				smpl += voice_smpl;
+			}
+			
+			smpl *= voice_scale;
+
+			// ---------------------------------------------------------
 
 			// Resonator mode: quadrature ring-modulation for phase-independent coherence
 			// (VCA is applied in read_vca_cv() based on coherence_env)
@@ -229,11 +258,13 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	// Apply soft clipping to mixed output buffers
 	// Formula: out = tanh(x * pregain) / pregain
 	if (oscout_status) {
-		float pregain = params.phase_spread_pregain;
+		float pregain = params.soft_clip_pregain;
 		if (pregain < 0.05f) pregain = 0.05f; // Safety against div/0
 
-		float inv_pregain = 1.0f / pregain;
-
+		// Non-linear compensation: 1.0 / sqrt(pregain)
+		// Maintains more volume when cranking saturation
+		float inv_pregain = 1.0f / sqrtf(pregain);
+ 
 		// 8388608 = 2^23 = max value for signed 24-bit audio
 		float scaler = 8388608.0f * 8.0f;
 		float inv_scaler = 1.0f / scaler;
@@ -334,20 +365,25 @@ void start_osc_interp_updates(void){
 }
 
 void init_wt_osc(void) {
-	uint8_t  i;
+	uint8_t  i, j;
 
-	for (i=0;i<NUM_CHANNELS;i++)
-	{
-		wt_osc.wt_head_pos[i] 					= 0;
+	for (i=0;i<NUM_CHANNELS;i++){
 		wt_osc.buffer_sel[i] 					= 0;
 		wt_osc.wt_interp_request[i]				= WT_INTERP_REQ_FORCE;
 
-		// Phase modulation LFO runtime state - per channel
-		// Spread initial phases so channels don't all hit zero at the same time
-		wt_osc.phase_mod_lfo_pos[i] = (float)i / NUM_CHANNELS;
-		wt_osc.phase_mod_lfo_inc[i] = (0.5f * phase_spread_speed_mult[i] / F_SAMPLERATE);  // ~0.5Hz default with per-channel variation
+		// Init standard playback state
+	
+		for (j=0; j<MAX_UNISON_VOICES; j++){
+			wt_osc.wt_head_pos[i][j] 		= 0;
+			wt_osc.wt_head_pos_inc[i][j]	= 3.0; //meaningless default
+			wt_osc.rh0[i][j]				= 0;
+			wt_osc.rh1[i][j]				= 0;
+			wt_osc.rhd[i][j]				= 0;
+			wt_osc.rhd_inv[i][j]			= 0;
+			wt_osc.rhd[i][j]				= 0;
+			wt_osc.rhd_inv[i][j]			= 0;
+		}
 
-		// Resonator mode coherence state (quadrature)
 		wt_osc.coherence_dc_I[i] = 0.0f;
 		wt_osc.coherence_dc_Q[i] = 0.0f;
 		wt_osc.coherence_env[i] = 0.0f;

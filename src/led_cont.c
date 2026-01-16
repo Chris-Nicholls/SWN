@@ -723,10 +723,10 @@ void calculate_led_ring(void){
 	}
 
 	else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode)) {
-		if (led_cont.ongoing_display == ONGOING_DISPLAY_FX) {
-			display_fx();
-		}
-		else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_SAVE) {
+		if (led_cont.ongoing_display == ONGOING_DISPLAY_SOFT_CLIP) {
+		display_soft_clip();
+		return;
+	}	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_SAVE) {
 			display_sphere_save();
 		}
 		else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_PLAYEXPORT) {
@@ -763,12 +763,14 @@ void calculate_led_ring(void){
 				display_preset();
 				break;
 
+
+
 			case ONGOING_DISPLAY_SPHERE_SEL:
 				display_sphere_sel();
 				break;
 
-			case ONGOING_DISPLAY_PHASE_SPREAD:
-				display_phase_spread();
+			case ONGOING_DISPLAY_UNISON:
+				display_unison();
 				break;
 
 			default:
@@ -1084,64 +1086,95 @@ void display_finetune (void)
 }
 
 // Phase spread multipliers for display (matches oscillator.c)
-static const int8_t display_phase_spread_mult[NUM_CHANNELS] = {-3, -2, -1, 1, 2, 3};
 
-void display_phase_spread(void)
+
+void display_unison(void)
 {
 	uint8_t i, j;
-	float brightness;
-	float lfo_val;
-	float spread_offset;
-	uint8_t center_led, offset_led;
-	int8_t led_offset;
 
-	// Turn off all outer ring LEDs first
-	for (i = 0; i < NUM_LED_OUTRING; i++)
-		set_rgb_color(&led_cont.outring[i], ledc_OFF);
+	uint8_t num_voices_lit;
+	uint8_t voices;
+	float spread;
 
-	// Display each channel
-	for (i = 0; i < NUM_CHANNELS; i++)
-	{
-		// Inner ring: shows channel color (solid = unlocked, flashing = locked)
-		if (params.osc_param_lock[i] && lock_flash_state())
-			brightness = 0.0f;
-		else
-			brightness = F_MAX_BRIGHTNESS;
+	// Turn off all rings first
+	turn_outring_off();
+	for (i = 0; i < NUM_LED_INRING; i++) set_rgb_color(&led_cont.inring[i], ledc_OFF);
 
-		j = rotate_origin(i, NUM_CHANNELS);
-		set_rgb_color_by_array(&led_cont.inring[j], CH_COLOR_MAP[i], brightness);
-
-		// Get current LFO value for this channel (same calculation as in oscillator.c)
-		lfo_val = compute_phase_mod_lfo(wt_osc.phase_mod_lfo_pos[i], params.phase_mod_lfo_shape[i]);
-
-		// Outer ring: animate based on LFO and spread amount
-		// Each channel has 3 LEDs: j*3, j*3+1, j*3+2
-		center_led = j * 3 + 1;
-
-		if (params.phase_spread_amt[i] > 0.0f) {
-			// Calculate the visual offset based on LFO and spread
-			spread_offset = lfo_val * display_phase_spread_mult[i];
-			
-			// Determine which LED to light based on spread direction
-			if (spread_offset < -0.5f) {
-				led_offset = -1;  // Left LED
-			} else if (spread_offset > 0.5f) {
-				led_offset = 1;   // Right LED
-			} else {
-				led_offset = 0;   // Center LED
+	// Determine which channel to display
+	// If Global (no buttons pressed), display Channel 0 (or blend? usually we just pick one or show all)
+	// If Individual, display the pressed channel
+	int8_t active_chan = -1;
+	
+	if (macro_states.all_af_buttons_released) {
+		active_chan = 0; // Display channel 0 parameters as proxy for global, or iterate?
+						 // Let's display the max values found across channels, or just chan 0
+	} else {
+		for (i = 0; i < NUM_CHANNELS; i++) {
+			if (button_pressed(i)) {
+				active_chan = i;
+				break;
 			}
-
-			offset_led = (center_led + led_offset + NUM_LED_OUTRING) % NUM_LED_OUTRING;
-
-			// Aqua color for phase spread, brightness based on spread amount
-			brightness = _CLAMP_F(params.phase_spread_amt[i] / MAX_PHASE_SPREAD, 0.2f, 1.0f);
-			set_rgb_color(&led_cont.outring[offset_led], ledc_AQUA);
-			led_cont.outring[offset_led].brightness = brightness;
-		} else {
-			// No spread - show center LED dimly
-			set_rgb_color(&led_cont.outring[center_led], ledc_WHITE);
-			led_cont.outring[center_led].brightness = 0.2f;
 		}
+	}
+	if (active_chan == -1) active_chan = 0;
+
+	// INNER RING: Voice Count (1-8)
+	// 6 LEDs available.
+	voices = params.unison_voice_count[active_chan];
+	num_voices_lit = (voices > NUM_LED_INRING) ? NUM_LED_INRING : voices;
+
+	for (i = 0; i < num_voices_lit; i++) {
+		// Fill up
+		// Change color for 7th and 8th voice equivalent
+		enum colorCodes c = ledc_GOLD;
+		if (i == (NUM_LED_INRING-1) && voices > NUM_LED_INRING) {
+			if (voices == 7) c = ledc_CORAL;
+			if (voices == 8) c = ledc_RED;
+		}
+		
+		j = rotate_origin(i, NUM_LED_INRING);
+		set_rgb_color(&led_cont.inring[j], c);
+		
+		// If editing global, pulse slightly?
+		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
+	}
+
+	// OUTER RING: Spread Amount (0.0 - 1.0)
+	// 18 LEDs. Match to 0.0 - 1.0 range.
+	spread = params.unison_spread_amt[active_chan];
+	uint8_t spread_leds = (uint8_t)(spread * NUM_LED_OUTRING);
+	if (spread > 0.0f && spread_leds == 0) spread_leds = 1; // Show at least one if > 0
+
+	for (i = 0; i < spread_leds; i++) {
+		j = rotate_origin(i, NUM_LED_OUTRING);
+		set_rgb_color(&led_cont.outring[j], ledc_CORAL);
+		led_cont.outring[j].brightness = 0.5f;
+	}
+}
+
+void display_soft_clip(void) {
+	uint32_t i;
+	// Turn off all rings first
+	turn_outring_off();
+	// for (i = 0; i < NUM_LED_INRING; i++) set_rgb_color(&led_cont.inring[i], ledc_OFF); // Keep inner ring? or turn off? Logic says turn off
+
+	// Display soft clip amount on Outer Ring
+	// Range: 0.1 to 4.0. Default 1.0.
+	// Map 0.1..4.0 to 0..NUM_LED_OUTRING LEDs
+	float val = params.soft_clip_pregain;
+	float norm_val = (val - MIN_SOFT_CLIP_PREGAIN) / (MAX_SOFT_CLIP_PREGAIN - MIN_SOFT_CLIP_PREGAIN);
+	uint8_t num_leds = (uint8_t)(norm_val * NUM_LED_OUTRING);
+	if (num_leds == 0) num_leds = 1;
+
+	// Color gradient: Green (low gain) -> Orange (unity) -> Red (high gain/clip)
+	enum colorCodes c;
+	if (val < 0.9f) c = ledc_GREEN;
+	else if (val < 1.2f) c = ledc_CORAL; // Around unity
+	else c = ledc_RED; 
+
+	for (i=0; i<num_leds; i++) {
+        uint8_t led_idx = (i + 14) % NUM_LED_OUTRING; 
+		set_rgb_color(&led_cont.outring[led_idx], c); // fixed index variable
 	}
 }
 
@@ -1377,6 +1410,12 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_LFO_MODE)
 		tick_down = 1;
 
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_UNISON && !rotary_pressed(rotm_TRANSPOSE) && !rotary_pressed(rotm_WAVETABLE))
+		tick_down = 1;
+
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SOFT_CLIP && !rotary_pressed(rotm_WAVETABLE))
+		tick_down = 1;
+
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_SEL)
 		tick_down = 1;
 
@@ -1395,7 +1434,7 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SELBUS)
 		tick_down = 1;
 
-	else if (led_cont.ongoing_display == ONGOING_DISPLAY_PHASE_SPREAD && !rotary_pressed(rotm_TRANSPOSE))
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_UNISON && !rotary_pressed(rotm_TRANSPOSE))
 		tick_down = 1;
 
 	if (!tick_down)
@@ -1473,6 +1512,11 @@ void start_ongoing_display_globright(void){
 	led_cont.ongoing_timeout = GLOBRIGHT_TIMER_LIMIT;
 }
 
+void start_ongoing_display_soft_clip(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_SOFT_CLIP;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
+}
+
 void start_ongoing_display_sphere_sel(void){
 	led_cont.ongoing_display = ONGOING_DISPLAY_SPHERE_SEL;
 	led_cont.ongoing_timeout = SPHERE_SEL_TIMER_LIMIT;
@@ -1483,8 +1527,8 @@ void start_ongoing_display_selbus(void) {
 	led_cont.ongoing_timeout = PRESET_TIMER_LIMIT;
 }
 
-void start_ongoing_display_phase_spread(void) {
-	led_cont.ongoing_display = ONGOING_DISPLAY_PHASE_SPREAD;
+void start_ongoing_display_unison(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_UNISON;
 	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 

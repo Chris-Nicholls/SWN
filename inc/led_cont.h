@@ -53,6 +53,8 @@ enum ongoingDisplays{
 	ONGOING_DISPLAY_SPHERE_SEL,
 	ONGOING_DISPLAY_SPHERE_PLAYEXPORT,
 	ONGOING_DISPLAY_SELBUS,
+	ONGOING_DISPLAY_UNISON,
+	ONGOING_DISPLAY_SOFT_CLIP,
 
 	NUM_ONGOING_DISPLAYS
 };
@@ -116,6 +118,8 @@ void		display_sphere_sel(void);
 void		display_fx(void);
 void 		display_firmware_version(void);
 void 		display_sphere_play_export(void);
+void		display_soft_clip(void);
+void		display_unison(void);
 
 // ------- display timers ------
 void 		update_ongoing_display_timers(void);
@@ -134,6 +138,8 @@ void 		start_ongoing_display_fx(void);
 void		start_ongoing_display_sphere_sel(void);
 void 		start_ongoing_display_sphere_play_export(void);
 void 		start_ongoing_display_selbus(void);
+void		start_ongoing_display_soft_clip(void);
+void 		start_ongoing_display_unison(void);
 void 		stop_all_displays(void);
 
 

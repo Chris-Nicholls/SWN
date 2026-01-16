@@ -34,30 +34,9 @@
 #include "sphere.h"
 #include "globals.h"
 
-// Phase modulation LFO shapes
-#define PHASE_MOD_LFO_NUM_SHAPES 2
-enum PhaseModLfoShapes {
-	PHASE_MOD_LFO_SINE = 0,
-	PHASE_MOD_LFO_TRIANGLE = 1
-};
-
 #define RESONATOR_GAIN			32.0f								// Gain applied to coherence VCA
 #define RESONATOR_LED_SCALE		32.0f								// Scale coherence to 0-1 for LED display
-
-// Compute phase modulation LFO value from position (0-1) and shape
-// Returns value in range -1 to +1
-static inline float compute_phase_mod_lfo(float pos, uint8_t shape) {
-	shape = shape % PHASE_MOD_LFO_NUM_SHAPES;  // Wrap to valid shapes
-	switch (shape) {
-		case PHASE_MOD_LFO_TRIANGLE:
-			// Triangle: rises 0->1 in first half, falls 1->0 in second half, then shift to -1 to +1
-			return (pos < 0.5f) ? (4.0f * pos - 1.0f) : (3.0f - 4.0f * pos);
-		case PHASE_MOD_LFO_SINE:
-		default:
-			return sinf(pos * 2.0f * 3.14159265f);
-	}
-}
-
+#define MAX_UNISON_VOICES		6									// Maximum number of unison voices per channel
 
 enum WtInterpRequests {
 	WT_INTERP_REQ_NONE,
@@ -86,27 +65,28 @@ typedef struct o_wt_osc{
 	float 						m_frac_inv				[3][NUM_CHANNELS]	;
 
 	// WT READING HEAD
-	float 						wt_head_pos 			[NUM_CHANNELS]		;
-	float						wt_head_pos_inc			[NUM_CHANNELS]		;
-	uint16_t 					rh0						[NUM_CHANNELS]		;
-	uint16_t 					rh1						[NUM_CHANNELS]		;
-	float 						rhd						[NUM_CHANNELS]		; 
-	float 						rhd_inv					[NUM_CHANNELS]		;
+	float 						wt_head_pos 			[NUM_CHANNELS][MAX_UNISON_VOICES];
+	float						wt_head_pos_inc			[NUM_CHANNELS][MAX_UNISON_VOICES];
 
-	// Phase modulation LFO runtime state (not saved in presets) - per channel
-	float						phase_mod_lfo_pos	[NUM_CHANNELS];			// Current LFO position (0-1) per channel
-	float						phase_mod_lfo_inc	[NUM_CHANNELS];			// LFO increment per sample per channel
+	// For standard playback (non-interpolated reading)
+	uint16_t 					rh0						[NUM_CHANNELS][MAX_UNISON_VOICES];
+	uint16_t 					rh1						[NUM_CHANNELS][MAX_UNISON_VOICES];
+	float 						rhd						[NUM_CHANNELS][MAX_UNISON_VOICES]; 
+	float 						rhd_inv					[NUM_CHANNELS][MAX_UNISON_VOICES];
+
 
 	// Resonator mode: quadrature coherence detection (pseudo-Hilbert)
 	float						coherence_dc_I		[NUM_CHANNELS];			// In-phase DC component (slow LPF)
 	float						coherence_dc_Q		[NUM_CHANNELS];			// Quadrature DC component (90° shifted)
 	float						coherence_env		[NUM_CHANNELS];			// Envelope of sqrt(I²+Q²)
+
+	// Unison params (cached here for audio thread performance)
+	float						unison_spread_amt	[NUM_CHANNELS];
+	uint8_t						unison_voice_count	[NUM_CHANNELS];
+
 	
 } o_wt_osc;
 
-
-// Per-channel LFO speed multipliers for organic drift
-extern const float phase_spread_speed_mult[NUM_CHANNELS];
 
 void	init_wt_osc(void);
 void 	process_audio_block_codec(int32_t *src, int32_t *dst);

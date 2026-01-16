@@ -329,13 +329,7 @@ void init_param_object(o_params *t_params){
 	for (uint8_t i=0; i<(MAX_TOTAL_SPHERES/8); i++)
 		t_params->enabled_spheres[i]=0xFF;
 
-	// Phase modulation - per channel
-	for (chan=0; chan<NUM_CHANNELS; chan++) {
-		t_params->phase_spread_amt[chan] = 1.0f;
-		t_params->phase_mod_lfo_speed[chan] = DEFAULT_PHASE_MOD_LFO_SPEED;
-		t_params->phase_mod_lfo_shape[chan] = PHASE_MOD_LFO_SINE;  // Sine (0)
-	}
-	t_params->phase_spread_pregain = DEFAULT_PHASE_SPREAD_PREGAIN;
+	t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 
 	// Resonator envelope defaults
 	t_params->resonator_attack_freq = 500.0f;  // Fast attack
@@ -344,6 +338,12 @@ void init_param_object(o_params *t_params){
 	// EQ defaults (flat)
 	for (chan = 0; chan < 6; chan++)
 		t_params->eq_slider_values[chan] = 2048;  // 50% = flat
+
+	// Unison defaults
+	for (chan=0; chan<NUM_CHANNELS; chan++) {
+		t_params->unison_spread_amt[chan] = 0.2f; // Slight detune by default
+		t_params->unison_voice_count[chan] = 1;
+	}
 }
 
 void init_calc_params(void)
@@ -1237,8 +1237,32 @@ void update_pitch(uint8_t chan)
 	update_wt_head_pos_inc(chan);
 }
 
+// Spread factors for 8 voices (centered around 0)
+// Unequally spaced to avoid predictable beating (Prime-ish / fibrous numbers)
+const float osc_detune_factors[8] = {0.0f, 0.11f, -0.13f, 0.27f, -0.31f, 0.47f, -0.53f, 0.79f};
+
 void update_wt_head_pos_inc(uint8_t chan){
-	wt_osc.wt_head_pos_inc[chan] = (calc_params.pitch[chan] * F_WT_TABLELEN) / F_SAMPLERATE ;
+	uint8_t v;
+	float base_pitch, detune_pitch;
+	float spread_amt = params.unison_spread_amt[chan];
+
+	base_pitch = calc_params.pitch[chan];
+
+	for (v = 0; v < MAX_UNISON_VOICES; v++) {
+		if (v < params.unison_voice_count[chan]) {
+			// Apply detuning based on voice index and spread amount
+			// detune_factor scales the offset. 
+			// Example: 1.0 + (spread * factor * scaling)
+			// Using a small scaling factor to keep musical range reasonable (e.g. +/- 50 cents max)
+			float detune_scaler = 0.06f; // approx +/- 1 semitone max spread
+			float ratio = 1.0f + (spread_amt * osc_detune_factors[v] * detune_scaler);
+			
+			detune_pitch = base_pitch * ratio;
+			wt_osc.wt_head_pos_inc[chan][v] = (detune_pitch * F_WT_TABLELEN) / F_SAMPLERATE;
+		} else {
+			wt_osc.wt_head_pos_inc[chan][v] = 0.0f;
+		}
+	}
 }
 
 /*** Move to params_pitch.c ***/
@@ -1288,6 +1312,62 @@ void read_freq(void){
 		tmp3 = pop_encoder_q (pec_TRANSPOSE );
 		tmp4 = pop_encoder_q (sec_OSC_SPREAD);
 
+		// UNISON MODE OVERRIDES
+		// Press Main Knob (Wavetable) + Turn Tuning (pec_TRANSPOSE) -> Unison Detune
+		// Press Main Knob (Wavetable) + Turn Spread (sec_OSC_SPREAD) -> Unison Voice Count
+		if (rotary_pressed(rotm_WAVETABLE)) {
+			if (tmp3) {
+				// Adjust Unison Detune
+				float change = tmp3 * 0.01f; // Sensitivity
+				uint8_t i;
+				
+				if (macro_states.all_af_buttons_released) {
+					// Global: adjust all unlocked channels
+					for (i = 0; i < NUM_CHANNELS; i++) {
+						if (!params.osc_param_lock[i]) {
+							params.unison_spread_amt[i] = _CLAMP_F(params.unison_spread_amt[i] + change, 0.0f, 1.0f);
+						}
+					}
+				} else {
+					// Individual: adjust only pressed channels
+					for (i = 0; i < NUM_CHANNELS; i++) {
+						if (button_pressed(i)) {
+							params.unison_spread_amt[i] = _CLAMP_F(params.unison_spread_amt[i] + change, 0.0f, 1.0f);
+							calc_params.already_handled_button[i] = 1;
+						}
+					}
+				}
+				start_ongoing_display_unison(); 
+				tmp3 = 0; // Consume the event
+			}
+			if (tmp4) {
+				// Adjust Unison Voice Count
+				int8_t change = (tmp4 > 0) ? 1 : -1;
+				uint8_t i;
+
+				if (macro_states.all_af_buttons_released) {
+					// Global: adjust all unlocked channels
+					for (i = 0; i < NUM_CHANNELS; i++) {
+						if (!params.osc_param_lock[i]) {
+							int16_t new_count = (int16_t)params.unison_voice_count[i] + change;
+							params.unison_voice_count[i] = _CLAMP_I16(new_count, 1, MAX_UNISON_VOICES);
+						}
+					}
+				} else {
+					// Individual: adjust only pressed channels
+					for (i = 0; i < NUM_CHANNELS; i++) {
+						if (button_pressed(i)) {
+							int16_t new_count = (int16_t)params.unison_voice_count[i] + change;
+							params.unison_voice_count[i] = _CLAMP_I16(new_count, 1, MAX_UNISON_VOICES);
+							calc_params.already_handled_button[i] = 1;
+						}
+					}
+				}
+				start_ongoing_display_unison();
+				tmp4 = 0; // Consume the event
+			}
+		}
+
 		// ---------------------
 		//	OCT / SCALE
 		// ---------------------
@@ -1300,11 +1380,11 @@ void read_freq(void){
 		// ----------------------------------------------
 
 		else if(tmp3){
-			// Press LFO Speed (in gain mode) + Turn Spread (TRANSPOSE) = adjust phase spread pregain
+			// Press LFO Speed (in gain mode) + Turn Spread (TRANSPOSE) = adjust soft clip pregain
 			if (rotary_pressed(rotm_LFOSPEED)) {
-				params.phase_spread_pregain += tmp3 * PHASE_SPREAD_PREGAIN_SCALING;
-				params.phase_spread_pregain = _CLAMP_F(params.phase_spread_pregain, MIN_PHASE_SPREAD_PREGAIN, MAX_PHASE_SPREAD_PREGAIN);
-				start_ongoing_display_phase_spread();
+				params.soft_clip_pregain += tmp3 * SOFT_CLIP_PREGAIN_SCALING;
+				params.soft_clip_pregain = _CLAMP_F(params.soft_clip_pregain, MIN_SOFT_CLIP_PREGAIN, MAX_SOFT_CLIP_PREGAIN);
+				start_ongoing_display_soft_clip();
 			}
 			else if (switch_pressed(FINE_BUTTON)) { update_finetune (tmp3); }
 			else							{ update_transpose(tmp3); }
@@ -1529,8 +1609,10 @@ void resync_audio_osc(uint8_t channels)
 
 	for (i=0; i<NUM_CHANNELS; i++)
 	{
-		if (channels & (1<<i))
-			wt_osc.wt_head_pos[i] = 0;
+		if (channels & (1<<i)) {
+			uint8_t v;
+			for(v=0;v<MAX_UNISON_VOICES;v++) wt_osc.wt_head_pos[i][v] = 0;
+		}
 	}
 }
 
@@ -1839,32 +1921,7 @@ void read_nav_encoder(uint8_t dim){
 	float wt_pos_increment;
 
 	enc = pop_encoder_q(WT_ENCODERS[dim]);
-
-	if(enc) {
-		// Press Spread (TRANSPOSE) + turn Depth = adjust phase spread amount
-		if (dim == 0 && rotary_pressed(rotm_TRANSPOSE)) {
-			if (macro_states.all_af_buttons_released) {
-				// Global: adjust all unlocked channels
-				for (i = 0; i < NUM_CHANNELS; i++) {
-					if (!params.osc_param_lock[i]) {
-						params.phase_spread_amt[i] += enc * PHASE_SPREAD_SCALING;
-						params.phase_spread_amt[i] = _CLAMP_F(params.phase_spread_amt[i], 0, MAX_PHASE_SPREAD);
-					}
-				}
-			} else {
-				// Individual: adjust only pressed channels
-				for (i = 0; i < NUM_CHANNELS; i++) {
-					if (button_pressed(i)) {
-						params.phase_spread_amt[i] += enc * PHASE_SPREAD_SCALING;
-						params.phase_spread_amt[i] = _CLAMP_F(params.phase_spread_amt[i], 0, MAX_PHASE_SPREAD);
-						calc_params.already_handled_button[i] = 1;
-					}
-				}
-			}
-			start_ongoing_display_phase_spread();
-			return;
-		}
-
+	if (enc) {
 		if ((ui_mode == WTEDITING) && (!macro_states.all_af_buttons_released))
 		{
 			if	 (dim == 0){for (i = 0; i < WT_DIM_SIZE; i++){update_wt_fx_params(i,					wt_osc.m0[1][0],	wt_osc.m0[2][0],	enc);}}

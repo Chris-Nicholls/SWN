@@ -124,7 +124,8 @@ void update_lfo_wt_pos(void)
 			}
 
 			else if (!params.note_on[chan]) {
-				wt_osc.wt_head_pos[chan] = 0;
+				uint8_t v;
+				for(v=0;v<MAX_UNISON_VOICES;v++) wt_osc.wt_head_pos[chan][v] = 0;
 				lfos.cycle_pos[chan] = 0;
 			}
 
