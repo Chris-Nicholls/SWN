@@ -94,8 +94,11 @@ inline float TerrainLookupWT(float x, float y, int bank) {
   const int table_size = 128;
   const int table_size_full = table_size + 4;  // Includes 4 wrapped samples
   const int num_waves = 64;
-  const float sample = (y + 1.0f) * 0.5f * float(table_size);
-  const float wt = (x + 1.0f) * 0.5f * float(num_waves - 1);
+  float sample = (y + 1.0f) * 0.5f * float(table_size);
+  float wt = (x + 1.0f) * 0.5f * float(num_waves - 1);
+  
+  CONSTRAIN(sample, 0.0f, float(table_size) - 1.001f);
+  CONSTRAIN(wt, 0.0f, float(num_waves - 1));
   
   const int16_t* waves = wav_integrated_waves + \
       bank * num_waves * table_size_full;
@@ -108,7 +111,12 @@ inline float TerrainLookupWT(float x, float y, int bank) {
   const float value_scale = 1.0f / 1024.0f;
   waves += wt_integral * table_size_full;
   xy[0] = InterpolateIntegratedWave(waves, sample_integral, sample_fractional);
-  waves += table_size_full;
+  
+  // If we are at the last wave of the last bank, don't advance to next wave
+  // (which would be out of bounds). Instead, use the same wave or a safe one.
+  if (wt_integral + 1 < num_waves || bank < 2) {
+      waves += table_size_full;
+  }
   xy[1] = InterpolateIntegratedWave(waves, sample_integral, sample_fractional);
 #else
   const float value_scale = 1.0f / 32768.0f;

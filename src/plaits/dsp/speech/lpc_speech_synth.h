@@ -72,13 +72,17 @@ class LPCSpeechSynth {
   void PlayFrame(const Frame* frames, float frame, bool interpolate) {
     MAKE_INTEGRAL_FRACTIONAL(frame);
     
-    if (!interpolate) {
-      frame_fractional = 0.0f;
+    if (interpolate) {
+      PlayFrame(
+          frames[frame_integral],
+          frames[frame_integral + 1],
+          frame_fractional);
+    } else {
+      PlayFrame(
+          frames[frame_integral],
+          frames[frame_integral],
+          0.0f);
     }
-    PlayFrame(
-        frames[frame_integral],
-        frames[frame_integral + 1],
-        frame_fractional);
   }
 
  private:

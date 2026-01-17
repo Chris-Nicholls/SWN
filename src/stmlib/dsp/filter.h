@@ -52,8 +52,8 @@ enum FrequencyApproximation {
 };
 
 #define M_PI_F float(M_PI)
-#define M_PI_POW_2 M_PI * M_PI
-#define M_PI_POW_3 M_PI_POW_2 * M_PI
+#define M_PI_POW_2 M_PI_F * M_PI_F
+#define M_PI_POW_3 M_PI_POW_2 * M_PI_F
 #define M_PI_POW_5 M_PI_POW_3 * M_PI_POW_2
 #define M_PI_POW_7 M_PI_POW_5 * M_PI_POW_2
 #define M_PI_POW_9 M_PI_POW_7 * M_PI_POW_2
@@ -117,8 +117,8 @@ class OnePole {
       // The usual tangent approximation uses 3.1755e-01 and 2.033e-01, but
       // the coefficients used here are optimized to minimize error for the
       // 16Hz to 16kHz range, with a sample rate of 48kHz.
-      const float a = 3.260e-01f * M_PI_POW_3;
-      const float b = 1.823e-01f * M_PI_POW_5;
+      const float a = 3.260e-01f * (float)M_PI_POW_3;
+      const float b = 1.823e-01f * (float)M_PI_POW_5;
       float f2 = f * f;
       return f * (M_PI_F + f2 * (a + b * f2));
     } else if (approximation == FREQUENCY_ACCURATE) {

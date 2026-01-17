@@ -277,10 +277,13 @@ void LPCSpeechSynthController::Render(
   }
   
   if (playback_frame_ == -1 && remaining_frame_samples_ == 0) {
-    synth_.PlayFrame(
-        frames,
-        address * (static_cast<float>(num_frames) - 1.0001f),
-        true);
+    float frame_index = address * (static_cast<float>(num_frames) - 1.0001f);
+    if (num_frames < 2) {
+      synth_.PlayFrame(frames, 0.0f, false);
+    } else {
+      CONSTRAIN(frame_index, 0.0f, static_cast<float>(num_frames) - 1.0001f);
+      synth_.PlayFrame(frames, frame_index, true);
+    }
   } else {
     if (remaining_frame_samples_ == 0) {
       synth_.PlayFrame(frames, float(playback_frame_), false);

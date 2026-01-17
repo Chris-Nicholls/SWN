@@ -77,7 +77,8 @@ void LPCSpeechSynth::Render(
       int reset_sample = static_cast<int>(32.0f * reset_time);
       
       float discontinuity = 0.0f;
-      if (excitation_pulse_sample_index_ < LUT_LPC_EXCITATION_PULSE_SIZE) {
+      if (excitation_pulse_sample_index_ < LUT_LPC_EXCITATION_PULSE_SIZE &&
+          excitation_pulse_sample_index_ >= reset_sample) {
         excitation_pulse_sample_index_ -= reset_sample;
         int8_t s = lut_lpc_excitation_pulse[excitation_pulse_sample_index_];
         discontinuity = static_cast<float>(s) / 128.0f * pulse_energy_;

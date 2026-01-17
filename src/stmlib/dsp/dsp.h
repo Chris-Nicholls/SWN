@@ -66,7 +66,7 @@ inline float InterpolateHermite(const float* table, float index, float size) {
 }
 
 inline float InterpolateWrap(const float* table, float index, float size) {
-  index -= static_cast<float>(static_cast<int32_t>(index));
+  index -= floorf(index);
   index *= size;
   MAKE_INTEGRAL_FRACTIONAL(index)
   float a = table[index_integral];
