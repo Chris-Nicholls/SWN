@@ -190,7 +190,7 @@ o_params			params;
 o_calc_params		calc_params;
 
 uint32_t num_spheres_filled;
-o_waveform	waveform[NUM_CHANNELS][2][2][2];
+SRAM1DATA o_waveform	waveform[NUM_CHANNELS][2][2][2];
 
 
 //Todo: replace with init_param_object(&params), plus a few other differences

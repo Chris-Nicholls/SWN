@@ -35,7 +35,8 @@ inline float Clamp(float value, float min, float max) {
 // 16KB * 6 = 96KB. Fits in SRAM1 (384KB).
 #define PLAITS_VOICE_BUFFER_SIZE 16384
 SRAM1_DATA alignas(16) char voice_buffers[6][PLAITS_VOICE_BUFFER_SIZE];
-SRAM1_DATA plaits::Voice voices[6];
+__attribute__((section(".dtcm_data")))
+plaits::Voice voices[6];
 
 extern "C" {
 
