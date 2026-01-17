@@ -26,9 +26,18 @@ SOURCES  += $(DEVICE)/src/$(STARTUP)
 SOURCES  += $(DEVICE)/src/$(SYSTEM)
 SOURCES  += $(wildcard src/*.c)
 SOURCES  += $(wildcard src/*.cc)
+SOURCES  += $(wildcard src/*.cpp)
 SOURCES  += $(wildcard src/drivers/*.c)
 SOURCES  += $(wildcard $(CORE)/src/*.c)
 SOURCES  += $(wildcard $(CORE)/src/*.s)
+
+# Plaits & Stmlib
+# Note: Excluding plaits/plaits.cc (main) and stmlib/system (hardware specific)
+SOURCES  += $(wildcard src/plaits/dsp/*.cc)
+SOURCES  += $(wildcard src/plaits/dsp/*/*.cc)
+SOURCES  += src/plaits/resources.cc
+SOURCES  += $(wildcard src/stmlib/dsp/*.cc)
+SOURCES  += $(wildcard src/stmlib/utils/*.cc)
 
 OBJECTS   = $(addprefix $(BUILDDIR)/, $(addsuffix .o, $(sort $(basename $(SOURCES)))))
 
@@ -39,7 +48,8 @@ INCLUDES += -I$(DEVICE)/include \
 			-I$(PERIPH)/include \
 			-I inc \
 			-I inc/drivers \
-			-I inc/tests
+			-I inc/tests \
+			-I src
 
 ELF 	= $(BUILDDIR)/$(BINARYNAME).elf
 HEX 	= $(BUILDDIR)/$(BINARYNAME).hex
@@ -76,17 +86,18 @@ CFLAGS = $(DEBUG_FLAG) -Wall \
 	-I. $(INCLUDES) \
 	-fno-common \
 	-fdata-sections -ffunction-sections \
-	# -specs=nano.specs \
+	-specs=nano.specs \
 
 DEPFLAGS = -MMD -MP -MF $(BUILDDIR)/$(basename $<).d
 
 
 
 CXXFLAGS=$(CFLAGS) \
-	-std=c++17 \
+	-D_USE_MATH_DEFINES \
+	-DM_PI=3.14159265358979323846 \
+	-std=c++14 \
 	-fno-rtti \
 	-fno-exceptions \
-	-ffreestanding \
 	-Werror=return-type \
 	-Wdouble-promotion \
 	-Wno-register \
@@ -100,7 +111,7 @@ LFLAGS =  -Wl,-Map,build/main.map,--cref \
 	-flto \
 	$(MCU) \
 	-T $(LDSCRIPT)
-	# -specs=nano.specs -T $(LDSCRIPT) \
+	-specs=nano.specs -T $(LDSCRIPT) \
 
 # build/src/hardware_tests.o: OPTFLAG = -O0
 
