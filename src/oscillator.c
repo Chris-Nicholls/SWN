@@ -61,7 +61,7 @@ extern o_led_cont 		led_cont;
 extern o_analog 		analog[NUM_ANALOG_ELEMENTS];
 
 extern o_recbuf 		recbuf;
-o_wt_osc				wt_osc;
+__attribute__((aligned(32))) o_wt_osc	wt_osc;
 uint8_t 				audio_in_gate;
 
 //Private:

@@ -34,9 +34,8 @@ inline float Clamp(float value, float min, float max) {
 // UPDATE: 12KB causes crashes on some engines. Increasing to 16KB.
 // 16KB * 6 = 96KB. Fits in SRAM1 (384KB).
 #define PLAITS_VOICE_BUFFER_SIZE 16384
-SRAM1_DATA alignas(16) char voice_buffers[6][PLAITS_VOICE_BUFFER_SIZE];
-__attribute__((section(".dtcm_data")))
-plaits::Voice voices[6];
+SRAM1_DATA alignas(32) char voice_buffers[6][PLAITS_VOICE_BUFFER_SIZE];
+alignas(32)  plaits::Voice voices[6];
 
 extern "C" {
 
@@ -99,7 +98,7 @@ void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int
 
     // Copy to output buffer (converting int16 to float)
     for (int i=0; i<size; i++) {
-        out_buffer[i] = (float)frames[i].out / 32768.0f;
+        out_buffer[i] = (float)frames[i].out / 16384.0f;
     }
 }
 
