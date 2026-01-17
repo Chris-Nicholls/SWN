@@ -78,7 +78,7 @@ ARCH_CFLAGS = 	-DARM_MATH_CM7 \
 				-DSTM32F765xx
 
 # Default optimization for release (Speed)
-OPTFLAG ?= -O3 -flto
+OPTFLAG ?= -O3 -flto -ffast-math
 DEBUG_FLAG ?= -g3
 
 CFLAGS = $(DEBUG_FLAG) -Wall \

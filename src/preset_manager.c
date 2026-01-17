@@ -198,8 +198,7 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 			update_preset_version(version, t_params, t_lfos);
 
 
-		if (isnan(t_params->soft_clip_pregain) || isinf(t_params->soft_clip_pregain) ||
-			t_params->soft_clip_pregain < MIN_SOFT_CLIP_PREGAIN || t_params->soft_clip_pregain > MAX_SOFT_CLIP_PREGAIN) {
+		if (t_params->soft_clip_pregain < MIN_SOFT_CLIP_PREGAIN || t_params->soft_clip_pregain > MAX_SOFT_CLIP_PREGAIN) {
 			t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 		}
 

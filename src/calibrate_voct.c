@@ -257,12 +257,12 @@ void set_default_voct_calibrate(void)
 
 uint8_t range_check_tracking(float tracking)
 {
-	if (isnan(tracking) || (tracking > 4.0) || (tracking < 0.25)) return 0;
+	if ((tracking > 4.0) || (tracking < 0.25)) return 0;
 	else return 1;
 }
 uint8_t range_check_offset(float offset)
 {
-	if (isnan(offset) || (offset > 2000.0) || (offset < -2000.0)) return 0;
+	if ((offset > 2000.0) || (offset < -2000.0)) return 0;
 	else return 1;
 }
 
@@ -275,13 +275,13 @@ uint8_t range_check_calibrate_voct_values(SystemCalibrations *sys_cal)
 
 	for (i=0; i<(NUM_VOCT_CHANNELS); i++)
 	{
-		if (isnan(sys_cal->voct_tracking_adjustment[i]) || (sys_cal->voct_tracking_adjustment[i] > 4.0) || (sys_cal->voct_tracking_adjustment[i] < 0.25))
+		if ((sys_cal->voct_tracking_adjustment[i] > 4.0) || (sys_cal->voct_tracking_adjustment[i] < 0.25))
 		{
 			sys_cal->voct_tracking_adjustment[i] = 1.0;
 			range_errors++;
 		}
 
-		if (isnan(sys_cal->voct_offset_adjustment[i]) || (sys_cal->voct_offset_adjustment[i] > 2000.0) || (sys_cal->voct_offset_adjustment[i] < -2000.0))
+		if ((sys_cal->voct_offset_adjustment[i] > 2000.0) || (sys_cal->voct_offset_adjustment[i] < -2000.0))
 		{
 			sys_cal->voct_offset_adjustment[i] = 0.0;
 			range_errors++;
