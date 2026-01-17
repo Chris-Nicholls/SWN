@@ -43,6 +43,13 @@ void init_user_sphere_mgr(uint8_t initial_sphere_num)
 {
 	uint16_t i;
 
+	if (initial_sphere_num >= PLAITS_SPHERE_OFFSET) initial_sphere_num = 0; // Default to Factory 1 if on Plaits
+	if (initial_sphere_num < NUM_FACTORY_SPHERES) initial_sphere_num = 0; // Factory spheres all simplify to "0" visual or similar? 
+	// actually existing code sets hover_num = initial_sphere_num.
+	// If initial_sphere_num is factory (0-11), it's fine.
+	// If it is user (12-99), it's fine.
+	// IF PLAITS_SPHERE_OFFSET+, reset to 0.
+
 	user_sphere_mgr.hover_num 		= initial_sphere_num; 
 	user_sphere_mgr.animation_ctr 	= 0;
 	user_sphere_mgr.activity_tmr	= 0;

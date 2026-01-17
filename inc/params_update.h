@@ -166,7 +166,8 @@ typedef struct o_calc_params{
 	uint8_t		lock_change_staged		[NUM_CHANNELS];
 	enum PanStates	adjusting_pan_state		[NUM_CHANNELS];
 
-	uint8_t		gate_in_is_sustaining	[NUM_CHANNELS]		;
+	uint8_t		gate_in_is_sustaining	[NUM_CHANNELS];
+	uint8_t		plaits_use_lpg			[NUM_CHANNELS];
 } o_calc_params;
 
 
@@ -218,7 +219,9 @@ typedef struct o_params{
 	uint8_t		wtsel_lock				[NUM_CHANNELS];	//For v1.0 this is always the same as osc_param_lock
 
 	//v1.2:
-	uint8_t		enabled_spheres			[MAX_TOTAL_SPHERES/8];
+	uint8_t		enabled_spheres			[14]; // Fixed at 14 bytes to match 112/8 range or similar legacy size
+	// Note: NUM_WAVETABLES is 100, so 13-14 bytes is sufficient.
+	// We keep this fixed to avoid breaking preset alignment when MAX_TOTAL_SPHERES changes.
 
 	//v2.0
 	float		pan						[NUM_CHANNELS];
@@ -236,20 +239,29 @@ typedef struct o_params{
 	// EQ settings (v2.x2)
 	uint16_t	eq_slider_values[6];				// EQ slider positions (2048 = flat)
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE];
+	// Plaits Params (v2.x3)
+	// Re-using padding bytes
+	uint8_t 	plaits_lpg_decay		[NUM_CHANNELS];
+	uint8_t 	plaits_lpg_color		[NUM_CHANNELS];
+	int8_t 		plaits_timbre_mod		[NUM_CHANNELS];
+	int8_t 		plaits_morph_mod		[NUM_CHANNELS];
+	int8_t 		plaits_harmonics_mod	[NUM_CHANNELS];
+	int8_t 		plaits_freq_mod			[NUM_CHANNELS];
+	uint8_t 	plaits_input_mode		[NUM_CHANNELS];
+
+	#define FW_PLAITS_PARAMS_SIZE (sizeof(uint8_t)*NUM_CHANNELS*3 + sizeof(int8_t)*NUM_CHANNELS*4) // 42 bytes
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_PLAITS_PARAMS_SIZE];
 } o_params;
 
-
-
-void 		init_params(void);
-void 		init_calc_params(void);
-void 		init_pitch_params();
-void 		init_param_object(o_params *t_params);
-
-void 		set_pitch_params_to_ttone(void);
-
 void 		check_reset_navigation(void);
+void 		read_selbus_buttons(void);
 void 		cache_uncache_pitch_params(enum CacheUncache cache_uncache);
+void 		init_pitch_params(void);
+void 		init_params(void);
+void 		init_param_object(o_params *t_params);
+void 		init_calc_params(void);
+void 		set_pitch_params_to_ttone(void);
 
 void 		read_noteon(uint8_t i);
 void 		read_ext_trigs(void);

@@ -247,11 +247,20 @@ void init_params(void){
 			calc_params.armed[j][i] = 0;
 
 		params.random[i] = 1.0;
+
+		// Plaits defaults
+		params.plaits_lpg_decay[i] = 127; // ~50% decay
+		params.plaits_lpg_color[i] = 127; // ~50% color
+		params.plaits_timbre_mod[i] = 0;
+		params.plaits_morph_mod[i] = 0;
+		params.plaits_harmonics_mod[i] = 0;
+		params.plaits_freq_mod[i] = 0;
+		params.plaits_input_mode[i] = 0; // standard
 	}
 
 	calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 0;
 	calc_params.already_handled_button[butm_LFOMODE_BUTTON] = 0;
-	for (i=0; i<(MAX_TOTAL_SPHERES/8); i++)
+	for (i=0; i<14; i++)
 		params.enabled_spheres[i]=0xFF;
 
 }
@@ -326,7 +335,7 @@ void init_param_object(o_params *t_params){
 
 	}
 
-	for (uint8_t i=0; i<(MAX_TOTAL_SPHERES/8); i++)
+	for (uint8_t i=0; i<14; i++)
 		t_params->enabled_spheres[i]=0xFF;
 
 	t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
@@ -780,11 +789,27 @@ void read_level_and_pan(uint8_t chan)
 		calc_params.level[chan] = 0.f;
 
 	else {
-		if (lfos.to_vca[chan])	level *= lfos.out_lpf[chan];
+		uint8_t is_plaits = (params.wt_bank[chan] >= 100);
+		uint8_t jack_is_plugged = (analog[A_VOCT + chan].plug_sense_switch.pressed == PRESSED);
+		uint8_t is_vca_switch = (params.voct_switch_state[chan] == SW_VCA);
+		uint8_t in_key_mode = (params.key_sw[chan] != ksw_MUTE);
 
-		level *= read_vca_cv(chan);
+		// Dynamic LPG Mode: use internal LPG in keyboard mode OR VCA mode + Jack patched
+		uint8_t plaits_use_lpg = is_plaits && (in_key_mode || (is_vca_switch && jack_is_plugged));
+		calc_params.plaits_use_lpg[chan] = plaits_use_lpg;
+
+		// Skip LFO-VCA mapping if Plaits + LPG mode is active (LPG handles dynamics)
+		if (lfos.to_vca[chan] && !plaits_use_lpg)	
+			level *= lfos.out_lpf[chan];
+
+		// Skip CV-VCA mapping if Plaits + LPG mode is active (LPG handles dynamics)
+		if (!plaits_use_lpg)
+			level *= read_vca_cv(chan);
 
 		calc_params.level[chan] = _CLAMP_F(level, 0.f, 4095.f);
+
+		// Dynamic Plaits Trigger calculation is handled in oscillator.c for audio-rate precision.
+		// We just need to manage the SWN VCA levels here.
 	}
 
 }
@@ -811,7 +836,8 @@ float read_vca_cv(uint8_t chan)
 {
 	// Resonator mode: use coherence as VCA instead of CV input
 	// Square to suppress weak coherences, amplify strong ones
-	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY)) {
+	// Disable for Plaits engines (bank >= 100)
+	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY) && (params.wt_bank[chan] < 100)) {
 		float coh = wt_osc.coherence_env[chan];
 		coh = _CLAMP_F(coh-0.005, 0.0f, 2.0f);
 		return coh * RESONATOR_GAIN;
@@ -1930,6 +1956,28 @@ void read_nav_encoder(uint8_t dim){
 		}
 		else
 		{
+			// PLAITS MODULATION OVERRIDE (Fine + Nav)
+			if (switch_pressed(FINE_BUTTON)) {
+				uint8_t handled = 0;
+				for (i=0; i<NUM_CHANNELS; i++) {
+					// Check if channel is Plaits mode and unlocked (or selected)
+					// Approximating standard lock logic: !locked OR button_pressed
+					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
+						int8_t *val_ptr = 0;
+						if (dim == 0) val_ptr = &params.plaits_harmonics_mod[i];
+						if (dim == 1) val_ptr = &params.plaits_timbre_mod[i];
+						if (dim == 2) val_ptr = &params.plaits_morph_mod[i];
+						
+						if (val_ptr) {
+							int16_t res = *val_ptr + enc;
+							*val_ptr = _CLAMP_I16(res, -127, 127);
+							handled = 1;
+						}
+					}
+				}
+				if (handled) return; 
+			}
+
 			if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
 				wt_pos_increment = enc * (switch_pressed(FINE_BUTTON) ? F_SCALING_NAVIGATE : 1);
 			else
@@ -2054,6 +2102,14 @@ void update_wt_interp(void)
 	{
 		if (wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_NONE)
 			continue;
+
+		// FIX: Do not attempt to load wavetables for Plaits engines (Virtual Spheres)
+		// Accessing flash for indices >= 100 causes access beyond the flash chip capacity (Bus Fault)
+		if (params.wt_bank[chan] >= PLAITS_SPHERE_OFFSET) {
+			wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_NONE;
+			state[chan] = WT_FLASH_NO_ACTION;
+			continue;
+		}
 
 		//Todo: If wt_osc.m0[][chan] changes while a
 

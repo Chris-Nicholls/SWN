@@ -35,7 +35,7 @@
 #include "led_colors.h"
 #include "wavetable_effects.h"
 
-#define	NUM_SPHERES_IN_RECBUF			8
+#define	NUM_SPHERES_IN_RECBUF			6
 #define SPHERE_REC_MAX_OVERLAP_SIZE	 	208
 #define RESAMPLING_LOOKAHEAD_SAMPLES	4
 #define NUM_SAMPLES_IN_RECBUF			(NUM_SAMPLES_IN_SPHERE * NUM_SPHERES_IN_RECBUF ) 																				/*110592*/

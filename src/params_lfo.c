@@ -466,8 +466,17 @@ void read_lfo_speed(int16_t turn)
 
 		flag_all_lfos_recalc();
 
+
 		if (lfos.use_ext_clock)
 			stage_resync_lfos();
+
+		// PLAITS OVERRIDE: Global Decay
+		for (i=0; i<NUM_CHANNELS; i++) {
+			if (params.wt_bank[i] >= 100 && !lfos.locked[i]) {
+				int16_t new_val = (int16_t)params.plaits_lpg_decay[i] + (int16_t)turn_amt;
+				params.plaits_lpg_decay[i] = _CLAMP_I16(new_val, 0, 255);
+			}
+		}
 
 	}
 
@@ -485,6 +494,12 @@ void read_lfo_speed(int16_t turn)
 				if (lfos.use_ext_clock) {
 					stage_resync(i);
 				}
+			}
+			
+			// PLAITS OVERRIDE: Individual Decay
+			if (button_pressed(i) && params.wt_bank[i] >= 100) {
+				int16_t new_val = (int16_t)params.plaits_lpg_decay[i] + (int16_t)turn_amt;
+				params.plaits_lpg_decay[i] = _CLAMP_I16(new_val, 0, 255);
 			}
 		}
 	}
@@ -608,6 +623,12 @@ void read_LFO_shape(void)
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;								
 				}
+				
+				// PLAITS OVERRIDE: Global Color
+				if (params.wt_bank[i] >= 100 && !lfos.locked[i]) {
+					int16_t new_val = (int16_t)params.plaits_lpg_color[i] + (int16_t)enc;
+					params.plaits_lpg_color[i] = _CLAMP_I16(new_val, 0, 255);
+				}
 			}
 		}
 
@@ -622,6 +643,13 @@ void read_LFO_shape(void)
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;							
 				}	
+				
+				// PLAITS OVERRIDE: Individual Color
+				if(button_pressed(i) && params.wt_bank[i] >= 100)
+				{
+					int16_t new_val = (int16_t)params.plaits_lpg_color[i] + (int16_t)enc;
+					params.plaits_lpg_color[i] = _CLAMP_I16(new_val, 0, 255);
+				}
 			}
 		}
 	}	
