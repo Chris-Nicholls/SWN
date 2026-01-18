@@ -92,7 +92,7 @@
 #define CODEC_SAI_RX_DMA_FLAG_DME		DMA_FLAG_DMEIF2_6
 
 
-#define codec_BUFF_LEN 		64							/* DMA rx/tx buffer size, in number of DMA Periph/MemAlign-sized elements (words) */
+#define codec_BUFF_LEN 		96							/* DMA rx/tx buffer size, in number of DMA Periph/MemAlign-sized elements (words) */
 #define codec_HT_LEN 		(codec_BUFF_LEN>>1) 		/* Half Transfer buffer size (both channels interleved)*/
 #define codec_HT_CHAN_LEN 	(codec_HT_LEN>>1) 			/* Half Transfer buffer size per channel */
 #define STEREO_BUFSZ 		codec_HT_LEN
