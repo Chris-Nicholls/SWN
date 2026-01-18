@@ -37,15 +37,7 @@ using namespace stmlib;
 void Voice::Init(BufferAllocator* allocator) {
   engines_.Init();
 
-  engines_.RegisterInstance(&virtual_analog_vcf_engine_, false, 1.0f, 1.0f);
-  engines_.RegisterInstance(&phase_distortion_engine_, false, 0.7f, 0.7f);
-  engines_.RegisterInstance(&six_op_engine_, true, 1.0f, 1.0f);
-  engines_.RegisterInstance(&six_op_engine_, true, 1.0f, 1.0f);
-  engines_.RegisterInstance(&six_op_engine_, true, 1.0f, 1.0f);
-  engines_.RegisterInstance(&wave_terrain_engine_, false, 0.7f, 0.7f);
-  engines_.RegisterInstance(&string_machine_engine_, false, 0.8f, 0.8f);
-  engines_.RegisterInstance(&chiptune_engine_, false, 0.5f, 0.5f);
-  
+  // Bank 0 (Green)
   engines_.RegisterInstance(&virtual_analog_engine_, false, 0.8f, 0.8f);
   engines_.RegisterInstance(&waveshaping_engine_, false, 0.7f, 0.6f);
   engines_.RegisterInstance(&fm_engine_, false, 0.6f, 0.6f);
@@ -55,6 +47,7 @@ void Voice::Init(BufferAllocator* allocator) {
   engines_.RegisterInstance(&chord_engine_, false, 0.8f, 0.8f);
   engines_.RegisterInstance(&speech_engine_, false, -0.7f, 0.8f);
 
+  // Bank 1 (Red)
   engines_.RegisterInstance(&swarm_engine_, false, -3.0f, 1.0f);
   engines_.RegisterInstance(&noise_engine_, false, -1.0f, -1.0f);
   engines_.RegisterInstance(&particle_engine_, false, -2.0f, 1.0f);
@@ -63,6 +56,16 @@ void Voice::Init(BufferAllocator* allocator) {
   engines_.RegisterInstance(&bass_drum_engine_, true, 0.8f, 0.8f);
   engines_.RegisterInstance(&snare_drum_engine_, true, 0.8f, 0.8f);
   engines_.RegisterInstance(&hi_hat_engine_, true, 0.8f, 0.8f);
+
+  // Bank 2 (Gold)
+  engines_.RegisterInstance(&virtual_analog_vcf_engine_, false, 1.0f, 1.0f);
+  engines_.RegisterInstance(&phase_distortion_engine_, false, 0.7f, 0.7f);
+  engines_.RegisterInstance(&six_op_engine_, true, 1.0f, 1.0f);
+  engines_.RegisterInstance(&six_op_engine_, true, 1.0f, 1.0f);
+  engines_.RegisterInstance(&six_op_engine_, true, 1.0f, 1.0f);
+  engines_.RegisterInstance(&wave_terrain_engine_, false, 0.7f, 0.7f);
+  engines_.RegisterInstance(&string_machine_engine_, false, 0.8f, 0.8f);
+  engines_.RegisterInstance(&chiptune_engine_, false, 0.5f, 0.5f);
   
   for (int i = 0; i < engines_.size(); ++i) {
     // All engines will share the same RAM space.
@@ -128,8 +131,8 @@ void Voice::Render(
   if (engine_index != previous_engine_index_ || reload_user_data_) {
     UserData user_data;
     const uint8_t* data = user_data.ptr(engine_index);
-    if (!data && engine_index >= 2 && engine_index <= 4) {
-      data = fm_patches_table[engine_index - 2];
+    if (!data && engine_index >= 18 && engine_index <= 20) {
+      data = fm_patches_table[engine_index - 18];
     }
     e->LoadUserData(data);
     e->Reset();
