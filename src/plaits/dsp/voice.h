@@ -46,7 +46,6 @@
 #include "plaits/dsp/engine/noise_engine.h"
 #include "plaits/dsp/engine/particle_engine.h"
 #include "plaits/dsp/engine/snare_drum_engine.h"
-#include "plaits/dsp/engine/speech_engine.h"
 #include "plaits/dsp/engine/string_engine.h"
 #include "plaits/dsp/engine/swarm_engine.h"
 #include "plaits/dsp/engine/virtual_analog_engine.h"
@@ -66,7 +65,7 @@
 
 namespace plaits {
 
-const int kMaxEngines = 24;
+const int kMaxEngines = 23;
 const int kMaxTriggerDelay = 8;
 const int kTriggerDelay = 5;
 
@@ -209,8 +208,7 @@ class Voice {
   AdditiveEngine additive_engine_;
   WavetableEngine wavetable_engine_;
   ChordEngine chord_engine_;
-  SpeechEngine speech_engine_;
-
+  
   SwarmEngine swarm_engine_;
   NoiseEngine noise_engine_;
   ParticleEngine particle_engine_;

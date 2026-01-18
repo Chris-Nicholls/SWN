@@ -45,7 +45,6 @@ void Voice::Init(BufferAllocator* allocator) {
   engines_.RegisterInstance(&additive_engine_, false, 0.8f, 0.8f);
   engines_.RegisterInstance(&wavetable_engine_, false, 0.6f, 0.6f);
   engines_.RegisterInstance(&chord_engine_, false, 0.8f, 0.8f);
-  engines_.RegisterInstance(&speech_engine_, false, -0.7f, 0.8f);
 
   // Bank 1 (Red)
   engines_.RegisterInstance(&swarm_engine_, false, -3.0f, 1.0f);
@@ -131,8 +130,8 @@ void Voice::Render(
   if (engine_index != previous_engine_index_ || reload_user_data_) {
     UserData user_data;
     const uint8_t* data = user_data.ptr(engine_index);
-    if (!data && engine_index >= 18 && engine_index <= 20) {
-      data = fm_patches_table[engine_index - 18];
+    if (!data && engine_index >= 17 && engine_index <= 19) {
+      data = fm_patches_table[engine_index - 17];
     }
     e->LoadUserData(data);
     e->Reset();
@@ -173,16 +172,9 @@ void Voice::Render(
 
   float internal_envelope_amplitude = 1.0f;
   float internal_envelope_amplitude_timbre = 1.0f;
-  if (engine_index == 15) {
-    internal_envelope_amplitude = 2.0f - p.harmonics * 6.0f;
-    CONSTRAIN(internal_envelope_amplitude, 0.0f, 1.0f);
-    speech_engine_.set_prosody_amount(
-        !modulations.trigger_patched || modulations.frequency_patched ?
-            0.0f : patch.frequency_modulation_amount);
-    speech_engine_.set_speed( 
-        !modulations.trigger_patched || modulations.morph_patched ?
-            0.0f : patch.morph_modulation_amount);
-  } else if (engine_index == 7) {
+  
+  // Chiptune Engine is Index 22 in Bank 2 (Gold)
+  if (engine_index == 22) {
     if (modulations.trigger_patched && !modulations.timbre_patched) {
       // Disable internal envelope on TIMBRE, and enable the envelope generator
       // built into the chiptune engine.
