@@ -27,7 +27,7 @@ typedef struct {
     float mod_freq;
     
     float trigger; // 0.0 or 1.0 (or >0.5)
-    uint8_t input_mode;
+    uint8_t output_mode;
     uint8_t use_internal_lpg;
 } PlaitsParams;
 

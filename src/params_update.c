@@ -255,7 +255,7 @@ void init_params(void){
 		params.plaits_morph_mod[i] = 0;
 		params.plaits_harmonics_mod[i] = 0;
 		params.plaits_freq_mod[i] = 0;
-		params.plaits_input_mode[i] = 0; // standard
+		params.plaits_aux_select[i] = 0; // 0=Main, 1=Aux
 	}
 
 	calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 0;
@@ -640,6 +640,18 @@ void read_noteon(uint8_t i)
 {
 	if (ui_mode == PLAY)
 	{
+		// Aux Selection: Wavetable Encoder Press + Channel Button
+		if (button_pressed(i) && rotary_pressed(rotm_WAVETABLE))
+		{
+			if (!calc_params.already_handled_button[i])
+			{
+				if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
+					params.plaits_aux_select[i] = !params.plaits_aux_select[i];
+				
+				calc_params.already_handled_button[i] = 1;
+			}
+			return;
+		}
 		// Button mode: Mute
 		if (params.key_sw[i] == ksw_MUTE)
 		{
@@ -712,7 +724,11 @@ void read_noteon(uint8_t i)
 					if (!calc_params.already_handled_button[i])
 					{
 						if (calc_params.lock_change_staged[i]==1) {
-							toggle_lock(i);
+							if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
+								params.plaits_aux_select[i] = !params.plaits_aux_select[i];
+							else
+								toggle_lock(i);
+
 							calc_params.lock_change_staged[i] = 2;
 						}
 					}

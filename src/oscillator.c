@@ -153,6 +153,7 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 			p.mod_morph = (float)params.plaits_morph_mod[chan] / 127.0f;
 			p.mod_harmonics = (float)params.plaits_harmonics_mod[chan] / 127.0f;
 			p.mod_freq = (float)params.plaits_freq_mod[chan] / 127.0f;
+			p.output_mode = params.plaits_aux_select[chan];
 			
 			// 1. Keyboard/Note mode: Button press fires trigger
 			float plaits_trigger = 0.0f;

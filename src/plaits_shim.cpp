@@ -97,8 +97,15 @@ void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int
     voices[channel].Render(patch, modulations, frames, size);
 
     // Copy to output buffer (converting int16 to float)
-    for (int i=0; i<size; i++) {
-        out_buffer[i] = (float)frames[i].out / 16384.0f;
+    // Copy to output buffer (converting int16 to float)
+    if (params->output_mode == 1) {
+        for (int i=0; i<size; i++) {
+            out_buffer[i] = (float)frames[i].aux / 16384.0f;
+        }
+    } else {
+        for (int i=0; i<size; i++) {
+            out_buffer[i] = (float)frames[i].out / 16384.0f;
+        }
     }
 }
 

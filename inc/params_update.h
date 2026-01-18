@@ -247,7 +247,7 @@ typedef struct o_params{
 	int8_t 		plaits_morph_mod		[NUM_CHANNELS];
 	int8_t 		plaits_harmonics_mod	[NUM_CHANNELS];
 	int8_t 		plaits_freq_mod			[NUM_CHANNELS];
-	uint8_t 	plaits_input_mode		[NUM_CHANNELS];
+	uint8_t 	plaits_aux_select		[NUM_CHANNELS];
 
 	#define FW_PLAITS_PARAMS_SIZE (sizeof(uint8_t)*NUM_CHANNELS*3 + sizeof(int8_t)*NUM_CHANNELS*4) // 42 bytes
 
