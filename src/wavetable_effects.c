@@ -165,7 +165,7 @@ void normalize_waveform(uint8_t dim1,uint8_t dim2,uint8_t dim3){
 		gain = 0.3 + (spherebuf.fx[FX_NORMALIZE][dim1][dim2][dim3] * 1.4);
  
 	 //optimize out gain adjustments less than our resolution
- 	if (fabs(gain - 1.0) > (1.0/(float)INT16_MAX)) {
+ 	if (fabsf(gain - 1.0) > (1.0/(float)INT16_MAX)) {
 		for (i=0; i<WT_TABLELEN; i++){
 			spherebuf.data[dim1][dim2][dim3].wave[i] = (int16_t)((float)(spherebuf.data[dim1][dim2][dim3].wave[i]) * gain);
 		}
@@ -320,7 +320,7 @@ void distort_waveform(uint8_t dim1, uint8_t dim2, uint8_t dim3){
 	for (i=0; i<WT_TABLELEN; i++){
 		smpl_in = (float)spherebuf.data[dim1][dim2][dim3].wave[i]/(float)INT16_MAX;
 
-		smpl_out = smpl_in*(fabs(smpl_in) + a)/(smpl_in*smpl_in + (a-1.0)*fabs(smpl_in) + 1.0);
+		smpl_out = smpl_in*(fabsf(smpl_in) + a)/(smpl_in*smpl_in + (a-1.0)*fabsf(smpl_in) + 1.0);
 
 		spherebuf.data[dim1][dim2][dim3].wave[i] = smpl_out * INT16_MAX;
 	}

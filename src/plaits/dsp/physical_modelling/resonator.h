@@ -34,7 +34,7 @@
 namespace plaits {
 
 const int kMaxNumModes = 24;
-const int kModeBatchSize = 4;
+const int kModeBatchSize = 8;
 
 // We render 4 modes simultaneously since there are enough registers to hold
 // all state variables.
@@ -85,7 +85,7 @@ class ResonatorSvf {
         const float lp = g[i] * bp + state_2[i];
         state_2[i] = g[i] * bp + lp;
         s_out += gains[i] * ((mode == stmlib::FILTER_MODE_LOW_PASS) ? lp : bp);
-      }
+        }
       if (add) {
         *out++ += s_out;
       } else {

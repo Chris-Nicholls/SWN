@@ -70,8 +70,8 @@ class String {
       float non_linearity_amount,
       float brightness,
       float damping,
-      const float* in,
-      float* out,
+      const float* __restrict__ in,
+      float* __restrict__ out,
       size_t size);
   
   DelayLine<float, kDelayLineSize> string_;

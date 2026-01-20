@@ -217,15 +217,16 @@ void WaveTerrainEngine::Render(
   size_t ij = 0;
   for (size_t i = 0; i < size; ++i) {
     const float x_offset = offset.Next();
+    const float x_scale = 1.0f - fabsf(x_offset);
     
     const float z = terrain.Next();
     MAKE_INTEGRAL_FRACTIONAL(z);
 
     float out_s = 0.0f;
     float aux_s = 0.0f;
-    
+
     for (size_t j = 0; j < kOversampling; ++j) {
-      const float x = path_x[ij] * (1.0f - fabsf(x_offset)) + x_offset;
+      const float x = path_x[ij] * x_scale + x_offset;
       const float y = path_y[ij];
       ++ij;
       

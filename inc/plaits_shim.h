@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +34,11 @@ typedef struct {
 
 void Plaits_Init(void);
 void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int32_t size);
+
+void Shim_LPG_Init(void);
+void Shim_LPG_Trigger(uint8_t chan);
+void Shim_LPG_Process(uint8_t chan, float* in_out, size_t size, float decay, float color);
+float Shim_LPG_GetEnvelope(uint8_t chan);
 
 #ifdef __cplusplus
 }

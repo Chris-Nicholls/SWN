@@ -84,8 +84,8 @@ void String::ProcessInternal(
     float non_linearity_amount,
     float brightness,
     float damping,
-    const float* in,
-    float* out,
+    const float* __restrict__ in,
+    float* __restrict__ out,
     size_t size) {
   float delay = 1.0f / f0;
   CONSTRAIN(delay, 4.0f, kDelayLineSize - 4.0f);

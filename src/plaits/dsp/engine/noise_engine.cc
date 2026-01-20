@@ -86,9 +86,9 @@ void NoiseEngine::Render(
     const float f1 = f1_modulation.Next();
     const float q = q_modulation.Next();
     const float gain = 1.0f / Sqrt((0.5f + q) * 40.0f * f0);
-    lp_hp_filter_.set_f_q<FREQUENCY_ACCURATE>(f0, q);
-    bp_filter_[0].set_f_q<FREQUENCY_ACCURATE>(f0, q);
-    bp_filter_[1].set_f_q<FREQUENCY_ACCURATE>(f1, q);
+    lp_hp_filter_.set_f_q<FREQUENCY_DIRTY>(f0, q);
+    bp_filter_[0].set_f_q<FREQUENCY_DIRTY>(f0, q);
+    bp_filter_[1].set_f_q<FREQUENCY_DIRTY>(f1, q);
     
     float input_1 = *in_1++ * gain;
     float input_2 = *in_2++ * gain;

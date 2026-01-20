@@ -172,7 +172,8 @@ class Voice {
   void Render(
       const Patch& patch,
       const Modulations& modulations,
-      Frame* frames,
+      float* out,
+      float* aux,
       size_t size);
   inline int active_engine() const { return previous_engine_index_; }
     
@@ -235,18 +236,11 @@ class Voice {
   bool trigger_state_;
   
   DecayEnvelope decay_envelope_;
-  LPGEnvelope lpg_envelope_;
   
   float trigger_delay_line_[kMaxTriggerDelay];
   DelayLine<float, kMaxTriggerDelay> trigger_delay_;
   
-  ChannelPostProcessor out_post_processor_;
-  ChannelPostProcessor aux_post_processor_;
-  
   EngineRegistry<kMaxEngines> engines_;
-  
-  float out_buffer_[kMaxBlockSize];
-  float aux_buffer_[kMaxBlockSize];
   
   DISALLOW_COPY_AND_ASSIGN(Voice);
 };

@@ -77,11 +77,7 @@ void Voice::Init(BufferAllocator* allocator) {
   reload_user_data_ = false;
   engine_cv_ = 0.0f;
   
-  out_post_processor_.Init();
-  aux_post_processor_.Init();
-
   decay_envelope_.Init();
-  lpg_envelope_.Init();
   
   trigger_state_ = false;
   previous_note_ = 0.0f;
@@ -92,7 +88,8 @@ void Voice::Init(BufferAllocator* allocator) {
 void Voice::Render(
     const Patch& patch,
     const Modulations& modulations,
-    Frame* frames,
+    float* out,
+    float* aux,
     size_t size) {
   // Trigger, LPG, internal envelope.
       
@@ -105,9 +102,6 @@ void Voice::Render(
   if (!previous_trigger_state) {
     if (trigger_value > 0.3f) {
       trigger_state_ = true;
-      if (!modulations.level_patched) {
-        lpg_envelope_.Trigger();
-      }
       decay_envelope_.Trigger();
       engine_cv_ = modulations.engine;
     }
@@ -136,7 +130,9 @@ void Voice::Render(
     e->LoadUserData(data);
     e->Reset();
 
-    out_post_processor_.Reset();
+    e->LoadUserData(data);
+    e->Reset();
+
     previous_engine_index_ = engine_index;
     reload_user_data_ = false;
   }
@@ -220,48 +216,25 @@ void Voice::Render(
       1.0f);
 
   bool already_enveloped = pp_s.already_enveloped;
-  e->Render(p, out_buffer_, aux_buffer_, size, &already_enveloped);
+  e->Render(p, out, aux, size, &already_enveloped);
   
-  bool lpg_bypass = already_enveloped || \
-      (!modulations.level_patched && !modulations.trigger_patched);
+  // Apply Gain / Limiter logic (simplified)
+  // Original PostProcessor: gain < 0 -> Limiter. gain > 0 -> Gain.
+  // Then multiply by -32767.0f (Invert Phase + Scale to Short).
+  // We want to keep Float (-1..1). So we multiply by -1.0f * abs(gain).
   
-  // Compute LPG parameters.
-  if (!lpg_bypass) {
-    const float hf = patch.lpg_colour;
-    const float decay_tail = (20.0f * kBlockSize) / kSampleRate *
-        SemitonesToRatio(-72.0f * patch.decay + 12.0f * hf) - short_decay;
-    
-    if (modulations.level_patched) {
-      lpg_envelope_.ProcessLP(compressed_level, short_decay, decay_tail, hf);
-    } else {
-      const float attack = NoteToFrequency(p.note) * float(kBlockSize) * 2.0f;
-      lpg_envelope_.ProcessPing(attack, short_decay, decay_tail, hf);
-    }
-  } else {
-    lpg_envelope_.Init();
-  }
+  float out_gain = pp_s.out_gain;
+  float out_scale = (out_gain < 0.0f ? -out_gain : out_gain) * -1.0f; 
+  // Note: if gain < 0 (limiter), we use abs(gain). 
+  // In original, limiter applied this as pre-gain.
   
-  out_post_processor_.Process(
-      pp_s.out_gain,
-      lpg_bypass,
-      lpg_envelope_.gain(),
-      lpg_envelope_.frequency(),
-      lpg_envelope_.hf_bleed(),
-      out_buffer_,
-      &frames->out,
-      size,
-      2);
+  float aux_gain = pp_s.aux_gain;
+  float aux_scale = (aux_gain < 0.0f ? -aux_gain : aux_gain) * -1.0f;
 
-  aux_post_processor_.Process(
-      pp_s.aux_gain,
-      lpg_bypass,
-      lpg_envelope_.gain(),
-      lpg_envelope_.frequency(),
-      lpg_envelope_.hf_bleed(),
-      aux_buffer_,
-      &frames->aux,
-      size,
-      2);
+  for (size_t i = 0; i < size; ++i) {
+    out[i] *= out_scale;
+    aux[i] *= aux_scale;
+  }
 }
   
 }  // namespace plaits

@@ -65,6 +65,7 @@ enum lfoModes{
 	lfot_SHAPE,
 	lfot_GATE,
 	lfot_TRIG,
+	lfot_LPG,
 
 	NUM_LFO_MODES
 };
@@ -117,6 +118,8 @@ typedef struct o_lfos
 	uint8_t  		trigout 			[NUM_CHANNELS];
 
 } o_lfos;
+
+extern o_lfos lfos;
 
 
 void update_lfos(void);

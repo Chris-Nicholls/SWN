@@ -789,7 +789,7 @@ void read_level_and_pan(uint8_t chan)
 
 		case (pan_CACHED_LEVEL):
 			level = calc_params.cached_level[chan];
-			if (fabs(slider_val - calc_params.cached_level[chan]) < 10) {
+			if (fabsf(slider_val - calc_params.cached_level[chan]) < 10) {
 				calc_params.adjusting_pan_state[chan] = pan_INACTIVE;
 			}
 			break;
@@ -810,16 +810,20 @@ void read_level_and_pan(uint8_t chan)
 		uint8_t is_vca_switch = (params.voct_switch_state[chan] == SW_VCA);
 		uint8_t in_key_mode = (params.key_sw[chan] != ksw_MUTE);
 
-		// Dynamic LPG Mode: use internal LPG in keyboard mode OR VCA mode + Jack patched
-		uint8_t plaits_use_lpg = is_plaits && (in_key_mode || (is_vca_switch && jack_is_plugged));
-		calc_params.plaits_use_lpg[chan] = plaits_use_lpg;
+		// Dynamic Trigger Mode: Enables internal Mod Envelopes and Engine Triggers (for Drums/Strings)
+		// (Note: Internal LPG Amplitude Envelope is disabled in Voice.cc. This flag allows Plaits to react to triggers for Timbre/Morph modulation)
+		uint8_t plaits_enable_triggers = is_plaits && (in_key_mode || (is_vca_switch && jack_is_plugged));
+		calc_params.plaits_use_lpg[chan] = plaits_enable_triggers;
 
-		// Skip LFO-VCA mapping if Plaits + LPG mode is active (LPG handles dynamics)
-		if (lfos.to_vca[chan] && !plaits_use_lpg)	
+		// Skip LFO-VCA mapping ONLY if using new Unified LPG Mode (handled in oscillator.c)
+		// We ALWAYS apply SWN VCA envelope otherwise, because Plaits internal LPG is disabled (Raw Audio).
+		// This ensures we get amplitude decay in Keyboard/Trigger modes.
+		if (lfos.to_vca[chan] && lfos.mode[chan] != lfot_LPG)	
 			level *= lfos.out_lpf[chan];
 
-		// Skip CV-VCA mapping if Plaits + LPG mode is active (LPG handles dynamics)
-		if (!plaits_use_lpg)
+		// Skip CV-VCA mapping if Plaits Internal Triggers are active OR using new Unified LPG Mode
+		// (In these modes, CV is used as Trigger, so don't apply it as VCA level)
+		if (!plaits_enable_triggers && lfos.mode[chan] != lfot_LPG)
 			level *= read_vca_cv(chan);
 
 		calc_params.level[chan] = _CLAMP_F(level, 0.f, 4095.f);
@@ -1972,7 +1976,30 @@ void read_nav_encoder(uint8_t dim){
 		}
 		else
 		{
-			// PLAITS MODULATION OVERRIDE (Fine + Nav)
+			// PLAITS MODULATION CONTROL (Speed + Nav)
+			if (rotary_pressed(rotm_LFOSPEED)) {
+				uint8_t handled = 0;
+				for (i=0; i<NUM_CHANNELS; i++) {
+					// Check if channel is Plaits mode and unlocked (or selected)
+					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
+						int8_t *val_ptr = 0;
+						if (dim == 0) val_ptr = &params.plaits_freq_mod[i]; // Depth -> FM
+						if (dim == 1) val_ptr = &params.plaits_timbre_mod[i]; // Lat -> Timbre
+						if (dim == 2) val_ptr = &params.plaits_morph_mod[i]; // Long -> Morph
+						
+						if (val_ptr) {
+							int16_t res = *val_ptr + enc;
+							*val_ptr = _CLAMP_I16(res, -127, 127);
+							handled = 1;
+						}
+					}
+				}
+				if (handled) return; 
+			}
+
+			// PLAITS SECONDARY MODULATION (Fine + Nav)
+			// Provides access to Harmonics Modulation (Depth) which is not covered by Speed+Nav.
+			// Map: Depth -> Harmonics, Lat -> Timbre, Long -> Morph.
 			if (switch_pressed(FINE_BUTTON)) {
 				uint8_t handled = 0;
 				for (i=0; i<NUM_CHANNELS; i++) {

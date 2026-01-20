@@ -56,17 +56,17 @@ void Resonator::Init(float position, int resolution) {
   }
 }
 
-inline float NthHarmonicCompensation(int n, float stiffness) {
-  float stretch_factor = 1.0f;
-  for (int i = 0; i < n - 1; ++i) {
-    stretch_factor += stiffness;
-    if (stiffness < 0.0f) {
-      stiffness *= 0.93f;
-    } else {
-      stiffness *= 0.98f;
-    }
-  }
-  return 1.0f / stretch_factor;
+inline float NthHarmonicCompensation(int n, float s) {
+    if (n <= 1) return 1.0f;
+
+    // The sign of s never changes, so we pick the ratio once
+    const float r = (s < 0.0f) ? 0.93f : 0.98f;
+    
+    // Geometric series sum: sf = 1 + s * (1 - r^(n-1)) / (1 - r)
+    float pow_r = std::powf(r, static_cast<float>(n - 1));
+    float sf = 1.0f + s * (1.0f - pow_r) / (1.0f - r);
+
+    return 1.0f / sf;
 }
 
 void Resonator::Process(

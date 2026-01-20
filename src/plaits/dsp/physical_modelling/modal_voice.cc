@@ -89,12 +89,9 @@ void ModalVoice::Render(
   }
   const float one = 1.0f;
   excitation_filter_.Process<FILTER_MODE_LOW_PASS, false>(
-      &cutoff, &q, &one, temp, temp, size);
-  for (size_t i = 0; i < size; ++i) {
-    aux[i] += temp[i];
-  }
+      &cutoff, &q, &one, temp, aux, size);
   
-  resonator_.Process(f0, structure, brightness, damping, temp, out, size);
+  resonator_.Process(f0, structure, brightness, damping, aux, out, size);
 }
 
 }  // namespace plaits

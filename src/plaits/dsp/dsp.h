@@ -47,8 +47,8 @@ static const float kSampleRate = 48000.0f;
 static const float kCorrectedSampleRate = 47872.34f;
 const float a0 = (440.0f / 8.0f) / kCorrectedSampleRate;
 
-const size_t kMaxBlockSize = 24;
-const size_t kBlockSize = 24;
+const size_t kMaxBlockSize = 48;
+const size_t kBlockSize = 48;
 
 }  // namespace plaits
 

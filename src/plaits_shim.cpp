@@ -53,10 +53,9 @@ void Plaits_Init(void) {
 
 void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int32_t size) {
     if (channel >= 6) return;
-    if (size > 24) return;  // Safety: kMaxBlockSize = 24
+    if (size > plaits::kMaxBlockSize) return;  // Safety: kMaxBlockSize = 48
 
-    static plaits::Voice::Frame frames[24];  // Static buffer, not on stack
-    // Frame is struct { short out; short aux; }
+    static float temp_buffer[plaits::kMaxBlockSize]; // Buffer for the unused output (Aux or Main)
 
     plaits::Patch patch;
     
@@ -93,19 +92,13 @@ void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int
     modulations.trigger_patched = (params->use_internal_lpg > 0); 
     modulations.level_patched = false;
 
-    // Render directly (kBlockSize is now 24)
-    voices[channel].Render(patch, modulations, frames, size);
-
-    // Copy to output buffer (converting int16 to float)
-    // Copy to output buffer (converting int16 to float)
+    // Optimization: Write directly to out_buffer based on mode, use temp for unused channel.
     if (params->output_mode == 1) {
-        for (int i=0; i<size; i++) {
-            out_buffer[i] = (float)frames[i].aux / 16384.0f;
-        }
+        // Aux Mode: Write Aux to out_buffer, Main to temp
+        voices[channel].Render(patch, modulations, temp_buffer, out_buffer, size);
     } else {
-        for (int i=0; i<size; i++) {
-            out_buffer[i] = (float)frames[i].out / 16384.0f;
-        }
+        // Main Mode: Write Main to out_buffer, Aux to temp
+        voices[channel].Render(patch, modulations, out_buffer, temp_buffer, size);
     }
 }
 
@@ -114,4 +107,96 @@ void Plaits_SetParams(uint8_t channel, PlaitsParams* params) {
     // Keeping for compatibility with plan.
 }
 
+}
+
+// LPG Wrapper
+#include "plaits/dsp/fx/low_pass_gate.h"
+#include "plaits/dsp/envelope.h"
+
+plaits::LowPassGate lpg[6];
+plaits::LPGEnvelope lpg_env[6];
+
+// Helper for Decay mapping (using stmlib's fast lookup)
+#include "stmlib/dsp/units.h"
+
+
+extern "C" void Shim_LPG_Init(void) {
+    for(int i=0; i<6; i++) {
+        lpg[i].Init();
+        lpg_env[i].Init();
+    }
+}
+
+extern "C" void Shim_LPG_Trigger(uint8_t chan) {
+    if (chan < 6) lpg_env[chan].Trigger();
+}
+
+extern "C" void Shim_LPG_Process(uint8_t chan, float* in_out, size_t size, float decay, float color) {
+    if (chan >= 6) return;
+
+    // Map Decay (0..1) to Plaits Coefficients
+    // Formula from Voice.cc:
+    // const float short_decay = (200.0f * kBlockSize) / kSampleRate * SemitonesToRatio(-96.0f * patch.decay);
+    // kBlockSize here is 'size' (usually 24). kSampleRate is 48000.
+    
+    // We compute per-block coefficients to save CPU.
+    // ProcessPing advances state per sample.
+    
+    float decay_amount = Clamp(decay, 0.0f, 1.0f);
+    float color_amount = Clamp(color, 0.0f, 1.0f);
+
+    static float last_decay[6] = {-1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
+    static float cached_short[6];
+    static float cached_tail[6];
+
+    // Static State Cache for Downsampling
+    static float lpg_env_gain_cache[6];
+    static float lpg_env_freq_cache[6];
+    static float lpg_env_hf_cache[6];
+    
+    // Recalculate only if decay changed
+    if (decay_amount != last_decay[chan]) {
+         const float kSampleRate = 48000.0f;
+         float ratio = stmlib::SemitonesToRatio(-96.0f * decay_amount);
+         
+         // Formula derived from Plaits Voice::Render and Resources
+         cached_short[chan] = (200.0f / kSampleRate) * ratio; 
+         cached_tail[chan] = (20.0f / kSampleRate) * ratio;
+         
+         last_decay[chan] = decay_amount;
+    }
+    
+    float short_decay = cached_short[chan];
+    float decay_tail = cached_tail[chan];
+    
+    // HF Bleed based on color
+    float hf = color_amount;
+    
+    float gain, frequency, hf_bleed;
+    static uint8_t sample_counter[6] = {0}; // Persistent counter for correct downsampling across calls
+    
+    // CPU OPTIMIZATION: Update Vactrol State every 4 samples (~12kHz control rate)
+    // Using persistent counter to support size=1 calls in oscillator.c
+    for (size_t i = 0; i < size; ++i) {
+        if ((sample_counter[chan] & 3) == 0) {
+            lpg_env[chan].ProcessPing(0.1f, short_decay, decay_tail, hf);
+            // Cache the results for the next 3 samples
+            lpg_env_gain_cache[chan] = lpg_env[chan].gain();
+            lpg_env_freq_cache[chan] = lpg_env[chan].frequency();
+            lpg_env_hf_cache[chan] = lpg_env[chan].hf_bleed();
+        }
+        sample_counter[chan]++;
+        
+        gain = lpg_env_gain_cache[chan];
+        frequency = lpg_env_freq_cache[chan];
+        hf_bleed = lpg_env_hf_cache[chan];
+        
+        // Filter Process still runs per-sample for audio quality
+        lpg[chan].Process(gain, frequency, hf_bleed, &in_out[i], 1);
+    }
+}
+
+extern "C" float Shim_LPG_GetEnvelope(uint8_t chan) {
+    if (chan >= 6) return 0.0f;
+    return lpg_env[chan].gain();
 }
