@@ -60,12 +60,12 @@ uint16_t divmult_cv;
 
 // const float LFO_PHASE_TABLE[LFO_PHASE_TABLELEN]	= {0, 1.0/8.0, 1.0/7.0, 1.0/6.0, 1.0/5.0, 1.0/4.0, 2.0/7.0, 1.0/3.0, 3.0/8.0, 2.0/5.0, 3.0/7.0, 1.0/2.0, 4.0/7.0, 3.0/5.0, 5.0/8.0, 2.0/3.0, 5.0/7.0, 3.0/4.0, 4.0/5.0, 5.0/6.0, 6.0/7.0, 7.0/8.0};
 
-void update_lfos(void)
+void update_lfos(float multiplier)
 {
 	update_lfo_params();
 	read_ext_clk();
 	update_lfo_calcs();
-	update_lfo_wt_pos();
+	update_lfo_wt_pos(multiplier);
 	update_lfo_sample();
 }
 
@@ -271,7 +271,13 @@ void update_lfo_sample(void)
 				rh0 				= (uint16_t)pos_in_table;
 				rh1 				= (rh0 + 1) & (LFO_TABLELEN-1); //if rh0==255, then rh1 should = 0. (255+1)&(255) == 0x100 & 0x0FF == 0
 				lfo_frac 			= pos_in_table - (float)rh0;
-				lfos.preload[chan] 	= (((lfo_wavetable[lfos.shape[chan]][rh0] * (1.0-lfo_frac) + lfo_wavetable[lfos.shape[chan]][rh1] * lfo_frac))) ;
+
+				// In LPG Mode, we use lfos.shape for DECAY control.
+				// We must NOT let it change the Wavetable used for clocking, otherwise timing acts weird.
+				// Force Shape 0 (Sine/Standard) for stable triggering in LPG Mode.
+				uint8_t shape_idx = (lfos.mode[chan] == lfot_LPG) ? 0 : lfos.shape[chan];
+				
+				lfos.preload[chan] 	= (((lfo_wavetable[shape_idx][rh0] * (1.0-lfo_frac) + lfo_wavetable[shape_idx][rh1] * lfo_frac))) ;
 			}
 			else
 				lfos.preload[chan] 	= 0;	
@@ -541,6 +547,31 @@ void read_LFO_phase(void)
 	enc_pressed = rotary_pressed(rotm_LFOSHAPE);
 	fine = switch_pressed(FINE_BUTTON);
 
+	if (enc_turn && rotary_pressed(rotm_LFOSPEED))
+	{
+		// LPG COLOR CONTROL (Speed + Phase)
+		// GLOBAL
+		if (macro_states.all_af_buttons_released){
+			for (i = 0; i < NUM_CHANNELS; i++){
+				if (params.wt_bank[i] >= 100 && !lfos.locked[i]) {
+					int16_t new_val = (int16_t)params.plaits_lpg_color[i] + (int16_t)enc_turn;
+					params.plaits_lpg_color[i] = _CLAMP_I16(new_val, 0, 255);
+				}
+			}
+		} 
+		// INDIVIDUAL
+		else {
+			for (i = 0; i < NUM_CHANNELS; i++){
+				if(button_pressed(i) && params.wt_bank[i] >= 100) {
+					int16_t new_val = (int16_t)params.plaits_lpg_color[i] + (int16_t)enc_turn;
+					params.plaits_lpg_color[i] = _CLAMP_I16(new_val, 0, 255);
+					calc_params.already_handled_button[i] = 1;
+				}
+			}
+		}
+		return; // Don't process phase change
+	}
+
 	if (enc_pressed)
 	{
 		if (!disable_phase_sync)
@@ -624,11 +655,7 @@ void read_LFO_shape(void)
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;								
 				}
 				
-				// PLAITS OVERRIDE: Global Color
-				if (params.wt_bank[i] >= 100 && !lfos.locked[i]) {
-					int16_t new_val = (int16_t)params.plaits_lpg_color[i] + (int16_t)enc;
-					params.plaits_lpg_color[i] = _CLAMP_I16(new_val, 0, 255);
-				}
+
 			}
 		}
 
@@ -643,13 +670,6 @@ void read_LFO_shape(void)
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;							
 				}	
-				
-				// PLAITS OVERRIDE: Individual Color
-				if(button_pressed(i) && params.wt_bank[i] >= 100)
-				{
-					int16_t new_val = (int16_t)params.plaits_lpg_color[i] + (int16_t)enc;
-					params.plaits_lpg_color[i] = _CLAMP_I16(new_val, 0, 255);
-				}
 			}
 		}
 	}	

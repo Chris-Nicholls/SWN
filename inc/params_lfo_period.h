@@ -46,7 +46,7 @@
 
 
 void update_lfo_calcs(void);
-void update_lfo_wt_pos(void);
+void update_lfo_wt_pos(float multiplier);
 
 float calc_lfo_period(uint8_t chan, float global_divmult_id, uint32_t base_period_ms);
 float calc_lfo_period_audiorange(float chan_divmult_id, float global_divmult_id, uint32_t base_period_ms);

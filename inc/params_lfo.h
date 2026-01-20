@@ -122,7 +122,7 @@ typedef struct o_lfos
 extern o_lfos lfos;
 
 
-void update_lfos(void);
+void update_lfos(float multiplier);
 void init_lfos(void);
 void use_internal_lfo_base(void);
 void clear_lfo_locks(void);

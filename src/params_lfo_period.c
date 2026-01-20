@@ -85,18 +85,18 @@ void flag_all_lfos_recalc(void)
 	recalc_flagged[REF_CLK] = 1;
 }
 
-void update_lfo_wt_pos(void)
+void update_lfo_wt_pos(float multiplier)
 {
 	uint8_t chan;
 
-	lfos.cycle_pos[REF_CLK] = _WRAP_F(lfos.cycle_pos[REF_CLK] + lfos.inc[REF_CLK], 0, 1.0);
+	lfos.cycle_pos[REF_CLK] = _WRAP_F(lfos.cycle_pos[REF_CLK] + lfos.inc[REF_CLK] * multiplier, 0, 1.0);
 
 	if (resync_staged[GLO_CLK])
 	{
 		resync_staged[GLO_CLK] = 0;
 		lfos.cycle_pos[GLO_CLK] = _WRAP_F(lfos.cycle_pos[REF_CLK] * lfos.divmult[GLO_CLK], 0, 1);
 	 } else {
-		lfos.cycle_pos[GLO_CLK] = _WRAP_F(lfos.cycle_pos[GLO_CLK] + lfos.inc[GLO_CLK], 0, 1);
+		lfos.cycle_pos[GLO_CLK] = _WRAP_F(lfos.cycle_pos[GLO_CLK] + lfos.inc[GLO_CLK] * multiplier, 0, 1);
 	}
 
 	for (chan=0; chan<NUM_CHANNELS; chan++)
@@ -112,14 +112,14 @@ void update_lfo_wt_pos(void)
 				resync_staged[chan] = 0;
 			}
 			else {
-				lfos.cycle_pos[chan] = _WRAP_F(lfos.cycle_pos[chan] + lfos.inc[chan], 0, 1);
+				lfos.cycle_pos[chan] = _WRAP_F(lfos.cycle_pos[chan] + lfos.inc[chan] * multiplier, 0, 1);
 			}
 		}
 
 		//Note/Key mode: one-shot LFOs (Envelopes)
 		else
 		{
-			if (params.note_on[chan] && ((lfos.cycle_pos[chan] + lfos.inc[chan])>=1.0) ) {
+			if (params.note_on[chan] && ((lfos.cycle_pos[chan] + lfos.inc[chan] * multiplier)>=1.0) ) {
 				params.note_on[chan] = 0;
 			}
 
@@ -130,15 +130,15 @@ void update_lfo_wt_pos(void)
 			}
 
 			else if (!calc_params.gate_in_is_sustaining[chan]) {
-				lfos.cycle_pos[chan] += lfos.inc[chan];
+				lfos.cycle_pos[chan] += lfos.inc[chan] * multiplier;
 			}
 			else {
 				float sustain_pos = lfo_sustain_pos[ lfos.shape[chan] ] / 256.f;
-				uint8_t will_cross_sustain_position = (lfos.cycle_pos[chan]<=sustain_pos) && ((lfos.cycle_pos[chan] + lfos.inc[chan])>sustain_pos);
+				uint8_t will_cross_sustain_position = (lfos.cycle_pos[chan]<=sustain_pos) && ((lfos.cycle_pos[chan] + lfos.inc[chan] * multiplier)>sustain_pos);
 				if (will_cross_sustain_position) {
 					lfos.cycle_pos[chan] = sustain_pos;
 				} else {
-					lfos.cycle_pos[chan] += lfos.inc[chan];
+					lfos.cycle_pos[chan] += lfos.inc[chan] * multiplier;
 				}
 			}
 		}

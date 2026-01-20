@@ -35,6 +35,13 @@
 #include "drivers/ads8634_driver.h"
 
 
+uint32_t cpu_usage_cycles = 0;
+const uint32_t CYCLES_PER_1MS = 216000;
+const uint32_t CYCLES_PER_LFO_PERIOD = 30000; // 216M / 7.2kHz
+const float INV_CYCLES_PER_LFO_PERIOD = 1.0f / 30000.0f;
+float lfo_phase_multiplier = 1.0f;
+
+
 #define USE_HAL_TIM_REGISTER_CALLBACKS 0
 
 #define NUM_TIMERS 14
@@ -376,6 +383,20 @@ void TIM1_BRK_TIM9_IRQHandler(void)
 	if (TIM_IT_IS_SET(TIM9, TIM_IT_UPDATE)){
 		if (TIM_IT_IS_SOURCE(TIM9, TIM_IT_UPDATE))
 		{
+			// High-fidelity delta-time for Phase Catch-up
+			static uint32_t last_now = 0;
+			uint32_t now = DWT->CYCCNT;
+			if (last_now == 0) last_now = now - CYCLES_PER_LFO_PERIOD;
+
+			uint32_t elapsed = now - last_now;
+			// Use multiplication by reciprocal for speed
+			lfo_phase_multiplier = (float)elapsed * INV_CYCLES_PER_LFO_PERIOD;
+			
+			// Safety clamp to prevent massive jumps on initialization or long delays (>50ms)
+			if (lfo_phase_multiplier > 360.0f) lfo_phase_multiplier = 1.0f;
+
+			last_now = now;
+
 			if (tim_callbacks[9] != NULL) tim_callbacks[9]();
 		}
 		// Clear TIM update interrupt

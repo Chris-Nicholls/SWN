@@ -702,7 +702,7 @@ void test_input_jacks(void)
 				LEDDriver_setRGBLED_RGB(get_led_cv_correspondant(test_id), red, green, blue);
 			}
 
-			if (fabs((int16_t)adc_val - (int16_t)(last_adc_val[test_id])) > 50)
+			if (fabsf((int16_t)adc_val - (int16_t)(last_adc_val[test_id])) > 50)
 			{
 				last_adc_val[test_id] = adc_val;
 				LEDDriver_setRGBLED_RGB(led_outring_map[adc_led], 0, 0, 0);

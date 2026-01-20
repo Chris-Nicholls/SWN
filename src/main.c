@@ -103,6 +103,12 @@ int main(void)
 	SCB_InvalidateDCache();
 	SCB_EnableDCache();
 
+	// Enable DWT Cycle Counter
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->LAR = 0xC5ACCE55; // Required on some Cortex-M7 to enable DWT
+	DWT->CYCCNT = 0;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
 	__HAL_RCC_DMA2_CLK_DISABLE();
 
 	// Setup PLL clock for codec
