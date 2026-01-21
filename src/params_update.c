@@ -2123,7 +2123,6 @@ enum WTFlashLoadQueueStates{
 	WT_FLASH_LOAD_5,
 	WT_FLASH_LOAD_6,
 	WT_FLASH_LOAD_7,
-	WT_FLASH_LOAD_8,
 	WT_FLASH_INTERP,
 
 };
@@ -2132,12 +2131,13 @@ void update_wt_interp(void)
 	int8_t chan;
 	uint8_t x[2],y[2],z[2];
 
-	static uint8_t loadx[2][NUM_CHANNELS]={0}, loady[2][NUM_CHANNELS]={0}, loadz[2][NUM_CHANNELS]={0};
+	static uint8_t  loadx[2][NUM_CHANNELS]={0}, loady[2][NUM_CHANNELS]={0}, loadz[2][NUM_CHANNELS]={0};
 	static int16_t	*p_waveform[NUM_CHANNELS][8]; // addresses for 8x waveforms used for interpolation
-	static uint8_t	old_x0[NUM_CHANNELS] = {0xFF};
-	static uint8_t	old_y0[NUM_CHANNELS] = {0xFF};
-	static uint8_t	old_z0[NUM_CHANNELS] = {0xFF};
-	static uint8_t	old_bank[NUM_CHANNELS] = {0xFF};
+	static uint8_t	old_x0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	old_y0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	old_z0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	old_bank[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	loading_bank[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 	static enum WTFlashLoadQueueStates state[NUM_CHANNELS] = {WT_FLASH_NO_ACTION};
 
@@ -2163,10 +2163,21 @@ void update_wt_interp(void)
 				&& (params.wt_bank[chan] == old_bank[chan])
 			)
 		{
-			interp_wt(chan, p_waveform[chan]);
+			// Even when just refreshing positions, ensure we didn't just come back from Editing mode with stale cache/pointers
+			if (p_waveform[chan][0] != waveform[chan][0][0][0].wave) {
+				old_bank[chan] = 0xFF; // Force a full reload to restore pointers
+			} else {
+				interp_wt(chan, p_waveform[chan]);
+			}
 		}
 		else
 		{
+			// Reset load state if target changed OR update is FORCED (but only if not already loading)
+			if ((state[chan] == WT_FLASH_NO_ACTION) && (params.wt_bank[chan] != old_bank[chan] || wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_FORCE)) {
+				state[chan] = WT_FLASH_NO_ACTION;
+				old_bank[chan] = 0xFF; // Definitive invalidation
+			}
+
 			if (ui_mode == PLAY)
 			{
 				if (get_flash_state() != sFLASH_NOTBUSY)
@@ -2180,6 +2191,19 @@ void update_wt_interp(void)
 					loadx[1][chan] = wt_osc.m1[0][chan];
 					loady[1][chan] = wt_osc.m1[1][chan];
 					loadz[1][chan] = wt_osc.m1[2][chan];
+					loading_bank[chan] = params.wt_bank[chan];
+					
+					// Commit target coordinates now so we can detect mid-load changes
+					old_x0[chan] = loadx[0][chan];
+					old_y0[chan] = loady[0][chan];
+					old_z0[chan] = loadz[0][chan];
+				} else {
+					// Detect if target parameters changed mid-load and restart if necessary
+					if (loadx[0][chan] != wt_osc.m0[0][chan] || loady[0][chan] != wt_osc.m0[1][chan] || loadz[0][chan] != wt_osc.m0[2][chan] || loading_bank[chan] != params.wt_bank[chan]) {
+						state[chan] = WT_FLASH_NO_ACTION;
+						old_bank[chan] = 0xFF; 
+						continue;
+					}
 				}
 
 				state[chan]++;
@@ -2189,22 +2213,27 @@ void update_wt_interp(void)
 					uint8_t sb0 = s&1;
 					uint8_t sb1 = (s&2)>>1;
 					uint8_t sb2 = (s&4)>>2;
-					load_extflash_wavetable(params.wt_bank[chan], &(waveform[chan][sb2][sb1][sb0]), loadx[sb2][chan], loady[sb1][chan], loadz[sb0][chan]);
+					load_extflash_wavetable(params.wt_bank[chan], &(waveform[chan][sb2][sb1][sb0]), loadx[sb0][chan], loady[sb1][chan], loadz[sb2][chan]);
 				}
 				else {
-					old_x0[chan] = loadx[0][chan];
-					old_y0[chan] = loady[0][chan];
-					old_z0[chan] = loadz[0][chan];
 					old_bank[chan] = params.wt_bank[chan];
 
-					p_waveform[chan][0] = waveform[chan][0][0][0].wave;
-					p_waveform[chan][1] = waveform[chan][1][0][0].wave;
-					p_waveform[chan][2] = waveform[chan][0][1][0].wave;
-					p_waveform[chan][3] = waveform[chan][1][1][0].wave;
-					p_waveform[chan][4] = waveform[chan][0][0][1].wave;
-					p_waveform[chan][5] = waveform[chan][1][0][1].wave;
-					p_waveform[chan][6] = waveform[chan][0][1][1].wave;
-					p_waveform[chan][7] = waveform[chan][1][1][1].wave;
+					// Invalidate D-Cache for all 8 corners because they were loaded via DMA
+					// Without this, the D-Cache may contain stale data as loading via DMA into sram 
+					// does not automatically invalidate the D-Cache
+					#ifndef HOST_TEST
+					SCB_InvalidateDCache_by_Addr((uint32_t *)&(waveform[chan][0][0][0]), sizeof(o_waveform) * 8);
+					#endif
+
+					p_waveform[chan][0] = waveform[chan][0][0][0].wave; // 0,0,0
+					p_waveform[chan][1] = waveform[chan][0][0][1].wave; // 1,0,0 (X=1)
+					p_waveform[chan][2] = waveform[chan][0][1][0].wave; // 0,1,0 (Y=1)
+					p_waveform[chan][3] = waveform[chan][0][1][1].wave; // 1,1,0 (X=1, Y=1)
+					p_waveform[chan][4] = waveform[chan][1][0][0].wave; // 0,0,1 (Z=1)
+					p_waveform[chan][5] = waveform[chan][1][0][1].wave; // 1,0,1 (X=1, Z=1)
+					p_waveform[chan][6] = waveform[chan][1][1][0].wave; // 0,1,1 (Y=1, Z=1)
+					p_waveform[chan][7] = waveform[chan][1][1][1].wave; // 1,1,1 (X=1, Y=1, Z=1)
+					
 					state[chan] = WT_FLASH_NO_ACTION;
 					interp_wt(chan, p_waveform[chan]);
 				}
@@ -2221,6 +2250,7 @@ void update_wt_interp(void)
 				old_x0[chan] = x[0];
 				old_y0[chan] = y[0];
 				old_z0[chan] = z[0];
+				old_bank[chan] = params.wt_bank[chan];
 
 				p_waveform[chan][0] =  spherebuf.data[x[0]][y[0]][z[0]].wave;
 				p_waveform[chan][1] =  spherebuf.data[x[1]][y[0]][z[0]].wave;
@@ -2266,8 +2296,8 @@ void interp_wt(uint8_t chan, int16_t *p_waveform[8]){
 			i++;
 		}
 	}
-	wt_osc.buffer_sel[chan]		= 1 - wt_osc.buffer_sel[chan];
 	wt_osc.wt_xfade[chan]			= 1.0;
+	wt_osc.buffer_sel[chan]		= 1 - wt_osc.buffer_sel[chan];
 	wt_osc.wt_interp_request[chan]	= WT_INTERP_REQ_NONE;
 
 }
