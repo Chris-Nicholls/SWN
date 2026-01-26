@@ -27,6 +27,7 @@
  */
 
 #include <stm32f7xx.h>
+#include <math.h>
 #include "params_lfo.h"
 #include "params_lfo_clk.h"
 #include "params_lfo_period.h"
@@ -43,12 +44,11 @@ extern o_systemSettings	system_settings;
 
 void read_ext_clk(void)
 {
-	static uint32_t cur_time=0;
-	static uint32_t prev_clock_timestamp = 0;
+	static uint32_t prev_clock_cycles = 0;
 	static uint8_t 	clock_up;
-	static uint32_t noclock_elapsed_ticks;
-	int32_t test_period;
-	int32_t clock_difference;
+	uint32_t cur_cycles;
+	float test_period;
+	float clock_difference;
 
 	uint8_t		clock_state;
 
@@ -62,30 +62,37 @@ void read_ext_clk(void)
 	else
 		clock_state = 0;
 
-	//This runs every 138uS with a jitter of +/-34us (104-172us), so 7 or 8 times within every millisecond range
-	cur_time = HAL_GetTick();
+	// Use DWT cycle counter for high-fidelity timing (immune to Systick jitter/stall)
+	cur_cycles = DWT->CYCCNT;
 
 		if (clock_state && !clock_up)
 		{
 			clock_up = 1;
 
 			led_cont.waiting_for_clockin = 0;
-			test_period = cur_time - prev_clock_timestamp;
+			
+			// 1 tick = 1/8000 sec = 216,000,000 / 8,000 = 27,000 cycles
+			// Use float for high precision
+			test_period = (float)(cur_cycles - prev_clock_cycles) / 27000.0f;
 
-			if (prev_clock_timestamp && test_period)
+			if (prev_clock_cycles && test_period > 0.0f)
 			{
 				//Divide down audio-rate incoming clocks
-				while (test_period < F_LFO_AUDIO_RANGE_PERIOD_L) test_period*=2;
+				while (test_period < F_LFO_AUDIO_RANGE_PERIOD_L) test_period *= 2.0f;
 
-				clock_difference = _ABS_I32(test_period - (int32_t)lfos.period[REF_CLK]);
+				clock_difference = fabsf(test_period - lfos.period[REF_CLK]);
 
-				if (clock_difference > 0)
+				if (clock_difference > 0.0f)
 				{
 					//Re-sync phases if clock changes by more than 1%
 					if ( ((float)clock_difference / (float)lfos.period[REF_CLK]) > 0.01 )
 						stage_resync_lfos();
 
-					lfos.period[REF_CLK] = test_period;
+					if (lfos.period[REF_CLK] == 0)
+						lfos.period[REF_CLK] = test_period;
+					else
+						lfos.period[REF_CLK] = (lfos.period[REF_CLK] * 7.0f + (float)test_period) * 0.125f;
+
 					lfos.cycle_pos[REF_CLK] = 0;
 					
 					//lfos.inc[REF_CLK] = calc_lfo_inc(lfos.period[REF_CLK]);
@@ -94,7 +101,7 @@ void read_ext_clk(void)
 				lfos.use_ext_clock = 1;
 			}
 
-			prev_clock_timestamp = cur_time;
+			prev_clock_cycles = cur_cycles;
 		}
 	// }
 
@@ -103,10 +110,10 @@ void read_ext_clk(void)
  		clock_up = 0;
 
  		// CLOCK DETECTION TIMEOUT
-		noclock_elapsed_ticks = cur_time - prev_clock_timestamp;
+		uint32_t noclock_elapsed_ticks = (cur_cycles - prev_clock_cycles) / 27000;
 		if ( noclock_elapsed_ticks > (lfos.period[REF_CLK]*2))
 		{
-			// prev_clock_timestamp = 0;
+			// prev_clock_cycles = 0;
 			led_cont.waiting_for_clockin = 0;
 			lfos.use_ext_clock = 0;
 			led_cont.clockin_wait_progress = 0;
@@ -118,8 +125,3 @@ void read_ext_clk(void)
 		}
 	}
 }
-
-
-
-
-

@@ -113,7 +113,7 @@ void init_timekeeper(void)
 	i = PWM_OUTS_TIM_number;
 	tim_timing[i].priority1 		= 0;
 	tim_timing[i].priority2 		= 3;
-	tim_timing[i].period 			= 30000;
+	tim_timing[i].period 			= 29999;
 	tim_timing[i].prescaler			= 0;
 	tim_timing[i].clock_division 	= 0;
 
