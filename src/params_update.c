@@ -749,7 +749,7 @@ void read_noteon(uint8_t i)
 
 float default_pan(uint8_t chan)
 {
-	return (chan&1) ? 0.f : 1.f;
+	return (chan&1) ? 0.33f :0.66f;
 }
 
 void read_level_and_pan(uint8_t chan)
