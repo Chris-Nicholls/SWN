@@ -24,38 +24,46 @@
 //
 // -----------------------------------------------------------------------------
 //
-// One voice of modal synthesis.
+// Extended Karplus-Strong, with all the niceties from Rings.
 
-#ifndef PLAITS_DSP_ENGINE_MODAL_ENGINE_H_
-#define PLAITS_DSP_ENGINE_MODAL_ENGINE_H_
+#ifndef PLAITS_DSP_PHYSICAL_STRING_VOICE_OPTIMISED_H_
+#define PLAITS_DSP_PHYSICAL_STRING_VOICE_OPTIMISED_H_
 
-#include "plaits/dsp/engine/engine.h"
-#include "plaits/dsp/physical_modelling/modal_voice_optimised.h"
+#include "stmlib/dsp/filter.h"
+#include "stmlib/utils/buffer_allocator.h"
+
+#include "plaits/dsp/physical_modelling/string_optimised.h"
 
 namespace plaits {
 
-class ModalEngine : public Engine {
+class StringVoiceOptimised {
  public:
-  ModalEngine() { }
-  ~ModalEngine() { }
+  StringVoiceOptimised() { }
+  ~StringVoiceOptimised() { }
   
-  virtual void Init(stmlib::BufferAllocator* allocator);
-  virtual void Reset();
-  virtual void LoadUserData(const uint8_t* user_data) { }
-  virtual void Render(const EngineParameters& parameters,
+  void Init(stmlib::BufferAllocator* allocator);
+  void Reset();
+  void Render(
+      bool sustain,
+      bool trigger,
+      float accent,
+      float f0,
+      float structure,
+      float brightness,
+      float damping,
+      float* temp,
       float* out,
       float* aux,
-      size_t size,
-      bool* already_enveloped);
+      size_t size);
   
  private:
-  ModalVoiceOptimised voice_;
-  float* temp_buffer_;
-  float harmonics_lp_;
+  stmlib::Svf excitation_filter_;
+  StringOptimised string_;
+  size_t remaining_noise_samples_;
   
-  DISALLOW_COPY_AND_ASSIGN(ModalEngine);
+  DISALLOW_COPY_AND_ASSIGN(StringVoiceOptimised);
 };
 
 }  // namespace plaits
 
-#endif  // PLAITS_DSP_ENGINE_MODAL_ENGINE_H_
+#endif  // PLAITS_DSP_PHYSICAL_STRING_VOICE_OPTIMISED_H_

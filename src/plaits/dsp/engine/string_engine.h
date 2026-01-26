@@ -30,7 +30,7 @@
 #define PLAITS_DSP_ENGINE_STRING_ENGINE_H_
 
 #include "plaits/dsp/engine/engine.h"
-#include "plaits/dsp/physical_modelling/string_voice.h"
+#include "plaits/dsp/physical_modelling/string_voice_optimised.h"
 
 namespace plaits {
 
@@ -51,7 +51,7 @@ class StringEngine : public Engine {
       bool* already_enveloped);
 
  private:
-  StringVoice voice_[kNumStrings];
+  StringVoiceOptimised voice_[kNumStrings];
 
   float f0_[kNumStrings];
   DelayLine<float, 16> f0_delay_;

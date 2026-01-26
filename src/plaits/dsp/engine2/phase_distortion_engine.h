@@ -27,8 +27,8 @@
 // Phase distortion and phase modulation with an asymmetric triangle as the
 // modulator.
 
-#ifndef PLAITS_DSP_ENGINE_PHASE_DISTORTION_ENGINE_H_
-#define PLAITS_DSP_ENGINE_PHASE_DISTORTION_ENGINE_H_
+#ifndef PLAITS_DSP_ENGINE2_PHASE_DISTORTION_ENGINE_H_
+#define PLAITS_DSP_ENGINE2_PHASE_DISTORTION_ENGINE_H_
 
 #include "plaits/dsp/engine/engine.h"
 #include "plaits/dsp/oscillator/variable_shape_oscillator.h"
@@ -59,4 +59,4 @@ class PhaseDistortionEngine : public Engine {
 
 }  // namespace plaits
 
-#endif  // PLAITS_DSP_ENGINE_PHASE_DISTORTION_ENGINE_H_
+#endif  // PLAITS_DSP_ENGINE2_PHASE_DISTORTION_ENGINE_H_

@@ -53,11 +53,11 @@ class DelayLine {
   
   inline void Write(const T sample) {
     line_[write_ptr_] = sample;
-    write_ptr_ = (write_ptr_ - 1 + max_delay) % max_delay;
+    write_ptr_ = (write_ptr_ - 1) & (max_delay - 1);
   }
   
   inline const T Allpass(const T sample, size_t delay, const T coefficient) {
-    T read = line_[(write_ptr_ + delay) % max_delay];
+    T read = line_[(write_ptr_ + delay) & (max_delay - 1)];
     T write = sample + coefficient * read;
     Write(write);
     return -write * coefficient + read;
@@ -70,18 +70,18 @@ class DelayLine {
   
   inline const T Read(float delay) const {
     MAKE_INTEGRAL_FRACTIONAL(delay)
-    const T a = line_[(write_ptr_ + delay_integral) % max_delay];
-    const T b = line_[(write_ptr_ + delay_integral + 1) % max_delay];
+    const T a = line_[(write_ptr_ + delay_integral) & (max_delay - 1)];
+    const T b = line_[(write_ptr_ + delay_integral + 1) & (max_delay - 1)];
     return a + (b - a) * T(delay_fractional);
   }
   
   inline const T ReadHermite(float delay) const {
     MAKE_INTEGRAL_FRACTIONAL(delay)
-    int32_t t = (write_ptr_ + delay_integral + max_delay);
-    const T xm1 = line_[(t - 1) % max_delay];
-    const T x0 = line_[(t) % max_delay];
-    const T x1 = line_[(t + 1) % max_delay];
-    const T x2 = line_[(t + 2) % max_delay];
+    int32_t t = (write_ptr_ + delay_integral);
+    const T xm1 = line_[(t - 1) & (max_delay - 1)];
+    const T x0 = line_[(t) & (max_delay - 1)];
+    const T x1 = line_[(t + 1) & (max_delay - 1)];
+    const T x2 = line_[(t + 2) & (max_delay - 1)];
     const T c = (x1 - xm1) * 0.5f;
     const T v = x0 - x1;
     const T w = c + v;

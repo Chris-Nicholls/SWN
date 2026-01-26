@@ -63,7 +63,14 @@ void WavetableEngine::Init(BufferAllocator* allocator) {
 
   diff_out_.Init();
   
-  wave_map_ = allocator->Allocate<const int16_t*>(kNumWavesPerBank);
+  wave_map_ = allocator->Allocate<const int16_t*>(kNumWavesPerBank * kNumBanks);
+  
+  // Initialize all wave_map_ pointers to valid defaults to prevent uninitialized access
+  // LoadUserData will be called later to populate with actual user data
+  for (int i = 0; i < kNumWavesPerBank * kNumBanks; ++i) {
+    int w = i % kNumWaves;  // Wrap to built-in waves
+    wave_map_[i] = wav_integrated_waves + size_t(w) * (kTableSize + 4);
+  }
 }
 
 void WavetableEngine::Reset() {
@@ -81,9 +88,13 @@ void WavetableEngine::LoadUserData(const uint8_t* user_data) {
       }
 
       const int16_t* base = wav_integrated_waves;
-      if (w >= kNumWaves) {
+      // Only use custom waves if user_data is actually provided
+      if (w >= kNumWaves && user_data) {
         base = (const int16_t*)(user_data + 64);
         w = min(w - kNumWaves, kNumCustomWaves);
+      } else if (w >= kNumWaves) {
+        // Fallback: wrap to built-in waves if no user data
+        w = w % kNumWaves;
       }
       wave_map_[i] = base + size_t(w) * (kTableSize + 4);
     }

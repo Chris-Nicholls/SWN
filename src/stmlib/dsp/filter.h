@@ -83,6 +83,14 @@ class DCBlocker {
     y_ = y;
   }
   
+  inline float x() const { return x_; }
+  inline float y() const { return y_; }
+  inline float pole() const { return pole_; }
+  inline void set_states(float x, float y) {
+    x_ = x;
+    y_ = y;
+  }
+  
  private:
   float pole_;
   float x_;
@@ -457,10 +465,17 @@ class Svf {
     state_1_ = state_1;
     state_2_ = state_2;
   }
-  
+
   inline float g() const { return g_; }
   inline float r() const { return r_; }
   inline float h() const { return h_; }
+
+  inline float state_1() const { return state_1_; }
+  inline float state_2() const { return state_2_; }
+  inline void set_states(float s1, float s2) {
+    state_1_ = s1;
+    state_2_ = s2;
+  }
   
  private:
   float g_;

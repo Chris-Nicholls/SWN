@@ -31,7 +31,7 @@
 
 #include "plaits/dsp/engine/engine.h"
 #include "plaits/dsp/fx/diffuser.h"
-#include "plaits/dsp/noise/particle.h"
+#include "plaits/dsp/noise/particle_optimised.h"
 
 namespace plaits {
 
@@ -52,7 +52,7 @@ class ParticleEngine : public Engine {
       bool* already_enveloped);
 
  private:
-  Particle particle_[kNumParticles];
+  ParticleOptimised particle_[kNumParticles];
   Diffuser diffuser_;
   stmlib::Svf post_filter_;
   

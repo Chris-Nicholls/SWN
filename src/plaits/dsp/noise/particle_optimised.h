@@ -26,20 +26,21 @@
 //
 // Random impulse train processed by a resonant filter.
 
-#ifndef PLAITS_DSP_NOISE_PARTICLE_H_
-#define PLAITS_DSP_NOISE_PARTICLE_H_
+#ifndef PLAITS_DSP_NOISE_PARTICLE_OPTIMISED_H_
+#define PLAITS_DSP_NOISE_PARTICLE_OPTIMISED_H_
 
 #include "stmlib/dsp/dsp.h"
 #include "stmlib/dsp/filter.h"
 #include "stmlib/dsp/units.h"
 #include "stmlib/utils/random.h"
+#include "plaits/dsp/dsp.h"
 
 namespace plaits {
 
-class Particle {
+class ParticleOptimised {
  public:
-  Particle() { }
-  ~Particle() { }
+  ParticleOptimised() { }
+  ~ParticleOptimised() { }
 
   inline void Init() {
     pre_gain_ = 0.0f;
@@ -60,25 +61,52 @@ class Particle {
     if (sync) {
       u = density;
     }
-    bool can_radomize_frequency = true;
-    while (size--) {
+    
+    float excitation[kMaxBlockSize];
+    int first_pulse = -1;
+    bool can_randomize = true;
+    float f_new = 0.0f;
+    
+    for (size_t i = 0; i < size; ++i) {
       float s = 0.0f;
       if (u <= density) {
         s = u * gain;
-        if (can_radomize_frequency) {
-          const float u = 2.0f * stmlib::Random::GetFloat() - 1.0f;
-          const float f = std::min(
-              stmlib::SemitonesToRatio(spread * u) * frequency,
-              0.25f);
-          pre_gain_ = 0.5f / stmlib::Sqrt(q * f * stmlib::Sqrt(density));
-          filter_.set_f_q<stmlib::FREQUENCY_DIRTY>(f, q);
-          // Keep the cutoff constant for this whole block.
-          can_radomize_frequency = false;
+        if (can_randomize) {
+          first_pulse = i;
+          const float u_rand = 2.0f * stmlib::Random::GetFloat() - 1.0f;
+          f_new = std::min(stmlib::SemitonesToRatio(spread * u_rand) * frequency, 0.25f);
+          pre_gain_ = 0.5f / stmlib::Sqrt(q * f_new * stmlib::Sqrt(density));
+          can_randomize = false;
         }
       }
-      *aux++ += s;
-      *out++ += filter_.Process<stmlib::FILTER_MODE_BAND_PASS>(pre_gain_ * s);
+      excitation[i] = s;
+      aux[i] += s;
       u = stmlib::Random::GetFloat();
+    }
+
+    if (first_pulse == -1) {
+      // Input is all 0, scaling doesn't matter, but we must process for decay.
+      filter_.ProcessAdd<stmlib::FILTER_MODE_BAND_PASS>(excitation, out, size, 1.0f);
+    } else {
+      // Samples before first pulse are 0, scaling doesn't matter.
+      if (first_pulse > 0) {
+        filter_.ProcessAdd<stmlib::FILTER_MODE_BAND_PASS>(excitation, out, first_pulse, 1.0f);
+      }
+      
+      // Update filter with new coefficients
+      filter_.set_f_q<stmlib::FREQUENCY_DIRTY>(f_new, q);
+      
+      // Scale the rest of the excitation (from first_pulse onwards) by the NEW pre_gain_
+      for (size_t i = first_pulse; i < size; ++i) {
+        excitation[i] *= pre_gain_;
+      }
+      
+      // Process the rest with gain 1.0 (since scaling is already applied)
+      filter_.ProcessAdd<stmlib::FILTER_MODE_BAND_PASS>(
+          &excitation[first_pulse], 
+          &out[first_pulse], 
+          size - first_pulse, 
+          1.0f);
     }
   }
   
@@ -86,9 +114,9 @@ class Particle {
   float pre_gain_;
   stmlib::Svf filter_;
   
-  DISALLOW_COPY_AND_ASSIGN(Particle);
+  DISALLOW_COPY_AND_ASSIGN(ParticleOptimised);
 };
 
 }  // namespace plaits
 
-#endif  // PLAITS_DSP_NOISE_PARTICLE_H_
+#endif  // PLAITS_DSP_NOISE_PARTICLE_OPTIMISED_H_

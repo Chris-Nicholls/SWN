@@ -31,7 +31,9 @@
 
 #include <algorithm>
 
-#include "stmlib/dsp/parameter_interpolator.h"
+#include "stmlib/dsp/dsp.h"
+#include "stmlib/dsp/units.h"
+#include "stmlib/utils/random.h"
 
 #include "plaits/dsp/oscillator/sine_oscillator.h"
 #include "plaits/resources.h"
@@ -48,7 +50,8 @@ void PhaseDistortionEngine::Init(BufferAllocator* allocator) {
 }
 
 void PhaseDistortionEngine::Reset() {
-  
+  shaper_.Init();
+  modulator_.Init();
 }
 
 void PhaseDistortionEngine::Render(
@@ -76,7 +79,7 @@ void PhaseDistortionEngine::Render(
   
   for (size_t i = 0; i < size; ++i) {
     // Naive 0.5x downsampling.
-    out[i] = 0.5f * Sine(*synced++ + 0.25f);
+     out[i] = 0.5f * Sine(*synced++ + 0.25f);
     out[i] += 0.5f * Sine(*synced++ + 0.25f);
     
     aux[i] = 0.5f * Sine(*free_running++ + 0.25f);

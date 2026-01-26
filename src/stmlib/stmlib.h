@@ -50,12 +50,17 @@
 #define JOIN_1(lhs, rhs)  JOIN_2(lhs, rhs)
 #define JOIN_2(lhs, rhs)  lhs##rhs
 
+#if __cplusplus >= 201103L
+#define STATIC_ASSERT(expression, message) static_assert(expression, #message)
+#else
 #define STATIC_ASSERT(expression, message)\
   struct JOIN(__static_assertion_at_line_, __LINE__)\
   {\
     impl::StaticAssertion<static_cast<bool>((expression))> JOIN(JOIN(JOIN(STATIC_ASSERTION_FAILED_AT_LINE_, __LINE__), _), message);\
   };\
-  typedef impl::StaticAssertionTest<sizeof(JOIN(__static_assertion_at_line_, __LINE__))> JOIN(__static_assertion_test_at_line_, __LINE__)
+  typedef impl::StaticAssertionTest<sizeof(JOIN(__static_assertion_at_line_, __LINE__))> JOIN(__static_assertion_test_at_line_, __LINE__) __attribute__((unused))
+#endif
+
 
 namespace impl {
 

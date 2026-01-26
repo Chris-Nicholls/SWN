@@ -1,4 +1,4 @@
-// Copyright 2016 Emilie Gillet.
+// Copyright 2021 Emilie Gillet.
 //
 // Author: Emilie Gillet (emilie.o.gillet@gmail.com)
 //
@@ -24,21 +24,21 @@
 //
 // -----------------------------------------------------------------------------
 //
-// One voice of modal synthesis.
+// Phase distortion and phase modulation with an asymmetric triangle as the
+// modulator.
 
-#ifndef PLAITS_DSP_ENGINE_MODAL_ENGINE_H_
-#define PLAITS_DSP_ENGINE_MODAL_ENGINE_H_
+#ifndef PLAITS_DSP_ENGINE2_PHASE_DISTORTION_ENGINE_OPTIMISED_H_
+#define PLAITS_DSP_ENGINE2_PHASE_DISTORTION_ENGINE_OPTIMISED_H_
 
 #include "plaits/dsp/engine/engine.h"
-#include "plaits/dsp/physical_modelling/modal_voice_optimised.h"
 
 namespace plaits {
 
-class ModalEngine : public Engine {
+class PhaseDistortionEngineOptimised : public Engine {
  public:
-  ModalEngine() { }
-  ~ModalEngine() { }
-  
+  PhaseDistortionEngineOptimised() { }
+  ~PhaseDistortionEngineOptimised() { }
+
   virtual void Init(stmlib::BufferAllocator* allocator);
   virtual void Reset();
   virtual void LoadUserData(const uint8_t* user_data) { }
@@ -47,15 +47,23 @@ class ModalEngine : public Engine {
       float* aux,
       size_t size,
       bool* already_enveloped);
-  
+
  private:
-  ModalVoiceOptimised voice_;
-  float* temp_buffer_;
-  float harmonics_lp_;
+  float master_phase_;
+  float slave_phase_;
+  float slave_phase_2_;
+
+  float previous_f0_;
+  float previous_modulator_f_;
+  float previous_pw_;
+  float previous_amount_;
+
+  float next_sample_;
+  float next_sample_2_;
   
-  DISALLOW_COPY_AND_ASSIGN(ModalEngine);
+  DISALLOW_COPY_AND_ASSIGN(PhaseDistortionEngineOptimised);
 };
 
 }  // namespace plaits
 
-#endif  // PLAITS_DSP_ENGINE_MODAL_ENGINE_H_
+#endif  // PLAITS_DSP_ENGINE2_PHASE_DISTORTION_ENGINE_OPTIMISED_H_

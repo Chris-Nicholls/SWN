@@ -53,7 +53,7 @@
 #include "plaits/dsp/engine/wavetable_engine.h"
 
 #include "plaits/dsp/engine2/chiptune_engine.h"
-#include "plaits/dsp/engine2/phase_distortion_engine.h"
+#include "plaits/dsp/engine2/phase_distortion_engine_optimised.h"
 #include "plaits/dsp/engine2/six_op_engine.h"
 #include "plaits/dsp/engine2/string_machine_engine.h"
 #include "plaits/dsp/engine2/virtual_analog_vcf_engine.h"
@@ -220,7 +220,7 @@ class Voice {
   HiHatEngine hi_hat_engine_;
   
   VirtualAnalogVCFEngine virtual_analog_vcf_engine_;
-  PhaseDistortionEngine phase_distortion_engine_;
+  PhaseDistortionEngineOptimised phase_distortion_engine_;
   SixOpEngine six_op_engine_;
   WaveTerrainEngine wave_terrain_engine_;
   StringMachineEngine string_machine_engine_;

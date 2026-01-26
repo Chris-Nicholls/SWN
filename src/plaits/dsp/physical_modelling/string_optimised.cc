@@ -26,7 +26,7 @@
 //
 // Comb filter / KS string. "Lite" version of the implementation used in Rings.
 
-#include "plaits/dsp/physical_modelling/string.h"
+#include "plaits/dsp/physical_modelling/string_optimised.h"
 
 #include <cmath>
 
@@ -43,13 +43,13 @@ namespace plaits {
 using namespace std;
 using namespace stmlib;
 
-void String::Init(stmlib::BufferAllocator* allocator) {
-  string_.Init(allocator->Allocate<float>(kDelayLineSize));
-  stretch_.Init(allocator->Allocate<float>(kDelayLineSize / 4));
+void StringOptimised::Init(stmlib::BufferAllocator* allocator) {
+  string_.Init(allocator->Allocate<float>(kDelayLineSizeOptimised));
+  stretch_.Init(allocator->Allocate<float>(kDelayLineSizeOptimised / 4));
   Reset();
 }
 
-void String::Reset() {
+void StringOptimised::Reset() {
   string_.Reset();
   stretch_.Reset();
   iir_damping_filter_.Init();
@@ -61,7 +61,7 @@ void String::Reset() {
   out_sample_[0] = out_sample_[1] = 0.0f;
 }
 
-void String::Process(
+void StringOptimised::Process(
     float f0,
     float non_linearity_amount,
     float brightness,
@@ -70,16 +70,16 @@ void String::Process(
     float* out,
     size_t size) {
   if (non_linearity_amount <= 0.0f) {
-    ProcessInternal<STRING_NON_LINEARITY_CURVED_BRIDGE>(
+    ProcessInternal<STRING_NON_LINEARITY_CURVED_BRIDGE_OPTIMISED>(
         f0, -non_linearity_amount, brightness, damping, in, out, size);
   } else {
-    ProcessInternal<STRING_NON_LINEARITY_DISPERSION>(
+    ProcessInternal<STRING_NON_LINEARITY_DISPERSION_OPTIMISED>(
         f0, non_linearity_amount, brightness, damping, in, out, size);
   }
 }
 
-template<StringNonLinearity non_linearity>
-void String::ProcessInternal(
+template<StringNonLinearityOptimised non_linearity>
+void StringOptimised::ProcessInternal(
     float f0,
     float non_linearity_amount,
     float brightness,
@@ -88,7 +88,7 @@ void String::ProcessInternal(
     float* __restrict__ out,
     size_t size) {
   float delay = 1.0f / f0;
-  CONSTRAIN(delay, 4.0f, kDelayLineSize - 4.0f);
+  CONSTRAIN(delay, 4.0f, kDelayLineSizeOptimised - 4.0f);
 
   float damping_cutoff = min(
       12.0f + damping * damping * 60.0f + brightness * 24.0f,
@@ -125,12 +125,22 @@ void String::ProcessInternal(
   float bridge_curving = bridge_curving_sqrt * bridge_curving_sqrt * 0.01f;
   
   float ap_gain = -0.618f * non_linearity_amount / (0.15f + fabsf(non_linearity_amount));
+
+  float svf_s1 = iir_damping_filter_.state_1();
+  float svf_s2 = iir_damping_filter_.state_2();
+  const float svf_g = iir_damping_filter_.g();
+  const float svf_r = iir_damping_filter_.r();
+  const float svf_h = iir_damping_filter_.h();
+  
+  float dc_x = dc_blocker_.x();
+  float dc_y = dc_blocker_.y();
+  const float dc_pole = dc_blocker_.pole();
   
   while (size--) {
     float delay = delay_modulation.Next();
     float s = 0.0f;
     
-    if (non_linearity == STRING_NON_LINEARITY_DISPERSION) {
+    if (non_linearity == STRING_NON_LINEARITY_DISPERSION_OPTIMISED) {
       float noise = Random::GetFloat() - 0.5f;
       ONE_POLE(dispersion_noise_, noise, noise_filter)
       delay *= 1.0f + dispersion_noise_ * noise_amount;
@@ -138,7 +148,7 @@ void String::ProcessInternal(
       delay *= 1.0f - curved_bridge_ * bridge_curving;
     }
     
-    if (non_linearity == STRING_NON_LINEARITY_DISPERSION) {
+    if (non_linearity == STRING_NON_LINEARITY_DISPERSION_OPTIMISED) {
       float ap_delay = delay * stretch_point;
       float main_delay = delay - ap_delay * (0.408f - stretch_point * 0.308f) * stretch_correction;
       if (ap_delay >= 4.0f && main_delay >= 4.0f) {
@@ -151,21 +161,35 @@ void String::ProcessInternal(
       s = string_.ReadHermite(delay);
     }
     
-    if (non_linearity == STRING_NON_LINEARITY_CURVED_BRIDGE) {
+    if (non_linearity == STRING_NON_LINEARITY_CURVED_BRIDGE_OPTIMISED) {
       float value = fabsf(s) - 0.025f;
       float sign = s > 0.0f ? 1.0f : -1.5f;
       curved_bridge_ = (fabsf(value) + value) * sign;
     }
   
     s += *in++;
-    CONSTRAIN(s, -20.0f, +20.0f);
+    if (s < -20.0f) s = -20.0f;
+    else if (s > 20.0f) s = 20.0f;
     
-    dc_blocker_.Process(&s, 1);
-    s = iir_damping_filter_.Process<FILTER_MODE_LOW_PASS>(s);
+    // DC Blocker
+    float old_x = dc_x;
+    dc_x = s;
+    s = dc_y = dc_y * dc_pole + dc_x - old_x;
+    
+    // SVF
+    float hp = (s - svf_r * svf_s1 - svf_g * svf_s1 - svf_s2) * svf_h;
+    float bp = svf_g * hp + svf_s1;
+    svf_s1 = svf_g * hp + bp;
+    float lp = svf_g * bp + svf_s2;
+    svf_s2 = svf_g * bp + lp;
+    s = lp;
+    
     string_.Write(s);
-
     *out++ += s;
   }
+  
+  iir_damping_filter_.set_states(svf_s1, svf_s2);
+  dc_blocker_.set_states(dc_x, dc_y);
 }
 
 }  // namespace plaits
