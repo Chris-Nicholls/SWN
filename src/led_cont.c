@@ -1083,12 +1083,12 @@ void display_finetune (void)
 		}
 		else {
 			if (t_finetune<0) {
-				period = _CLAMP_I16(1000+(t_finetune*8), 50, 1000);
+				period = _CLAMP_I16(1000+(t_finetune*0.8f), 50, 1000);
 				detune_pos_i = j*3;
 				set_rgb_color(&led_cont.outring[detune_pos_i], ledc_BLUE);
 			}
 			else {
-				period = _CLAMP_I16(1000-(t_finetune*8), 50, 1000);
+				period = _CLAMP_I16(1000-(t_finetune*0.8f), 50, 1000);
 				detune_pos_i = j*3+2;
 				set_rgb_color(&led_cont.outring[detune_pos_i], ledc_RED);
 			}

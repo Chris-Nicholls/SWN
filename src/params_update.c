@@ -1588,7 +1588,7 @@ void update_finetune(int16_t tmp)
 	for (i = 0; i < NUM_CHANNELS; i++)
 		finetune[i] = params.finetune[i];
 
-	channels_changed = change_param_i16(finetune, tmp);
+	channels_changed = change_param_i16(finetune, tmp * 10);
 
 	if (channels_changed)
 	{
@@ -1664,20 +1664,20 @@ void resync_audio_osc(uint8_t channels)
 
 
 
-// Fine-tune spread multipliers per channel (cents per encoder step)
-// Customize these values to change the spread pattern
-static const int8_t spread_finetune_mult[NUM_CHANNELS] = {
-	-3,  // Channel A
-	-2,  // Channel B
-	-1,  // Channel C
-	 1,  // Channel D
-	 2,  // Channel E
-	 3   // Channel F
+// Fine-tune spread multipliers per channel (0.1 cents per encoder step)
+// Slightly asymmetric to avoid predictable beating
+static const int16_t spread_finetune_mult[NUM_CHANNELS] = {
+	-35,  // Channel A
+	-19,  // Channel B
+	-11,  // Channel C
+	 12,  // Channel D
+	 21,  // Channel E
+	 33   // Channel F
 };
 
 void spread_finetune(int16_t tmp)
 {
-	int8_t i;
+	uint8_t i;
 	uint8_t do_resync_osc=0;
 
 	for (i = 0; i < NUM_CHANNELS; i++ )
@@ -1690,9 +1690,9 @@ void spread_finetune(int16_t tmp)
 				do_resync_osc += (1<<i);
 
 			compute_tuning(i);
-			start_ongoing_display_finetune();
 		}
 	}
+	start_ongoing_display_finetune();
 
 	if (do_resync_osc)
 		resync_audio_osc(do_resync_osc);
@@ -1700,26 +1700,8 @@ void spread_finetune(int16_t tmp)
 
 
 void compute_tuning (uint8_t chan){
-
-	int16_t i;
-	float f_scaling_finetune;
-
-	calc_params.tuning[chan] = 1;
-
 	params.finetune[chan] = _CLAMP_I16(params.finetune[chan], MIN_FINETUNE_WRAP, MAX_FINETUNE_WRAP);
-	f_scaling_finetune = F_SCALING_FINETUNE_WRAP;
-
-	if(params.finetune[chan] > 0){
-		for (i = 0; i < params.finetune[chan]; i++){
-			calc_params.tuning[chan] *= f_scaling_finetune;
-		}
-	}
-
-	else if (params.finetune[chan]<0) {
-		for (i = 0; i > params.finetune[chan]; i--){
-			calc_params.tuning[chan] /= f_scaling_finetune;
-		}
-	}
+	calc_params.tuning[chan] = powf(2.0f, (float)params.finetune[chan] / 12000.0f);
 }
 
 
