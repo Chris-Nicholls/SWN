@@ -185,12 +185,13 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			if (wt_osc.wt_xfade[chan] > 0.0f) {
 				wt_osc.wt_xfade[chan] -= XFADE_INC;
 				if (wt_osc.wt_xfade[chan] < 0.0f) wt_osc.wt_xfade[chan] = 0.0f;
-			} else {
-				static const float osc_detune_factors[8] = {0, -0.0024f, 0.0024f, -0.0056f, 0.0056f, -0.01f, 0.01f, -0.016f};
-				float base_inc = wt_osc.wt_head_pos_inc[chan][0];
-				for (uint8_t v = 0; v < voice_count; v++) {
-					wt_osc.wt_head_pos_inc[chan][v] = base_inc * (1.0f + (osc_detune_factors[v] * params.unison_spread_amt[chan] * 4.0f));
-				}
+			}
+			
+			// Always update unison increments to prevent pitch stalling/jumping
+			static const float osc_detune_factors[8] = {0, -0.0024f, 0.0024f, -0.0056f, 0.0056f, -0.01f, 0.01f, -0.016f};
+			float base_inc = wt_osc.wt_head_pos_inc[chan][0];
+			for (uint8_t v = 0; v < voice_count; v++) {
+				wt_osc.wt_head_pos_inc[chan][v] = base_inc * (1.0f + (osc_detune_factors[v] * params.unison_spread_amt[chan] * 4.0f));
 			}
 			fade_gain_prev = wt_osc.wt_xfade[chan];
 			fade_gain_current = 1.0f - fade_gain_prev;
