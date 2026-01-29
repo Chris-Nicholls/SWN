@@ -71,7 +71,7 @@
 #define GLOBRIGHT_TIMER_LIMIT			100
 
 // SCALING
-#define F_SCALING_FINETUNE_WRAP			1.00057779 // 100th root of 12th root of 2
+#define F_SCALING_FINETUNE_WRAP			1.000057779 // 1000th root of 12th root of 2 (0.1 cent resolution)
 #define F_SCALING_TRANSPOSE				1.05946309436
 
 #define NUM_DIM_STEPS					50.0
@@ -87,8 +87,8 @@
 #define RANDOM_UPDATE_TIME				7
 
 #define F_SCALING_MAX_VCACV_GAIN		1.0
-#define MAX_FINETUNE_WRAP 				(2160)
-#define MIN_FINETUNE_WRAP 				(-2160)
+#define MAX_FINETUNE_WRAP 				(21600)
+#define MIN_FINETUNE_WRAP 				(-21600)
 
 #define MAX_TRANSPOSE_WRAP				125
 #define MIN_TRANSPOSE_WRAP				-126
@@ -125,7 +125,7 @@ enum MuteNoteKeyStates {
 	NUM_MUTE_NOTE_KEY_STATES
 };
 
-#define FW_V1_PADDING (NUM_CHANNELS*32 - MAX_TOTAL_SPHERES/8) //padding for future features in o_params
+#define FW_V1_PADDING (NUM_CHANNELS*128 - MAX_TOTAL_SPHERES/8) 
 #define FW_V2_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS)
 #define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float) + sizeof(float)*2)  // pregain + resonator envelope
 #define FW_UNISON_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(uint8_t)*NUM_CHANNELS)
@@ -142,6 +142,8 @@ enum PanStates {
 	pan_PANNING,
 	pan_CACHED_LEVEL,
 };
+
+#include "plaits_shim.h"
 
 typedef struct o_calc_params{
 	uint8_t		wtsel 					[NUM_CHANNELS];
@@ -167,7 +169,6 @@ typedef struct o_calc_params{
 	enum PanStates	adjusting_pan_state		[NUM_CHANNELS];
 
 	uint8_t		gate_in_is_sustaining	[NUM_CHANNELS];
-	uint8_t		plaits_use_lpg			[NUM_CHANNELS];
 } o_calc_params;
 
 
@@ -240,16 +241,9 @@ typedef struct o_params{
 	uint16_t	eq_slider_values[6];				// EQ slider positions (2048 = flat)
 
 	// Plaits Params (v2.x3)
-	// Re-using padding bytes
-	uint8_t 	plaits_lpg_decay		[NUM_CHANNELS];
-	uint8_t 	plaits_lpg_color		[NUM_CHANNELS];
-	int8_t 		plaits_timbre_mod		[NUM_CHANNELS];
-	int8_t 		plaits_morph_mod		[NUM_CHANNELS];
-	int8_t 		plaits_harmonics_mod	[NUM_CHANNELS];
-	int8_t 		plaits_freq_mod			[NUM_CHANNELS];
-	uint8_t 	plaits_aux_select		[NUM_CHANNELS];
+	PlaitsParams plaits_params		[NUM_CHANNELS];
 
-	#define FW_PLAITS_PARAMS_SIZE (sizeof(uint8_t)*NUM_CHANNELS*3 + sizeof(int8_t)*NUM_CHANNELS*4) // 42 bytes
+	#define FW_PLAITS_PARAMS_SIZE (sizeof(PlaitsParams)*NUM_CHANNELS) 
 
 	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_PLAITS_PARAMS_SIZE];
 } o_params;

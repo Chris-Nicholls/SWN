@@ -249,13 +249,13 @@ void init_params(void){
 		params.random[i] = 1.0;
 
 		// Plaits defaults
-		params.plaits_lpg_decay[i] = 127; // ~50% decay
-		params.plaits_lpg_color[i] = 127; // ~50% color
-		params.plaits_timbre_mod[i] = 0;
-		params.plaits_morph_mod[i] = 0;
-		params.plaits_harmonics_mod[i] = 0;
-		params.plaits_freq_mod[i] = 0;
-		params.plaits_aux_select[i] = 0; // 0=Main, 1=Aux
+		params.plaits_params[i].lpg_decay = 0.5f;
+		params.plaits_params[i].lpg_color = 0.5f;
+		params.plaits_params[i].mod_timbre = 0.0f;
+		params.plaits_params[i].mod_morph = 0.0f;
+		params.plaits_params[i].mod_harmonics = 0.0f;
+		params.plaits_params[i].mod_freq = 0.0f;
+		params.plaits_params[i].output_mode = 0; // 0=Main, 1=Aux
 	}
 
 	calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 0;
@@ -352,6 +352,15 @@ void init_param_object(o_params *t_params){
 	for (chan=0; chan<NUM_CHANNELS; chan++) {
 		t_params->unison_spread_amt[chan] = 0.2f; // Slight detune by default
 		t_params->unison_voice_count[chan] = 1;
+
+		// Plaits defaults
+		t_params->plaits_params[chan].lpg_decay = 0.5f;
+		t_params->plaits_params[chan].lpg_color = 0.5f;
+		t_params->plaits_params[chan].mod_timbre = 0.0f;
+		t_params->plaits_params[chan].mod_morph = 0.0f;
+		t_params->plaits_params[chan].mod_harmonics = 0.0f;
+		t_params->plaits_params[chan].mod_freq = 0.0f;
+		t_params->plaits_params[chan].output_mode = 0;
 	}
 }
 
@@ -646,7 +655,7 @@ void read_noteon(uint8_t i)
 			if (!calc_params.already_handled_button[i])
 			{
 				if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
-					params.plaits_aux_select[i] = !params.plaits_aux_select[i];
+					params.plaits_params[i].output_mode = !params.plaits_params[i].output_mode;
 				
 				calc_params.already_handled_button[i] = 1;
 			}
@@ -725,7 +734,7 @@ void read_noteon(uint8_t i)
 					{
 						if (calc_params.lock_change_staged[i]==1) {
 							if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
-								params.plaits_aux_select[i] = !params.plaits_aux_select[i];
+								params.plaits_params[i].output_mode = !params.plaits_params[i].output_mode;
 							else
 								toggle_lock(i);
 
@@ -813,7 +822,7 @@ void read_level_and_pan(uint8_t chan)
 		// Dynamic Trigger Mode: Enables internal Mod Envelopes and Engine Triggers (for Drums/Strings)
 		// (Note: Internal LPG Amplitude Envelope is disabled in Voice.cc. This flag allows Plaits to react to triggers for Timbre/Morph modulation)
 		uint8_t plaits_enable_triggers = is_plaits && (in_key_mode || (is_vca_switch && jack_is_plugged));
-		calc_params.plaits_use_lpg[chan] = plaits_enable_triggers;
+		params.plaits_params[chan].use_internal_lpg = plaits_enable_triggers;
 
 		// Skip LFO-VCA mapping ONLY if using new Unified LPG Mode (handled in oscillator.c)
 		// We ALWAYS apply SWN VCA envelope otherwise, because Plaits internal LPG is disabled (Raw Audio).
@@ -1281,6 +1290,9 @@ void update_pitch(uint8_t chan)
 	calc_params.pitch[chan] = _CLAMP_F(calc_params.qtz_freq[chan] * calc_params.tuning[chan], F_MIN_FREQ, F_MAX_FREQ);
 
 	update_wt_head_pos_inc(chan);
+
+	if (params.wt_bank[chan] >= 100)
+		params.plaits_params[chan].note = 69.0f + 12.0f * log2f(calc_params.pitch[chan] / 440.0f);
 }
 
 // Spread factors for 8 voices (centered around 0)
@@ -1964,14 +1976,13 @@ void read_nav_encoder(uint8_t dim){
 				for (i=0; i<NUM_CHANNELS; i++) {
 					// Check if channel is Plaits mode and unlocked (or selected)
 					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
-						int8_t *val_ptr = 0;
-						if (dim == 0) val_ptr = &params.plaits_freq_mod[i]; // Depth -> FM
-						if (dim == 1) val_ptr = &params.plaits_timbre_mod[i]; // Lat -> Timbre
-						if (dim == 2) val_ptr = &params.plaits_morph_mod[i]; // Long -> Morph
+						float *val_ptr = 0;
+						if (dim == 0) val_ptr = &params.plaits_params[i].mod_freq; // Depth -> FM
+						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre; // Lat -> Timbre
+						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph; // Long -> Morph
 						
 						if (val_ptr) {
-							int16_t res = *val_ptr + enc;
-							*val_ptr = _CLAMP_I16(res, -127, 127);
+							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
 							handled = 1;
 						}
 					}
@@ -1988,14 +1999,13 @@ void read_nav_encoder(uint8_t dim){
 					// Check if channel is Plaits mode and unlocked (or selected)
 					// Approximating standard lock logic: !locked OR button_pressed
 					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
-						int8_t *val_ptr = 0;
-						if (dim == 0) val_ptr = &params.plaits_harmonics_mod[i];
-						if (dim == 1) val_ptr = &params.plaits_timbre_mod[i];
-						if (dim == 2) val_ptr = &params.plaits_morph_mod[i];
+						float *val_ptr = 0;
+						if (dim == 0) val_ptr = &params.plaits_params[i].mod_harmonics;
+						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre;
+						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph;
 						
 						if (val_ptr) {
-							int16_t res = *val_ptr + enc;
-							*val_ptr = _CLAMP_I16(res, -127, 127);
+							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
 							handled = 1;
 						}
 					}
@@ -2412,6 +2422,12 @@ void update_wt_bank(void)
 
 		if ((params.wt_bank[i]!=test_bank) ) {
 			params.wt_bank[i] = test_bank;
+
+			if (test_bank >= PLAITS_SPHERE_OFFSET) {
+				int engine = test_bank - PLAITS_SPHERE_OFFSET;
+				params.plaits_params[i].engine = _CLAMP_I16(engine, 0, 23);
+			}
+
 			req_wt_interp_update(i);
 		}
 
@@ -2612,6 +2628,12 @@ void calc_wt_pos(uint8_t chan){
 
 		if (new_wt_pos != calc_params.wt_pos[wt_dim][chan]){
 			calc_params.wt_pos[wt_dim][chan] = new_wt_pos;
+
+			if (params.wt_bank[chan] >= 100) {
+				if (wt_dim == 0) params.plaits_params[chan].harmonics = new_wt_pos * 0.5f;
+				if (wt_dim == 1) params.plaits_params[chan].timbre = new_wt_pos * 0.5f;
+				if (wt_dim == 2) params.plaits_params[chan].morph = new_wt_pos * 0.5f;
+			}
 
 			req_wt_interp_update(chan);
 		}

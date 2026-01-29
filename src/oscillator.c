@@ -130,22 +130,7 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 		if (is_plaits_mode) {
 			// --- PLAITS PATH ---
 			if (params.note_on[chan]) {
-				PlaitsParams p;
-				p.note = 69.0f + 12.0f * log2f(calc_params.pitch[chan] / 440.0f);
-				p.harmonics = calc_params.wt_pos[0][chan] / 2.0f;
-				p.timbre = calc_params.wt_pos[1][chan] / 2.0f;
-				p.morph = calc_params.wt_pos[2][chan] / 2.0f;
-				p.engine = params.wt_bank[chan] - PLAITS_SPHERE_OFFSET;
-				if (p.engine < 0) p.engine = 0;
-				if (p.engine > 23) p.engine = 23; 
-				p.lpg_decay = (float)lfos.shape[chan] / (float)NUM_LFO_SHAPES;
-				p.lpg_color = (float)params.plaits_lpg_color[chan] / 255.0f;
-				p.mod_timbre = (float)params.plaits_timbre_mod[chan] / 127.0f;
-				p.mod_morph = (float)params.plaits_morph_mod[chan] / 127.0f;
-				p.mod_harmonics = (float)params.plaits_harmonics_mod[chan] / 127.0f;
-				p.mod_freq = (float)params.plaits_freq_mod[chan] / 127.0f;
-				p.output_mode = params.plaits_aux_select[chan];
-				p.use_internal_lpg = calc_params.plaits_use_lpg[chan];
+				PlaitsParams p = params.plaits_params[chan];
 				
 				p.trigger = 0.0f;
 				if (params.key_sw[chan] != ksw_MUTE) {
@@ -220,7 +205,7 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 				for(int k=0; k<MONO_BUFSZ; k++) temp_buffer[k] /= 32768.0f;
 				if (lfos.trigout[chan]) Shim_LPG_Trigger(chan);
 				float decay = _CLAMP_F((float)lfos.shape[chan] / (float)NUM_LFO_SHAPES, 0.0f, 1.0f);
-				float color = (float)params.plaits_lpg_color[chan] / 255.0f;
+				float color = params.plaits_params[chan].lpg_color;
 				Shim_LPG_Process(chan, temp_buffer, MONO_BUFSZ, decay, color);
 				for(int k=0; k<MONO_BUFSZ; k++) temp_buffer[k] *= 32768.0f;
 			}
