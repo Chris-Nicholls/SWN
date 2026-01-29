@@ -984,8 +984,8 @@ void read_lfomode(uint8_t i)
 
 			if (!button_pressed(i) && any_button_pressed && calc_params.armed[armf_LFOMODE][i]){
 				//if (!lfos.locked[i]) {
-					lfos.mode[i] ++;
-					lfos.mode[i] %= NUM_LFO_MODES;
+					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
+					params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
 				//}
 				calc_params.armed[armf_LFOMODE][i]   = 0;
 			}
@@ -1004,8 +1004,9 @@ void read_lfomode(uint8_t i)
 		else if (!button_pressed(butm_LFOMODE_BUTTON)){
 			if(calc_params.armed[armf_LFOMODE][i]){
 				if (!lfos.locked[i]) {
-					lfos.mode[i] ++;
-					lfos.mode[i] %= NUM_LFO_MODES;
+					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
+					if (lfos.mode[i] == lfot_LPG)
+						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
 				}
 				calc_params.armed[armf_LFOMODE][i] = 0;
 			}

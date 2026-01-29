@@ -476,9 +476,9 @@ void read_lfo_speed(int16_t turn)
 		if (lfos.use_ext_clock)
 			stage_resync_lfos();
 
-		// PLAITS OVERRIDE: Global Decay
+		// LPG OVERRIDE: Global Decay
 		for (i=0; i<NUM_CHANNELS; i++) {
-			if (params.wt_bank[i] >= 100 && !lfos.locked[i]) {
+			if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
 				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
 			}
 		}
@@ -501,8 +501,8 @@ void read_lfo_speed(int16_t turn)
 				}
 			}
 			
-			// PLAITS OVERRIDE: Individual Decay
-			if (button_pressed(i) && params.wt_bank[i] >= 100) {
+			// LPG OVERRIDE: Individual Decay
+			if (button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
 				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
 			}
 		}
@@ -551,7 +551,7 @@ void read_LFO_phase(void)
 		// GLOBAL
 		if (macro_states.all_af_buttons_released){
 			for (i = 0; i < NUM_CHANNELS; i++){
-				if (params.wt_bank[i] >= 100 && !lfos.locked[i]) {
+				if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
 					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
 				}
 			}
@@ -559,7 +559,7 @@ void read_LFO_phase(void)
 		// INDIVIDUAL
 		else {
 			for (i = 0; i < NUM_CHANNELS; i++){
-				if(button_pressed(i) && params.wt_bank[i] >= 100) {
+				if(button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
 					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
 					calc_params.already_handled_button[i] = 1;
 				}
@@ -647,11 +647,12 @@ void read_LFO_shape(void)
 				if (!lfos.locked[i])
 				{
 					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					if (lfos.mode[i] == lfot_LPG)
+						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;								
 				}
-				
-
 			}
 		}
 
@@ -661,6 +662,9 @@ void read_LFO_shape(void)
 				if(button_pressed(i))
 				{
 					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					if (lfos.mode[i] == lfot_LPG)
+						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+
 					calc_params.already_handled_button[i] = 1; 
 
 					led_cont.ongoing_lfoshape[i] = 1;

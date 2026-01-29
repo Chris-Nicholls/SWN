@@ -86,6 +86,7 @@ typedef struct o_wt_osc{
 
 	// Plaits state
 	float						plaits_last_cv_input[NUM_CHANNELS];
+	uint32_t					plaits_refractory_timer[NUM_CHANNELS];
 	
 } o_wt_osc;
 
