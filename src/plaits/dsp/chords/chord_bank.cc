@@ -82,10 +82,6 @@ const float ChordBank::chords_[kChordNumChords][kChordNumNotes] = {
 #endif  // JON_CHORDS
 
 void ChordBank::Init(BufferAllocator* allocator) {
-  ratios_ = allocator->Allocate<float>(kChordNumChords * kChordNumNotes);
-  note_count_ = allocator->Allocate<int>(kChordNumChords);
-  sorted_ratios_ = allocator->Allocate<float>(kChordNumNotes);
-
   chord_index_quantizer_.Init(kChordNumChords, 0.075f, false);
 }
 

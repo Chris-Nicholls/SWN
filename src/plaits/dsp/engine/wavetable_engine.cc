@@ -37,8 +37,6 @@ namespace plaits {
 using namespace std;
 using namespace stmlib;
 
-const int kNumBanks = 4;
-const int kNumWavesPerBank = 64;
 const int kNumWaves = 192;
 const int kNumCustomWaves = 15;
 
@@ -62,8 +60,6 @@ void WavetableEngine::Init(BufferAllocator* allocator) {
   previous_f0_ = a0;
 
   diff_out_.Init();
-  
-  wave_map_ = allocator->Allocate<const int16_t*>(kNumWavesPerBank * kNumBanks);
   
   // Initialize all wave_map_ pointers to valid defaults to prevent uninitialized access
   // LoadUserData will be called later to populate with actual user data
@@ -109,16 +105,10 @@ inline float Clamp(float x, float amount) {
   return x;
 }
 
-inline float WavetableEngine::ReadWave(
-    int x,
-    int y,
-    int z,
-    int phase_integral,
-    float phase_fractional) {
-  return InterpolateWaveHermite(
-      wave_map_[x + y * 8 + z * kNumWavesPerBank],
-      phase_integral,
-      phase_fractional);
+inline float WavetableEngine::ReadWave(int x, int y, int z, int phase_i, float phase_f) {
+  const int16_t* wave = wave_map_[z * kNumWavesPerBank + y * 8 + x];
+  if (!wave) return 0.0f;
+  return InterpolateWaveHermite(wave, phase_i, phase_f);
 }
 
 void WavetableEngine::Render(

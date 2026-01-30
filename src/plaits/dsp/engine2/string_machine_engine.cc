@@ -55,7 +55,7 @@ void StringMachineEngine::Reset() {
 }
 
 const int kRegistrationTableSize = 11;
-const float registrations[kRegistrationTableSize][kChordNumHarmonics * 2] = {
+extern const float registrations[kRegistrationTableSize][kChordNumHarmonics * 2] = {
   { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },    // Saw
   { 0.5f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f },    // Saw + saw
   { 0.4f, 0.0f, 0.2f, 0.0f, 0.4f, 0.0f },    // Full saw

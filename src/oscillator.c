@@ -148,7 +148,7 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 		uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
 		
 		// Trigger Policy: Determine which sources are allowed based on LPG and Jack state
-		uint8_t allow_lfo_trig  = ( lpg_active && !jack_is_plugged) || (!lpg_active && params.key_sw[chan] != ksw_MUTE);
+		uint8_t allow_lfo_trig  = ( lpg_active && !jack_is_plugged);
 		uint8_t allow_jack_trig = jack_is_plugged && ( lpg_active || (params.voct_switch_state[chan] == SW_VCA));
 		uint8_t allow_note_trig = (!lpg_active &&  params.key_sw[chan] != ksw_MUTE);
 
@@ -214,19 +214,18 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			Shim_LPG_Process(chan, temp_buffer, MONO_BUFSZ, decay, color);
 		}
 
-		// Final Mixing Loop
-		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-			smpl = temp_buffer[i_sample];
-			if (is_plaits_mode) {
-				smpl *= 32768.0f;
-			} else if (resonator_mode_active) {
+		// Pre-processing scaling/resonator
+		if (is_plaits_mode) {
+			arm_scale_f32(temp_buffer, 32768.0f, temp_buffer, MONO_BUFSZ);
+		} else if (resonator_mode_active) {
+			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
 				float read_pos_Q = wt_osc.wt_head_pos[chan][0] + (WT_TABLELEN / 4);
 				if (read_pos_Q >= (float)WT_TABLELEN) read_pos_Q -= (float)WT_TABLELEN;
 				uint16_t rh0_Q = (uint16_t)read_pos_Q;
 				uint16_t rh1_Q = (rh0_Q + 1) & (WT_TABLELEN - 1);
 				float rhd_Q = read_pos_Q - (float)rh0_Q;
 				float osc_Q = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0_Q] * (1.0f - rhd_Q)) + (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1_Q] * rhd_Q);
-				float ring_I = (smpl / 32768.0f) * audio_in_buffer[i_sample];
+				float ring_I = (temp_buffer[i_sample] / 32768.0f) * audio_in_buffer[i_sample];
 				float ring_Q = (osc_Q / 32768.0f) * audio_in_buffer[i_sample];
 				float dc_alpha = 100.0f / F_SAMPLERATE;
 				wt_osc.coherence_dc_I[chan] = dc_alpha * ring_I + (1.0f - dc_alpha) * wt_osc.coherence_dc_I[chan];
@@ -234,13 +233,28 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 				float dc_mag = sqrtf(wt_osc.coherence_dc_I[chan] * wt_osc.coherence_dc_I[chan] + wt_osc.coherence_dc_Q[chan] * wt_osc.coherence_dc_Q[chan]);
 				float env_alpha = (dc_mag > wt_osc.coherence_env[chan]) ? (params.resonator_attack_freq / F_SAMPLERATE) : (params.resonator_decay_freq / F_SAMPLERATE);
 				wt_osc.coherence_env[chan] += env_alpha * (dc_mag - wt_osc.coherence_env[chan]);
-				smpl *= wt_osc.coherence_env[chan];
+				temp_buffer[i_sample] *= wt_osc.coherence_env[chan];
 			}
-			smpl *= interpolated_level;
-			output_buffer_evens[i_sample] += smpl * interpolated_pan;
-			output_buffer_odds[i_sample] += smpl * (1.0f - interpolated_pan);
-			interpolated_level += level_inc;
-			interpolated_pan += pan_inc;
+		}
+
+		// Optimized Mixing Loop: 4-sample blocks with vectorized math
+		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
+			float avg_level = interpolated_level + (level_inc * 1.5f); // Halfway through the 4-sample block
+			float avg_pan = interpolated_pan + (pan_inc * 1.5f);
+			
+			float32_t block[4];
+			float32_t pan_L[4];
+			float32_t pan_R[4];
+
+			arm_scale_f32(&temp_buffer[i_sample], avg_level, block, 4);
+			arm_scale_f32(block, avg_pan, pan_L, 4);
+			arm_scale_f32(block, 1.0f - avg_pan, pan_R, 4);
+
+			arm_add_f32(&output_buffer_evens[i_sample], pan_L, &output_buffer_evens[i_sample], 4);
+			arm_add_f32(&output_buffer_odds[i_sample], pan_R, &output_buffer_odds[i_sample], 4);
+
+			interpolated_level += level_inc * 4;
+			interpolated_pan += pan_inc * 4;
 		}
 	}
 

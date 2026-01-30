@@ -97,9 +97,9 @@ class ChordBank {
  private:
   stmlib::HysteresisQuantizer2 chord_index_quantizer_;
   
-  float* ratios_;
-  float* sorted_ratios_;
-  int* note_count_;
+  float ratios_[kChordNumChords * kChordNumNotes];
+  float sorted_ratios_[kChordNumNotes];
+  int note_count_[kChordNumChords];
   
   static const float chords_[kChordNumChords][kChordNumNotes];
   

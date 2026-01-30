@@ -1,4 +1,4 @@
-// Copyright 2016 Emilie Gillet.
+// Copyright 2021 Emilie Gillet.
 //
 // Author: Emilie Gillet (emilie.o.gillet@gmail.com)
 //
@@ -24,27 +24,26 @@
 //
 // -----------------------------------------------------------------------------
 //
-// 8x8x3 wave terrain.
+// Virtual analog with VCF (Optimized version using SvfBlock).
 
-#ifndef PLAITS_DSP_ENGINE_WAVETABLE_ENGINE_H_
-#define PLAITS_DSP_ENGINE_WAVETABLE_ENGINE_H_
+#ifndef PLAITS_DSP_ENGINE_VIRTUAL_ANALOG_VCF_ENGINE_OPTIMISED_H_
+#define PLAITS_DSP_ENGINE_VIRTUAL_ANALOG_VCF_ENGINE_OPTIMISED_H_
 
+#include "stmlib/dsp/filter.h"
 #include "plaits/dsp/engine/engine.h"
-#include "plaits/dsp/oscillator/wavetable_oscillator.h"
+#include "plaits/dsp/oscillator/variable_shape_oscillator.h"
+#include "plaits/dsp/fx/biquad.h"
 
 namespace plaits {
 
-class WavetableEngine : public Engine {
+class VirtualAnalogVCFEngineOptimised : public Engine {
  public:
-  WavetableEngine() { }
-  ~WavetableEngine() { }
-  
-  static const int kNumBanks = 4;
-  static const int kNumWavesPerBank = 64;
+  VirtualAnalogVCFEngineOptimised() { }
+  ~VirtualAnalogVCFEngineOptimised() { }
   
   virtual void Init(stmlib::BufferAllocator* allocator);
   virtual void Reset();
-  virtual void LoadUserData(const uint8_t* user_data);
+  virtual void LoadUserData(const uint8_t* user_data) { }
   virtual void Render(const EngineParameters& parameters,
       float* out,
       float* aux,
@@ -52,32 +51,20 @@ class WavetableEngine : public Engine {
       bool* already_enveloped);
   
  private:
-  float ReadWave(int x, int y, int z, int phase_i, float phase_f);
-   
-  float phase_;
-  
-  float x_pre_lp_;
-  float y_pre_lp_;
-  float z_pre_lp_;
-  
-  float x_lp_;
-  float y_lp_;
-  float z_lp_;
+  SvfBlock vcf_[2];
 
-  float previous_x_;
-  float previous_y_;
-  float previous_z_;
-  float previous_f0_;
+  VariableShapeOscillator oscillator_;
+  VariableShapeOscillator sub_oscillator_;
   
-  // Maps a (bank, X, Y) coordinate to a waveform index.
-  // This allows all waveforms to be reshuffled by the user to create new maps.
-  const int16_t* wave_map_[kNumWavesPerBank * kNumBanks];
+  float previous_cutoff_;
+  float previous_stage2_gain_;
+  float previous_q_;
+  float previous_gain_;
+  float previous_sub_gain_;
   
-  Differentiator diff_out_;
-  
-  DISALLOW_COPY_AND_ASSIGN(WavetableEngine);
+  DISALLOW_COPY_AND_ASSIGN(VirtualAnalogVCFEngineOptimised);
 };
 
 }  // namespace plaits
 
-#endif  // PLAITS_DSP_ENGINE_WAVETABLE_ENGINE_H_
+#endif  // PLAITS_DSP_ENGINE_VIRTUAL_ANALOG_VCF_ENGINE_OPTIMISED_H_

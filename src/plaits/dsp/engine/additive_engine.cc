@@ -39,7 +39,6 @@ using namespace std;
 using namespace stmlib;
 
 void AdditiveEngine::Init(BufferAllocator* allocator) {
-  amplitudes_ = allocator->Allocate<float>(kNumHarmonics);
   for (int i = 0; i < kNumHarmonicOscillators; ++i) {
     harmonic_oscillator_[i].Init();
   }

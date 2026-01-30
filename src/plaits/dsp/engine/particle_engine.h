@@ -30,7 +30,7 @@
 #define PLAITS_DSP_ENGINE_PARTICLE_ENGINE_H_
 
 #include "plaits/dsp/engine/engine.h"
-#include "plaits/dsp/fx/diffuser.h"
+#include "plaits/dsp/fx/diffuser_optimised.h"
 #include "plaits/dsp/noise/particle_optimised.h"
 
 namespace plaits {
@@ -53,7 +53,7 @@ class ParticleEngine : public Engine {
 
  private:
   ParticleOptimised particle_[kNumParticles];
-  Diffuser diffuser_;
+  DiffuserOptimised diffuser_;
   stmlib::Svf post_filter_;
   
   DISALLOW_COPY_AND_ASSIGN(ParticleEngine);

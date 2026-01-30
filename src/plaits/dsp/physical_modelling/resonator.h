@@ -33,7 +33,7 @@
 
 namespace plaits {
 
-const int kMaxNumModes = 24;
+const int kMaxNumModes = 16;
 const int kModeBatchSize = 8;
 
 // We render 4 modes simultaneously since there are enough registers to hold

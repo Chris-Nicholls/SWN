@@ -24,27 +24,25 @@
 //
 // -----------------------------------------------------------------------------
 //
-// 8x8x3 wave terrain.
+// Clocked noise processed by a multimode filter (Optimized version).
 
-#ifndef PLAITS_DSP_ENGINE_WAVETABLE_ENGINE_H_
-#define PLAITS_DSP_ENGINE_WAVETABLE_ENGINE_H_
+#ifndef PLAITS_DSP_ENGINE_NOISE_ENGINE_OPTIMISED_H_
+#define PLAITS_DSP_ENGINE_NOISE_ENGINE_OPTIMISED_H_
 
 #include "plaits/dsp/engine/engine.h"
-#include "plaits/dsp/oscillator/wavetable_oscillator.h"
+#include "plaits/dsp/noise/clocked_noise.h"
+#include "plaits/dsp/fx/biquad.h"
 
 namespace plaits {
 
-class WavetableEngine : public Engine {
+class NoiseEngineOptimised : public Engine {
  public:
-  WavetableEngine() { }
-  ~WavetableEngine() { }
-  
-  static const int kNumBanks = 4;
-  static const int kNumWavesPerBank = 64;
+  NoiseEngineOptimised() { }
+  ~NoiseEngineOptimised() { }
   
   virtual void Init(stmlib::BufferAllocator* allocator);
   virtual void Reset();
-  virtual void LoadUserData(const uint8_t* user_data);
+  virtual void LoadUserData(const uint8_t* user_data) { }
   virtual void Render(const EngineParameters& parameters,
       float* out,
       float* aux,
@@ -52,32 +50,20 @@ class WavetableEngine : public Engine {
       bool* already_enveloped);
   
  private:
-  float ReadWave(int x, int y, int z, int phase_i, float phase_f);
-   
-  float phase_;
-  
-  float x_pre_lp_;
-  float y_pre_lp_;
-  float z_pre_lp_;
-  
-  float x_lp_;
-  float y_lp_;
-  float z_lp_;
+  ClockedNoise clocked_noise_[2];
+  SvfBlock lp_hp_filter_;
+  SvfBlock bp_filter_[2];
 
-  float previous_x_;
-  float previous_y_;
-  float previous_z_;
   float previous_f0_;
-  
-  // Maps a (bank, X, Y) coordinate to a waveform index.
-  // This allows all waveforms to be reshuffled by the user to create new maps.
-  const int16_t* wave_map_[kNumWavesPerBank * kNumBanks];
-  
-  Differentiator diff_out_;
-  
-  DISALLOW_COPY_AND_ASSIGN(WavetableEngine);
+  float previous_f1_;
+  float previous_q_;
+  float previous_mode_;
+
+  float* temp_buffer_;
+
+  DISALLOW_COPY_AND_ASSIGN(NoiseEngineOptimised);
 };
 
 }  // namespace plaits
 
-#endif  // PLAITS_DSP_ENGINE_WAVETABLE_ENGINE_H_
+#endif  // PLAITS_DSP_ENGINE_NOISE_ENGINE_OPTIMISED_H_

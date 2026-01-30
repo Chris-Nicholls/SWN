@@ -53,7 +53,7 @@ void Plaits_Init(void) {
 
 void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int32_t size) {
     if (channel >= 6) return;
-    if (size > plaits::kMaxBlockSize) return;  // Safety: kMaxBlockSize = 48
+    if (size <= 0 || (size_t)size > plaits::kMaxBlockSize) return;  // Safety: kMaxBlockSize = 48
 
     static float temp_buffer[plaits::kMaxBlockSize]; // Buffer for the unused output (Aux or Main)
 
@@ -175,25 +175,21 @@ extern "C" void Shim_LPG_Process(uint8_t chan, float* in_out, size_t size, float
     float gain, frequency, hf_bleed;
     static uint8_t sample_counter[6] = {0}; // Persistent counter for correct downsampling across calls
     
-    // CPU OPTIMIZATION: Update Vactrol State every 4 samples (~12kHz control rate)
-    // Using persistent counter to support size=1 calls in oscillator.c
-    for (size_t i = 0; i < size; ++i) {
-        if ((sample_counter[chan] & 3) == 0) {
-            lpg_env[chan].ProcessPing(0.1f, short_decay, decay_tail, hf);
-            // Cache the results for the next 3 samples
-            lpg_env_gain_cache[chan] = lpg_env[chan].gain();
-            lpg_env_freq_cache[chan] = lpg_env[chan].frequency();
-            lpg_env_hf_cache[chan] = lpg_env[chan].hf_bleed();
-        }
-        sample_counter[chan]++;
-        
-        gain = lpg_env_gain_cache[chan];
-        frequency = lpg_env_freq_cache[chan];
-        hf_bleed = lpg_env_hf_cache[chan];
-        
-        // Filter Process still runs per-sample for audio quality
-        lpg[chan].Process(gain, frequency, hf_bleed, &in_out[i], 1);
+    // CPU OPTIMIZATION: Update Vactrol State once per block (~1kHz control rate)
+    if ((sample_counter[chan] & 63) == 0 || size >= 4) { // Heuristic: update if starts on 64-sample boundary OR if doing a real block
+        lpg_env[chan].ProcessPing(0.1f, short_decay, decay_tail, hf);
+        lpg_env_gain_cache[chan] = lpg_env[chan].gain();
+        lpg_env_freq_cache[chan] = lpg_env[chan].frequency();
+        lpg_env_hf_cache[chan] = lpg_env[chan].hf_bleed();
     }
+    
+    gain = lpg_env_gain_cache[chan];
+    frequency = lpg_env_freq_cache[chan];
+    hf_bleed = lpg_env_hf_cache[chan];
+    
+    // Process the full block in one go
+    lpg[chan].Process(gain, frequency, hf_bleed, in_out, size);
+    sample_counter[chan] += size;
 }
 
 extern "C" float Shim_LPG_GetEnvelope(uint8_t chan) {

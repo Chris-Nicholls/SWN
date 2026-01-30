@@ -29,11 +29,11 @@
 #ifndef PLAITS_DSP_PHYSICAL_MODELLING_RESONATOR_OPTIMISED_H_
 #define PLAITS_DSP_PHYSICAL_MODELLING_RESONATOR_OPTIMISED_H_
 
-#include "stmlib/dsp/filter.h"
+#include "plaits/dsp/fx/biquad.h"
 
 namespace plaits {
 
-const int kMaxNumModesOptimised = 24;
+const int kMaxNumModesOptimised = 16;
 const int kModeBatchSizeOptimised = 8;
 
 // We render 4 modes simultaneously since there are enough registers to hold
@@ -46,7 +46,7 @@ class ResonatorSvfOptimised {
   
   void Init() {
     for (int i = 0; i < batch_size; ++i) {
-      state_1_[i] = state_2_[i] = 0.0f;
+      biquad_[i].Init();
     }
   }
   
@@ -63,33 +63,13 @@ class ResonatorSvfOptimised {
     }
 
     for (int i = 0; i < batch_size; ++i) {
-      float g = stmlib::OnePole::tan<stmlib::FREQUENCY_FAST>(f[i]);
-      float r = 1.0f / q[i];
-      float h = 1.0f / (1.0f + r * g + g * g);
-      float r_plus_g = r + g;
-      float state_1 = state_1_[i];
-      float state_2 = state_2_[i];
-      float g_gain = gain[i];
-      
-      const float* in_ptr = in;
-      float* out_ptr = out;
-      size_t n = size;
-      while (n--) {
-        const float hp = (*in_ptr++ - r_plus_g * state_1 - state_2) * h;
-        const float bp = g * hp + state_1;
-        state_1 = g * hp + bp;
-        const float lp = g * bp + state_2;
-        state_2 = g * bp + lp;
-        *out_ptr++ += g_gain * ((mode == stmlib::FILTER_MODE_LOW_PASS) ? lp : bp);
-      }
-      state_1_[i] = state_1;
-      state_2_[i] = state_2;
+      biquad_[i].template set_f_q<stmlib::FREQUENCY_FAST>(f[i], q[i], mode);
+      biquad_[i].template ProcessAdd<mode>(in, out, size, gain[i]);
     }
   }
   
  private:
-  float state_1_[batch_size];
-  float state_2_[batch_size];
+  Biquad biquad_[batch_size];
   
   DISALLOW_COPY_AND_ASSIGN(ResonatorSvfOptimised);
 };

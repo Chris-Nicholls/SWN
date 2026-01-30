@@ -63,7 +63,7 @@ class AdditiveEngine : public Engine {
       
   HarmonicOscillator<kHarmonicBatchSize> harmonic_oscillator_[kNumHarmonicOscillators];
   
-  float* amplitudes_;
+  float amplitudes_[kNumHarmonics];
   
   DISALLOW_COPY_AND_ASSIGN(AdditiveEngine);
 };

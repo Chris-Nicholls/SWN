@@ -34,6 +34,7 @@
 #include "stmlib/dsp/units.h"
 #include "stmlib/utils/random.h"
 #include "plaits/dsp/dsp.h"
+#include "plaits/dsp/fx/biquad.h"
 
 namespace plaits {
 
@@ -112,7 +113,7 @@ class ParticleOptimised {
   
  private:
   float pre_gain_;
-  stmlib::Svf filter_;
+  SvfBlock filter_;
   
   DISALLOW_COPY_AND_ASSIGN(ParticleOptimised);
 };

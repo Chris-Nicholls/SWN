@@ -55,7 +55,7 @@
 #include "plaits/dsp/engine2/chiptune_engine.h"
 #include "plaits/dsp/engine2/phase_distortion_engine_optimised.h"
 #include "plaits/dsp/engine2/six_op_engine.h"
-#include "plaits/dsp/engine2/string_machine_engine.h"
+#include "plaits/dsp/engine2/string_machine_engine_optimised.h"
 #include "plaits/dsp/engine2/virtual_analog_vcf_engine.h"
 #include "plaits/dsp/engine2/wave_terrain_engine.h"
 
@@ -223,7 +223,7 @@ class Voice {
   PhaseDistortionEngineOptimised phase_distortion_engine_;
   SixOpEngine six_op_engine_;
   WaveTerrainEngine wave_terrain_engine_;
-  StringMachineEngine string_machine_engine_;
+  StringMachineEngineOptimised string_machine_engine_;
   ChiptuneEngine chiptune_engine_;
 
   stmlib::HysteresisQuantizer2 engine_quantizer_;
