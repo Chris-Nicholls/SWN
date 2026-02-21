@@ -1,0 +1,13 @@
+#ifndef GLOBALS_MOCK_H
+#define GLOBALS_MOCK_H
+
+#define PCB_VERSION 100
+#define SAMPLERATE 48000
+#define F_SAMPLERATE 48000.0
+#define NUM_CHANNELS 6
+
+#define DMABUFFER 
+#define SRAM1DATA
+#define SRAM1_DATA
+
+#endif

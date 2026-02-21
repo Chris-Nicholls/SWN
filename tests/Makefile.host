@@ -1,0 +1,166 @@
+BUILD_DIR = tests/build
+
+CC = gcc
+CXX = g++
+CFLAGS = -Wall -Itests -Itests/mocks -Iinc -Isrc -Isrc/plaits -Isrc/stmlib -Isrc/stmlib/third_party/STM/CMSIS/CM3_h7xx -DTEST -DARM_MATH_CM7 -g -MMD -MP
+LDFLAGS = -lm
+
+# Support AddressSanitizer
+ASAN ?= 1
+ifeq ($(ASAN),1)
+	CFLAGS += -fsanitize=address
+	LDFLAGS += -fsanitize=address
+endif
+
+# Mac Compatibility for SRAM1_DATA
+ifeq ($(shell uname), Darwin)
+	CFLAGS += -DSRAM1_DATA='__attribute__((section("__DATA,__sram1data")))' -Wno-macro-redefined
+endif
+
+CXXFLAGS = $(CFLAGS) -std=c++14 -Wno-unused-local-typedef
+
+# Sources for math test
+MATH_SOURCES = tests/test_math_util.c src/math_util.c
+MATH_BIN = tests/test_math
+
+# Sources for plaits test
+PLAITS_DSP_SOURCES = src/plaits_shim.cpp \
+                 src/plaits/resources.cc \
+                 $(wildcard src/plaits/dsp/*.cc) \
+                 $(wildcard src/plaits/dsp/*/*.cc) \
+                 src/stmlib/dsp/atan.cc \
+                 src/stmlib/dsp/units.cc \
+                 src/stmlib/utils/random.cc \
+                 src/stmlib/third_party/STM/CMSIS/DSP_Lib/BasicMathFunctions/arm_add_f32.c \
+                 src/stmlib/third_party/STM/CMSIS/DSP_Lib/BasicMathFunctions/arm_mult_f32.c \
+                 src/stmlib/third_party/STM/CMSIS/DSP_Lib/BasicMathFunctions/arm_scale_f32.c \
+                 src/stmlib/third_party/STM/CMSIS/DSP_Lib/FilteringFunctions/arm_biquad_cascade_df1_f32.c
+
+PLAITS_BIN = tests/test_plaits
+PLAITS_FUNC_BIN = tests/test_plaits_functional
+REPRO_BIN = tests/reproduce_crashes
+MULTI_BIN = tests/test_plaits_multi_channel
+BENCH_BIN = tests/benchmark_engines
+EQUIV_BIN = tests/pd_equivalence
+DEBUG_BIN = tests/pd_debug_state
+MODAL_EQUIV_BIN = tests/modal_equivalence
+PARTICLE_EQUIV_BIN = tests/particle_equivalence
+STRING_EQUIV_BIN = tests/string_equivalence
+SNARE_EQUIV_BIN = tests/snare_equivalence
+VA_VCF_EQUIV_BIN = tests/va_vcf_equivalence
+NOISE_EQUIV_BIN = tests/noise_equivalence
+HI_HAT_EQUIV_BIN = tests/hi_hat_equivalence
+SYNTH_SNARE_EQUIV_BIN = tests/synthetic_snare_equivalence
+COMPARE_BIN = tests/performance_comparison
+DIFFUSER_EQUIV_BIN = tests/diffuser_equivalence
+STRING_MACHINE_EQUIV_BIN = tests/string_machine_equivalence
+ENSEMBLE_EQUIV_BIN = tests/ensemble_equivalence
+DEBUG_BIN = tests/pd_debug_state
+
+# Helper to map sources to objects
+to_objs = $(addprefix $(BUILD_DIR)/, $(addsuffix .o, $(basename $(1))))
+
+MATH_OBJS = $(call to_objs, $(MATH_SOURCES))
+PLAITS_DSP_OBJS = $(call to_objs, $(PLAITS_DSP_SOURCES))
+
+all: $(MATH_BIN) $(PLAITS_BIN) $(PLAITS_FUNC_BIN) $(REPRO_BIN) $(BENCH_BIN) $(MULTI_BIN)
+
+# Link rules
+$(MATH_BIN): $(MATH_OBJS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(PLAITS_BIN): $(call to_objs, tests/test_plaits.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(PLAITS_FUNC_BIN): $(call to_objs, tests/test_plaits_functional.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(REPRO_BIN): $(call to_objs, tests/reproduce_crashes.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BENCH_BIN): $(call to_objs, tests/benchmark_engines.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(MULTI_BIN): $(call to_objs, tests/test_plaits_multi_channel.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(VA_VCF_EQUIV_BIN): $(call to_objs, tests/va_vcf_equivalence_test.cpp src/plaits/dsp/engine2/virtual_analog_vcf_engine.cc src/plaits/dsp/engine2/virtual_analog_vcf_engine_optimised.cc) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(NOISE_EQUIV_BIN): $(call to_objs, tests/noise_equivalence_test.cpp src/plaits/dsp/engine/noise_engine.cc src/plaits/dsp/engine/noise_engine_optimised.cc) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(HI_HAT_EQUIV_BIN): $(call to_objs, tests/hi_hat_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(SYNTH_SNARE_EQUIV_BIN): $(call to_objs, tests/synthetic_snare_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(EQUIV_BIN): $(call to_objs, tests/pd_equivalence.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(DEBUG_BIN): $(call to_objs, tests/pd_debug_state.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(MODAL_EQUIV_BIN): $(call to_objs, tests/modal_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(PARTICLE_EQUIV_BIN): $(call to_objs, tests/particle_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(STRING_EQUIV_BIN): $(call to_objs, tests/string_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(DIFFUSER_EQUIV_BIN): $(call to_objs, tests/diffuser_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(ENSEMBLE_EQUIV_BIN): $(call to_objs, tests/ensemble_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(STRING_MACHINE_EQUIV_BIN): $(call to_objs, tests/string_machine_equivalence_test.cpp src/plaits/dsp/engine2/string_machine_engine.cc src/plaits/dsp/engine2/string_machine_engine_optimised.cc) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(SNARE_EQUIV_BIN): $(call to_objs, tests/snare_equivalence_test.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(COMPARE_BIN): $(call to_objs, tests/performance_comparison.cpp) $(PLAITS_DSP_OBJS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+# Compilation rules
+$(BUILD_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.o: %.cc
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+run: all
+	./$(MATH_BIN)
+	./$(PLAITS_BIN) all
+	./$(PLAITS_FUNC_BIN)
+	./$(MULTI_BIN)
+
+benchmark: $(BENCH_BIN)
+	./$(BENCH_BIN)
+
+compare: $(COMPARE_BIN)
+	./$(COMPARE_BIN)
+
+repro: $(REPRO_BIN)
+	./$(REPRO_BIN)
+
+equivalence: $(STRING_EQUIV_BIN) $(PARTICLE_EQUIV_BIN) $(MODAL_EQUIV_BIN) $(SNARE_EQUIV_BIN) $(VA_VCF_EQUIV_BIN) $(NOISE_EQUIV_BIN) $(HI_HAT_EQUIV_BIN) $(SYNTH_SNARE_EQUIV_BIN) $(DIFFUSER_EQUIV_BIN) $(STRING_MACHINE_EQUIV_BIN) $(ENSEMBLE_EQUIV_BIN) $(EQUIV_BIN)
+	@./tests/run_equivalence.sh
+
+clean:
+	rm -rf $(BUILD_DIR) $(MATH_BIN) $(PLAITS_BIN) $(PLAITS_FUNC_BIN) $(REPRO_BIN) $(BENCH_BIN) $(MULTI_BIN)
+
+.PHONY: all run clean repro benchmark
+
+# Include dependencies
+-include $(shell find $(BUILD_DIR) -name "*.d" 2>/dev/null)
