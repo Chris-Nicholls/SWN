@@ -39,6 +39,13 @@ SOURCES  += src/plaits/resources.cc
 SOURCES  += $(wildcard src/stmlib/dsp/*.cc)
 SOURCES  += $(wildcard src/stmlib/utils/*.cc)
 
+# CMSIS-DSP
+CMSIS_DSP_DIR = src/stmlib/third_party/STM/CMSIS/DSP_Lib
+SOURCES += $(CMSIS_DSP_DIR)/BasicMathFunctions/arm_add_f32.c \
+           $(CMSIS_DSP_DIR)/BasicMathFunctions/arm_mult_f32.c \
+           $(CMSIS_DSP_DIR)/BasicMathFunctions/arm_scale_f32.c \
+           $(CMSIS_DSP_DIR)/FilteringFunctions/arm_biquad_cascade_df1_f32.c
+
 OBJECTS   = $(addprefix $(BUILDDIR)/, $(addsuffix .o, $(sort $(basename $(SOURCES)))))
 
 DEPS = $(OBJECTS:.o=.d)
@@ -49,7 +56,8 @@ INCLUDES += -I$(DEVICE)/include \
 			-I inc \
 			-I inc/drivers \
 			-I inc/tests \
-			-I src
+			-I src \
+			-I src/stmlib/third_party/STM/CMSIS/CM3_h7xx
 
 ELF 	= $(BUILDDIR)/$(BINARYNAME).elf
 HEX 	= $(BUILDDIR)/$(BINARYNAME).hex
@@ -70,7 +78,9 @@ SZOPTS 	= -d
 CPU = -mcpu=cortex-m7 
 FPU = -mfpu=fpv5-d16
 FLOAT-ABI = -mfloat-abi=hard 
-MCU = $(CPU) -mthumb -mlittle-endian $(FPU) $(FLOAT-ABI) 
+MCU = $(CPU) -mthumb -mlittle-endian $(FPU) $(FLOAT-ABI)
+TUNE_FLAGS = -mtune=cortex-m7 -mno-unaligned-access
+ADVANCED_OPTIMIZATIONS = -fno-math-errno -fno-trapping-math -fno-signed-zeros -fassociative-math -fmerge-all-constants
 
 ARCH_CFLAGS = 	-DARM_MATH_CM7 \
 				-D'__FPU_PRESENT=1' \
@@ -78,11 +88,12 @@ ARCH_CFLAGS = 	-DARM_MATH_CM7 \
 				-DSTM32F765xx
 
 # Default optimization for release (Speed)
-OPTFLAG ?= -O3 -flto -ffast-math
+OPTFLAG ?= -Ofast -flto -fuse-linker-plugin -fwhole-program 
 DEBUG_FLAG ?= -g3
 
 CFLAGS = $(DEBUG_FLAG) -Wall \
-	$(ARCH_CFLAGS) $(MCU) \
+	-fsingle-precision-constant \
+	$(ARCH_CFLAGS) $(MCU) $(TUNE_FLAGS) $(ADVANCED_OPTIMIZATIONS) \
 	-I. $(INCLUDES) \
 	-fno-common \
 	-fdata-sections -ffunction-sections \
@@ -108,10 +119,10 @@ LDSCRIPT = $(DEVICE)/$(LOADFILE)
 
 LFLAGS =  -Wl,-Map,build/main.map,--cref \
 	-Wl,--gc-sections \
-	-flto \
+	-flto=8 \
 	$(MCU) \
+	-specs=nano.specs \
 	-T $(LDSCRIPT)
-	-specs=nano.specs -T $(LDSCRIPT) \
 
 # build/src/hardware_tests.o: OPTFLAG = -O0
 
