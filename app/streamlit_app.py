@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import streamlit as st
 
@@ -9,6 +12,7 @@ import json
 
 from chord_model import (
     average_note_dissonance,
+    chord_pairwise_dissonance_matrix,
     build_greedy_chord_and_curve,
     curve_for_fixed_chord,
     make_note_list,
@@ -27,6 +31,124 @@ st.set_page_config(page_title="Chord Dissonance Explorer", layout="wide")
 st.title("Chord Dissonance Explorer")
 
 
+MAX_OVERTONES = 24
+SETTINGS_PATH = Path.home() / ".swn_chord_explorer_settings.json"
+
+
+def _load_settings() -> dict[str, Any]:
+    try:
+        if SETTINGS_PATH.exists():
+            return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_settings(data: dict[str, Any]) -> None:
+    try:
+        SETTINGS_PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        # Settings are best-effort; don't break the app.
+        return
+
+
+def _init_session_defaults(settings: dict[str, Any]) -> None:
+    defaults: dict[str, Any] = {
+        "root_note": "C4",
+        "extension_note": "E5",
+        "extension_weight": 1.0,
+        "n_additional": 4,
+        "microtonal_mode": False,
+        "candidate_steps_per_semitone": 1,
+        "algorithm": "Greedy",
+        "freeze_assignment": False,
+        "lowpass_cutoff_hz": 20000,
+        "lowpass_slope_db_per_oct": 0.0,
+        "lowpass_renormalize": False,
+        "n_overtones": 12,
+        "weight_mode": "Raw weights (auto-normalized)",
+        "weight_preset": "All equal",
+        "set_aggregation_ui": "Sum",
+        "sine_kernel_ui": "Linear (triangle)",
+        "peak_semitones_c2": 1.16,
+        "peak_semitones_c6": 0.2,
+        "fall_to_zero_c2": 12.7,
+        "fall_to_zero_c6": 12.0,
+        "tail_decay_c2": 25.0,
+        "tail_decay_c6": 110.0,
+        "height_c2": 1.0,
+        "height_c6": 0.75,
+        "below_root_penalty_db_per_oct": 0.0,
+        "above_extension_penalty_db_per_oct": 2.0,
+        "slope_weight": 0.0,
+        "slope_h_semitones": 0.1,
+    }
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = settings.get(k, v)
+
+    raw = settings.get("raw_weights")
+    logits = settings.get("logits")
+    if not isinstance(raw, list):
+        raw = [1.0 / float(defaults["n_overtones"]) for _ in range(MAX_OVERTONES)]
+    if not isinstance(logits, list):
+        logits = [0.0 for _ in range(MAX_OVERTONES)]
+
+    raw = (raw + [0.0] * MAX_OVERTONES)[:MAX_OVERTONES]
+    logits = (logits + [0.0] * MAX_OVERTONES)[:MAX_OVERTONES]
+    for i in range(MAX_OVERTONES):
+        rk = f"raw_w_{i+1}"
+        lk = f"logit_{i+1}"
+        if rk not in st.session_state:
+            st.session_state[rk] = float(raw[i])
+        if lk not in st.session_state:
+            st.session_state[lk] = float(logits[i])
+
+
+def _persist_settings() -> None:
+    data: dict[str, Any] = {}
+    keys = [
+        "root_note",
+        "extension_note",
+        "extension_weight",
+        "n_additional",
+        "microtonal_mode",
+        "algorithm",
+        "freeze_assignment",
+        "lowpass_cutoff_hz",
+        "lowpass_slope_db_per_oct",
+        "lowpass_renormalize",
+        "n_overtones",
+        "weight_mode",
+        "weight_preset",
+        "set_aggregation_ui",
+        "sine_kernel_ui",
+        "peak_semitones_c2",
+        "peak_semitones_c6",
+        "fall_to_zero_c2",
+        "fall_to_zero_c6",
+        "tail_decay_c2",
+        "tail_decay_c6",
+        "height_c2",
+        "height_c6",
+        "below_root_penalty_db_per_oct",
+        "above_extension_penalty_db_per_oct",
+        "slope_weight",
+        "slope_h_semitones",
+    ]
+    for k in keys:
+        if k in st.session_state:
+            data[k] = st.session_state[k]
+
+    data["raw_weights"] = [float(st.session_state.get(f"raw_w_{i+1}", 0.0)) for i in range(MAX_OVERTONES)]
+    data["logits"] = [float(st.session_state.get(f"logit_{i+1}", 0.0)) for i in range(MAX_OVERTONES)]
+    _save_settings(data)
+
+
+_init_session_defaults(_load_settings())
+
+
 @st.cache_data
 def _note_list(min_note: str, max_note: str) -> list[str]:
     return make_note_list(min_note=min_note, max_note=max_note)
@@ -37,19 +159,24 @@ with st.sidebar:
 
     full_notes = _note_list("A0", "C8")
 
-    root_note = st.select_slider(
-        "Root note",
-        options=full_notes,
-        value="C4" if "C4" in full_notes else full_notes[0],
-    )
+    if st.session_state["root_note"] not in full_notes:
+        st.session_state["root_note"] = "C4" if "C4" in full_notes else full_notes[0]
+    root_note = st.select_slider("Root note", options=full_notes, key="root_note")
 
     # Keep extension at/above root to match the range rule.
     root_idx = full_notes.index(root_note)
     ext_options = full_notes[root_idx:]
-    extension_note = st.select_slider(
-        "Extension note",
-        options=ext_options,
-        value="E5" if "E5" in ext_options else ext_options[0],
+    if st.session_state["extension_note"] not in ext_options:
+        st.session_state["extension_note"] = "E5" if "E5" in ext_options else ext_options[0]
+    extension_note = st.select_slider("Extension note", options=ext_options, key="extension_note")
+
+    extension_weight = st.slider(
+        "Extension weight",
+        min_value=0.0,
+        max_value=2.0,
+        step=0.05,
+        key="extension_weight",
+        help="Scales the relative importance of the extension note in the dissonance objective (0 = ignore extension, 1 = normal, 2 = twice as important).",
     )
 
     # Candidate range rule
@@ -68,26 +195,51 @@ with st.sidebar:
 
     st.divider()
 
-    n_additional = st.slider("Additional notes", min_value=0, max_value=8, value=4, step=1)
+    n_additional = st.slider("Additional notes", min_value=0, max_value=8, step=1, key="n_additional")
+
+    microtonal_mode = st.checkbox(
+        "Microtonal mode (filler notes)",
+        key="microtonal_mode",
+        help="When enabled, additional notes can be placed between semitones (root/extension stay on the note list).",
+    )
+    candidate_steps_per_semitone = 4 if microtonal_mode else 1
 
     st.divider()
     st.header("Assignment")
 
-    algorithm = st.selectbox(
-        "Algorithm",
-        [
-            "Greedy",
-            "Optimal search",
-            "Root+extension priority",
-        ],
-        index=0,
-    )
-    freeze_assignment = st.checkbox("Freeze chord notes", value=False)
+    algorithm_opts = ["Greedy", "Optimal search", "Root+extension priority"]
+    if st.session_state["algorithm"] not in algorithm_opts:
+        st.session_state["algorithm"] = algorithm_opts[0]
+    algorithm = st.selectbox("Algorithm", algorithm_opts, key="algorithm")
+
+    freeze_assignment = st.checkbox("Freeze chord notes", key="freeze_assignment")
     refresh_frozen = st.button("Refresh frozen chord")
 
     st.divider()
     st.header("Overtones")
-    n_overtones = st.slider("Number of overtones", min_value=1, max_value=24, value=12, step=1)
+    n_overtones = st.slider("Number of overtones", min_value=1, max_value=MAX_OVERTONES, step=1, key="n_overtones")
+
+    lowpass_cutoff_hz = st.slider(
+        "Low-pass cutoff (Hz)",
+        min_value=50,
+        max_value=20000,
+        step=50,
+        key="lowpass_cutoff_hz",
+        help="Attenuates overtones above this frequency.",
+    )
+    lowpass_slope_db_per_oct = st.slider(
+        "Low-pass slope (dB/oct)",
+        min_value=0.0,
+        max_value=48.0,
+        step=1.0,
+        key="lowpass_slope_db_per_oct",
+        help="Attenuation rate above the cutoff (0 disables).",
+    )
+    lowpass_renormalize = st.checkbox(
+        "Normalize after low-pass",
+        key="lowpass_renormalize",
+        help="If enabled, re-normalizes the overtone weights after filtering (keeps overall energy similar). If disabled, filtering reduces brightness and total energy.",
+    )
 
     st.divider()
     st.header("Dissonance")
@@ -96,12 +248,36 @@ with st.sidebar:
         "Roughness kernel parameters can vary by register; values are anchored at C2 and C6 and extrapolated smoothly for other notes."
     )
 
+    kernel_opts = ["Linear (triangle)", "Analytic (exp)"]
+    if st.session_state["sine_kernel_ui"] not in kernel_opts:
+        st.session_state["sine_kernel_ui"] = kernel_opts[0]
+    sine_kernel_ui = st.radio(
+        "Roughness kernel",
+        kernel_opts,
+        horizontal=True,
+        key="sine_kernel_ui",
+        help="Switch between the piecewise-linear triangular kernel and the previous analytic kernel exp(-a x) - exp(-b x).",
+    )
+    sine_kernel = "linear" if sine_kernel_ui.startswith("Linear") else "analytic"
+
+    agg_opts = ["Sum", "Max"]
+    if st.session_state["set_aggregation_ui"] not in agg_opts:
+        st.session_state["set_aggregation_ui"] = agg_opts[0]
+    set_aggregation_ui = st.radio(
+        "Dissonance aggregation",
+        agg_opts,
+        horizontal=True,
+        key="set_aggregation_ui",
+        help="How to combine dissonance against a set of existing notes: sum of pairwise dissonances, or the maximum pairwise dissonance.",
+    )
+    set_aggregation = "sum" if set_aggregation_ui == "Sum" else "max"
+
     peak_semitones_c2 = st.slider(
         "Peak position @ C2 (semitones)",
         min_value=0.01,
         max_value=2.0,
-        value=1.00,
         step=0.01,
+        key="peak_semitones_c2",
         help="The interval (in semitones) where roughness peaks around the low register (C2).",
     )
 
@@ -109,35 +285,53 @@ with st.sidebar:
         "Peak position @ C6 (semitones)",
         min_value=0.01,
         max_value=2.0,
-        value=1.00,
         step=0.01,
+        key="peak_semitones_c6",
         help="The interval (in semitones) where roughness peaks around the high register (C6).",
     )
 
-    decay_db_per_oct_c2 = st.slider(
-        "Tail decay @ C2 (dB/oct)",
-        min_value=1.0,
-        max_value=80.0,
-        value=20.0,
-        step=1.0,
-        help="Exponential tail decay for large intervals, expressed as dB of amplitude drop per octave (12 semitones) around C2.",
-    )
+    if sine_kernel == "linear":
+        decay_db_per_oct_c2 = st.slider(
+            "Fall to zero @ C2 (semitones)",
+            min_value=0.5,
+            max_value=48.0,
+            step=0.1,
+            help="After the peak, the roughness falls linearly back to 0 over this many semitones (around C2).",
+            key="fall_to_zero_c2",
+        )
 
-    decay_db_per_oct_c6 = st.slider(
-        "Tail decay @ C6 (dB/oct)",
-        min_value=10.0,
-        max_value=200.0,
-        value=20.0,
-        step=1.0,
-        help="Exponential tail decay for large intervals, expressed as dB of amplitude drop per octave (12 semitones) around C6.",
-    )
+        decay_db_per_oct_c6 = st.slider(
+            "Fall to zero @ C6 (semitones)",
+            min_value=0.5,
+            max_value=48.0,
+            step=0.1,
+            help="After the peak, the roughness falls linearly back to 0 over this many semitones (around C6).",
+            key="fall_to_zero_c6",
+        )
+    else:
+        decay_db_per_oct_c2 = st.slider(
+            "Tail decay @ C2 (dB/oct)",
+            min_value=1.0,
+            max_value=80.0,
+            step=1.0,
+            help="Analytic kernel tail decay for large intervals, expressed as dB of amplitude drop per octave (12 semitones) around C2.",
+            key="tail_decay_c2",
+        )
+
+        decay_db_per_oct_c6 = st.slider(
+            "Tail decay @ C6 (dB/oct)",
+            min_value=10.0,
+            max_value=200.0,
+            step=1.0,
+            help="Analytic kernel tail decay for large intervals, expressed as dB of amplitude drop per octave (12 semitones) around C6.",
+            key="tail_decay_c6",
+        )
 
     height_c2 = st.slider(
         "Peak height @ C2",
         min_value=0.0,
         max_value=2.0,
-        value=1.0,
-        step=0.05,
+        key="height_c2",
         help="Scales the overall height of the roughness peak around C2.",
     )
 
@@ -145,8 +339,8 @@ with st.sidebar:
         "Peak height @ C6",
         min_value=0.0,
         max_value=2.0,
-        value=1.0,
         step=0.05,
+        key="height_c6",
         help="Scales the overall height of the roughness peak around C6.",
     )
 
@@ -154,8 +348,8 @@ with st.sidebar:
         "Penalty below root (dB/oct)",
         min_value=0.0,
         max_value=4.0,
-        value=0.0,
         step=0.1,
+        key="below_root_penalty_db_per_oct",
         help="Adds an extra penalty for candidate notes below the root, increasing linearly with distance (in octaves). 0 disables.",
     )
 
@@ -163,8 +357,8 @@ with st.sidebar:
         "Penalty above extension (dB/oct)",
         min_value=0.0,
         max_value=4.0,
-        value=0.0,
         step=0.1,
+        key="above_extension_penalty_db_per_oct",
         help="Adds an extra penalty for candidate notes above the extension, increasing linearly with distance (in octaves). 0 disables.",
     )
 
@@ -172,8 +366,8 @@ with st.sidebar:
         "Basin preference (slope penalty)",
         min_value=0.0,
         max_value=5.0,
-        value=0.15,
         step=0.05,
+        key="slope_weight",
         help="Adds a penalty for large |dD/d(semitone)| at the chosen note, preferring wider basins of consonance over narrow steep valleys.",
     )
 
@@ -181,29 +375,28 @@ with st.sidebar:
         "Slope step (semitones)",
         min_value=0.01,
         max_value=0.25,
-        value=0.05,
         step=0.01,
+        key="slope_h_semitones",
         help="Pitch step used to estimate |dD/d(semitone)| via central difference. Smaller = more local; larger = smoother.",
     )
 
-    mode = st.radio(
-        "Slider mode",
-        ["Raw weights (auto-normalized)", "Logits (softmax)", "Preset"],
-        index=0,
-    )
+    weight_mode_opts = ["Raw weights (auto-normalized)", "Logits (softmax)", "Preset"]
+    if st.session_state["weight_mode"] not in weight_mode_opts:
+        st.session_state["weight_mode"] = weight_mode_opts[0]
+    mode = st.radio("Slider mode", weight_mode_opts, key="weight_mode")
 
     preset = None
     if mode == "Preset":
-        preset = st.selectbox(
-            "Preset",
-            [
-                "All equal",
-                "1/n rolloff",
-                "Strong fundamental",
-                "Odd harmonics",
-                "Even harmonics",
-            ],
-        )
+        preset_opts = [
+            "All equal",
+            "1/n rolloff",
+            "Strong fundamental",
+            "Odd harmonics",
+            "Even harmonics",
+        ]
+        if st.session_state["weight_preset"] not in preset_opts:
+            st.session_state["weight_preset"] = preset_opts[0]
+        preset = st.selectbox("Preset", preset_opts, key="weight_preset")
 
 
 
@@ -235,7 +428,15 @@ def _get_weights(n: int, mode: str, preset: str | None) -> np.ndarray:
     if mode == "Logits (softmax)":
         logits = []
         for i in range(n):
-            logits.append(st.sidebar.slider(f"logit[{i+1}]", min_value=-6.0, max_value=6.0, value=0.0, step=0.1))
+            logits.append(
+                st.sidebar.slider(
+                    f"logit[{i+1}]",
+                    min_value=-6.0,
+                    max_value=6.0,
+                    step=0.1,
+                    key=f"logit_{i+1}",
+                )
+            )
         logits = np.array(logits, dtype=float)
         exp = np.exp(logits - logits.max())
         return exp / exp.sum()
@@ -243,12 +444,23 @@ def _get_weights(n: int, mode: str, preset: str | None) -> np.ndarray:
     # Raw weights
     raw = []
     for i in range(n):
-        raw.append(st.sidebar.slider(f"w[{i+1}]", min_value=0.0, max_value=1.0, value=(1.0 / n), step=0.01))
+        raw.append(
+            st.sidebar.slider(
+                f"w[{i+1}]",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.01,
+                key=f"raw_w_{i+1}",
+            )
+        )
     raw = np.array(raw, dtype=float)
     return normalize_overtone_weights(raw)
 
 
 weights = _get_weights(n_overtones, mode, preset)
+
+# Best-effort persistence of sidebar controls + weight vectors.
+_persist_settings()
 
 
 def _render_continuous_synth(
@@ -256,6 +468,9 @@ def _render_continuous_synth(
         overtone_weights: np.ndarray,
         timbre: str,
         volume: float,
+    lowpass_cutoff_hz: float,
+    lowpass_slope_db_per_oct: float,
+    lowpass_renormalize: bool,
 ):
         """Continuous additive synth using WebAudio oscillators (no loop gap)."""
         freqs = [float(f) for f in freqs_hz]
@@ -265,6 +480,9 @@ def _render_continuous_synth(
                 "weights": weights_list,
                 "timbre": str(timbre),
                 "volume": float(volume),
+            "lp_cutoff": float(lowpass_cutoff_hz),
+            "lp_slope": float(lowpass_slope_db_per_oct),
+            "lp_norm": bool(lowpass_renormalize),
         }
         data = json.dumps(payload)
 
@@ -316,8 +534,21 @@ def _render_continuous_synth(
 
                 const timbre = (cfg.timbre || 'Pure sine');
                 const weights = (cfg.weights || []);
+                const lpCutoff = Number(cfg.lp_cutoff ?? 0);
+                const lpSlope = Number(cfg.lp_slope ?? 0);
+                const lpNorm = Boolean(cfg.lp_norm ?? false);
                 const nyquist = ctx.sampleRate / 2.0;
                 const perNote = 1.0 / cfg.freqs.length;
+
+                function lowpassGain(fh) {{
+                    const f = Number(fh);
+                    if (!isFinite(f) || f <= 0) return 0;
+                    if (!(lpSlope > 0) || !(lpCutoff > 0)) return 1.0;
+                    if (f <= lpCutoff) return 1.0;
+                    const oct = Math.log2(f / lpCutoff);
+                    const db = lpSlope * Math.max(0.0, oct);
+                    return Math.pow(10.0, -db / 20.0);
+                }}
 
                 let created = 0;
                 for (const f0 of cfg.freqs) {{
@@ -336,13 +567,24 @@ def _render_continuous_synth(
                         oscillators.push(osc);
                         created += 1;
                     }} else {{
+                        // Apply low-pass per harmonic; optionally renormalize per note.
+                        let parts = [];
+                        let sumAmp = 0.0;
                         for (let i = 0; i < weights.length; i++) {{
-                            const amp = Number(weights[i]);
-                            if (!isFinite(amp) || amp <= 1e-4) continue;
+                            const amp0 = Number(weights[i]);
+                            if (!isFinite(amp0) || amp0 <= 1e-4) continue;
                             const harmonic = i + 1;
                             const fh = f * harmonic;
                             if (fh >= nyquist) break;
-
+                            const amp = amp0 * lowpassGain(fh);
+                            if (!(amp > 1e-10)) continue;
+                            parts.push([fh, amp]);
+                            sumAmp += amp;
+                        }}
+                        const inv = (lpNorm && sumAmp > 1e-12) ? (1.0 / sumAmp) : 1.0;
+                        for (const p of parts) {{
+                            const fh = p[0];
+                            const amp = p[1] * inv;
                             const osc = ctx.createOscillator();
                             const g = ctx.createGain();
                             osc.type = 'sine';
@@ -388,40 +630,88 @@ def _render_continuous_synth(
         components.html(html, height=110, scrolling=False)
 
 
-def _select_midis() -> list[int]:
-    common = dict(
-        root_note=root_note,
-        extension_note=extension_note,
-        overtone_weights=weights,
-        min_note=min_note,
-        max_note=max_note,
-        n_additional=n_additional,
-        peak_semitones_c2=peak_semitones_c2,
-        peak_semitones_c6=peak_semitones_c6,
-        decay_db_per_oct_c2=decay_db_per_oct_c2,
-        decay_db_per_oct_c6=decay_db_per_oct_c6,
-        height_c2=height_c2,
-        height_c6=height_c6,
-        below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
-        above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
-        slope_weight=slope_weight,
-        slope_h_semitones=slope_h_semitones,
-    )
-    if algorithm == "Optimal search":
-        return select_chord_midis_optimal_search(**common)
-    if algorithm == "Root+extension priority":
-        return select_chord_midis_root_extension_priority(**common)
-    return select_chord_midis_greedy(**common)
+def _select_midis() -> list[float]:
+    def _select_for_steps(steps: int) -> list[float]:
+        common = dict(
+            root_note=root_note,
+            extension_note=extension_note,
+            extension_weight=extension_weight,
+            overtone_weights=weights,
+            min_note=min_note,
+            max_note=max_note,
+            n_additional=n_additional,
+            candidate_steps_per_semitone=int(steps),
+            lowpass_cutoff_hz=lowpass_cutoff_hz,
+            lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+            lowpass_renormalize=lowpass_renormalize,
+            set_aggregation=set_aggregation,
+            peak_semitones_c2=peak_semitones_c2,
+            peak_semitones_c6=peak_semitones_c6,
+            decay_db_per_oct_c2=decay_db_per_oct_c2,
+            decay_db_per_oct_c6=decay_db_per_oct_c6,
+            height_c2=height_c2,
+            height_c6=height_c6,
+            sine_kernel=sine_kernel,
+            below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
+            above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
+            slope_weight=slope_weight,
+            slope_h_semitones=slope_h_semitones,
+        )
+        if algorithm == "Optimal search":
+            return select_chord_midis_optimal_search(**common)
+        if algorithm == "Root+extension priority":
+            return select_chord_midis_root_extension_priority(**common)
+        return select_chord_midis_greedy(**common)
+
+    def _avg_d_for_midis(midis: list[float]) -> float:
+        m = np.asarray(midis, dtype=np.float64)
+        freqs = 440.0 * (2.0 ** ((m - 69.0) / 12.0))
+        return float(
+            average_note_dissonance(
+                chord_freqs_hz=freqs.tolist(),
+                overtone_weights=weights,
+                extension_freq_hz=midi_to_frequency(note_to_midi(extension_note)),
+                extension_weight=extension_weight,
+                peak_semitones_c2=peak_semitones_c2,
+                peak_semitones_c6=peak_semitones_c6,
+                decay_db_per_oct_c2=decay_db_per_oct_c2,
+                decay_db_per_oct_c6=decay_db_per_oct_c6,
+                height_c2=height_c2,
+                height_c6=height_c6,
+                sine_kernel=sine_kernel,
+                lowpass_cutoff_hz=lowpass_cutoff_hz,
+                lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+                lowpass_renormalize=lowpass_renormalize,
+                set_aggregation=set_aggregation,
+            )
+        )
+
+    # Guarantee: microtonal mode can't be worse than semitone-grid for the
+    # displayed average dissonance metric.
+    if microtonal_mode:
+        midis_micro = _select_for_steps(candidate_steps_per_semitone)
+        midis_semi = _select_for_steps(1)
+        if _avg_d_for_midis(midis_semi) <= _avg_d_for_midis(midis_micro):
+            return midis_semi
+        return midis_micro
+
+    return _select_for_steps(candidate_steps_per_semitone)
 
 # Compute model
 try:
     freeze_key = (
         root_note,
         extension_note,
+        float(extension_weight),
         min_note,
         max_note,
         int(n_additional),
         algorithm,
+        bool(microtonal_mode),
+        float(lowpass_cutoff_hz),
+        float(lowpass_slope_db_per_oct),
+        bool(lowpass_renormalize),
+        str(set_aggregation),
     )
 
     if freeze_assignment:
@@ -438,6 +728,7 @@ try:
             chord_midis=fixed_midis,
             root_note=root_note,
             extension_note=extension_note,
+            extension_weight=extension_weight,
             min_note=min_note,
             max_note=max_note,
             overtone_weights=weights,
@@ -447,6 +738,11 @@ try:
             decay_db_per_oct_c6=decay_db_per_oct_c6,
             height_c2=height_c2,
             height_c6=height_c6,
+            sine_kernel=sine_kernel,
+            lowpass_cutoff_hz=lowpass_cutoff_hz,
+            lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+            lowpass_renormalize=lowpass_renormalize,
+            set_aggregation=set_aggregation,
             below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
             above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
             slope_weight=slope_weight,
@@ -459,6 +755,7 @@ try:
             chord_midis=chord_midis,
             root_note=root_note,
             extension_note=extension_note,
+            extension_weight=extension_weight,
             min_note=min_note,
             max_note=max_note,
             overtone_weights=weights,
@@ -468,6 +765,11 @@ try:
             decay_db_per_oct_c6=decay_db_per_oct_c6,
             height_c2=height_c2,
             height_c6=height_c6,
+            sine_kernel=sine_kernel,
+            lowpass_cutoff_hz=lowpass_cutoff_hz,
+            lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+            lowpass_renormalize=lowpass_renormalize,
+            set_aggregation=set_aggregation,
             below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
             above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
             slope_weight=slope_weight,
@@ -489,12 +791,19 @@ with col_right:
     avg_d = average_note_dissonance(
         chord_freqs_hz=result.chord_freqs_sorted_hz,
         overtone_weights=weights,
+        extension_freq_hz=midi_to_frequency(note_to_midi(extension_note)),
+        extension_weight=extension_weight,
         peak_semitones_c2=peak_semitones_c2,
         peak_semitones_c6=peak_semitones_c6,
         decay_db_per_oct_c2=decay_db_per_oct_c2,
         decay_db_per_oct_c6=decay_db_per_oct_c6,
         height_c2=height_c2,
         height_c6=height_c6,
+        sine_kernel=sine_kernel,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
+        lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+        lowpass_renormalize=lowpass_renormalize,
+        set_aggregation=set_aggregation,
     )
     st.metric("Average dissonance", f"{avg_d:.4f}")
 
@@ -514,6 +823,9 @@ with col_right:
             overtone_weights=weights,
             timbre=str(timbre),
             volume=float(volume),
+            lowpass_cutoff_hz=float(lowpass_cutoff_hz),
+            lowpass_slope_db_per_oct=float(lowpass_slope_db_per_oct),
+            lowpass_renormalize=bool(lowpass_renormalize),
         )
     else:
         st.caption("Enable continuous synth to start playback.")
@@ -555,3 +867,41 @@ with col_left:
     st.pyplot(fig, clear_figure=True)
 
     st.caption("Dashed lines mark the selected chord notes. Weights are normalized to sum=1.")
+
+    st.subheader("Dissonance matrix")
+    st.caption("Pairwise overtone-weighted roughness between chord notes.")
+
+    ext_freq_hz = midi_to_frequency(note_to_midi(extension_note))
+    mat = chord_pairwise_dissonance_matrix(
+        chord_freqs_hz=result.chord_freqs_sorted_hz,
+        overtone_weights=weights,
+        extension_freq_hz=ext_freq_hz,
+        extension_weight=extension_weight,
+        peak_semitones_c2=peak_semitones_c2,
+        peak_semitones_c6=peak_semitones_c6,
+        decay_db_per_oct_c2=decay_db_per_oct_c2,
+        decay_db_per_oct_c6=decay_db_per_oct_c6,
+        height_c2=height_c2,
+        height_c6=height_c6,
+        sine_kernel=sine_kernel,
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
+        lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+        lowpass_renormalize=lowpass_renormalize,
+    )
+
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    im = ax2.imshow(mat, aspect="equal", origin="lower")
+
+    labels = [f"{n}\n{f:.1f}Hz" for n, f in zip(result.chord_notes_sorted, result.chord_freqs_sorted_hz)]
+    ax2.set_xlabel("Chord note")
+    ax2.set_ylabel("Chord note")
+
+    ax2.set_xticks(np.arange(mat.shape[1]))
+    ax2.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+
+    ax2.set_yticks(np.arange(mat.shape[0]))
+    ax2.set_yticklabels(labels, rotation=0, fontsize=8)
+
+    cbar = fig2.colorbar(im, ax=ax2)
+    cbar.set_label("Weighted dissonance")
+    st.pyplot(fig2, clear_figure=True)
