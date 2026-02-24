@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -940,7 +941,10 @@ def _select_midis() -> list[float]:
         above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
         search_n_harmonics=int(search_n_harmonics),
     )
-    return select_chord_midis_greedy_harmonic_subharmonic(**common)
+    t0 = time.perf_counter()
+    midis = select_chord_midis_greedy_harmonic_subharmonic(**common)
+    st.session_state["last_chord_search_s"] = float(time.perf_counter() - t0)
+    return midis
 
 # Compute model
 try:
@@ -1034,6 +1038,12 @@ col_left, col_right = st.columns([2, 1], gap="large")
 with col_right:
     st.subheader("Chord")
     st.write(" ".join(result.chord_notes_sorted))
+
+    search_s = float(st.session_state.get("last_chord_search_s", 0.0) or 0.0)
+    if search_s > 0:
+        st.caption(f"Chord search time: {search_s * 1000.0:.1f} ms")
+    else:
+        st.caption("Chord search time: —")
 
     same_root_ext = bool(np.isclose(float(note_to_midi(root_note)), float(ext_midi_cont), rtol=0.0, atol=1e-9))
     ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))
