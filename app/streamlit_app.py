@@ -104,6 +104,13 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "height_c6": 1.0,
         "below_root_penalty_db_per_oct": 1.0,
         "above_extension_penalty_db_per_oct": 1.0,
+
+        # Sequencer
+        "sequencer_run": False,
+        "sequencer_step_s": 0.5,
+        "sequencer_steps_text": "C4 E5\nD4 F5\nE4 G5\nF4 A5",
+        "sequencer_voice_leading": False,
+        "sequencer_prev_weight": 0.5,
     }
 
     for k, v in defaults.items():
@@ -165,6 +172,13 @@ def _persist_settings() -> None:
         "height_c6",
         "below_root_penalty_db_per_oct",
         "above_extension_penalty_db_per_oct",
+
+        # Sequencer
+        "sequencer_run",
+        "sequencer_step_s",
+        "sequencer_steps_text",
+        "sequencer_voice_leading",
+        "sequencer_prev_weight",
     ]
     for k in keys:
         if k in st.session_state:
@@ -233,12 +247,18 @@ def _parse_sequencer_steps(text: str, full_notes: list[str]) -> tuple[list[tuple
 
 
 def _init_sequencer_state() -> None:
+    # These are normally initialized via _init_session_defaults(). Keep this as a
+    # safety net for older settings files.
     if "sequencer_steps_text" not in st.session_state:
         st.session_state["sequencer_steps_text"] = "C4 E5\nD4 F5\nE4 G5\nF4 A5"
     if "sequencer_step_s" not in st.session_state:
         st.session_state["sequencer_step_s"] = 0.5
     if "sequencer_run" not in st.session_state:
         st.session_state["sequencer_run"] = False
+    if "sequencer_voice_leading" not in st.session_state:
+        st.session_state["sequencer_voice_leading"] = False
+    if "sequencer_prev_weight" not in st.session_state:
+        st.session_state["sequencer_prev_weight"] = 0.5
     if "sequencer_index" not in st.session_state:
         st.session_state["sequencer_index"] = 0
     if "sequencer_next_ts" not in st.session_state:
@@ -294,6 +314,9 @@ elif bool(prev_run) != cur_run:
     if cur_run:
         st.session_state["sequencer_index"] = 0
         st.session_state["sequencer_next_ts"] = 0.0
+        st.session_state.pop("voice_leading_prev_chord_midis", None)
+        st.session_state.pop("voice_leading_prev_root_note", None)
+        st.session_state.pop("voice_leading_prev_extension_midi", None)
 
 
 @st.fragment(run_every=0.1)
@@ -411,6 +434,19 @@ with st.sidebar:
         max_value=5.0,
         step=0.05,
         key="sequencer_step_s",
+    )
+    st.toggle(
+        "Voice leading",
+        key="sequencer_voice_leading",
+        help="When enabled, the next chord is seeded from the previous chord (with the new root/extension) and then improved by replacing the most dissonant carried-over voices first.",
+    )
+    st.slider(
+        "Voice leading strength",
+        min_value=0.0,
+        max_value=1.0,
+        step=0.05,
+        key="sequencer_prev_weight",
+        help="Penalizes moving a carried-over voice (in semitones). 0 disables voice leading behavior.",
     )
     st.text_area(
         "Sequence (one per line: ROOT EXT)",
@@ -1085,6 +1121,14 @@ def _render_continuous_synth(
 
 
 def _select_midis() -> list[float]:
+    voice_leading_enabled = bool(st.session_state.get("sequencer_run", False)) and bool(
+        st.session_state.get("sequencer_voice_leading", False)
+    )
+    prev_weight = float(st.session_state.get("sequencer_prev_weight", 0.0) or 0.0)
+    prev_midis = st.session_state.get("voice_leading_prev_chord_midis") if voice_leading_enabled else None
+    prev_root = st.session_state.get("voice_leading_prev_root_note") if voice_leading_enabled else None
+    prev_ext_midi = st.session_state.get("voice_leading_prev_extension_midi") if voice_leading_enabled else None
+
     common = dict(
         root_note=root_note,
         extension_note=extension_note,
@@ -1111,6 +1155,10 @@ def _select_midis() -> list[float]:
         below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
         above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
         search_n_harmonics=int(search_n_harmonics),
+        prev_chord_midis=prev_midis,
+        prev_chord_weight=prev_weight,
+        prev_root_note=prev_root,
+        prev_extension_midi=prev_ext_midi,
     )
     t0 = time.perf_counter()
     midis = select_chord_midis_greedy_harmonic_subharmonic(**common)
@@ -1203,6 +1251,15 @@ try:
 except Exception as exc:
     st.error(f"Failed to compute chord: {exc}")
     st.stop()
+
+# Update voice-leading history for the *next* sequencer step.
+if bool(st.session_state.get("sequencer_run", False)) and bool(st.session_state.get("sequencer_voice_leading", False)):
+    try:
+        st.session_state["voice_leading_prev_chord_midis"] = list(result.chord_midis_sorted)
+        st.session_state["voice_leading_prev_root_note"] = str(root_note)
+        st.session_state["voice_leading_prev_extension_midi"] = float(ext_midi_cont)
+    except Exception:
+        pass
 
 col_left, col_right = st.columns([2, 1], gap="large")
 
