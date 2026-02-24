@@ -283,6 +283,47 @@ def _boundary_penalty_midis(
     return out
 
 
+def _boundary_penalty_freqs(
+    candidate_freqs_hz: np.ndarray,
+    root_freq_hz: float,
+    extension_freq_hz: float,
+    below_root_db_per_oct: float = 0.0,
+    above_extension_db_per_oct: float = 0.0,
+) -> np.ndarray:
+    """Additive penalty for notes below root / above extension in frequency domain.
+
+    This is equivalent to `_boundary_penalty_midis` but avoids any MIDI conversion.
+    Penalty increases linearly with octaves outside the [min(root,ext), max(root,ext)]
+    boundaries.
+    """
+
+    f = np.asarray(candidate_freqs_hz, dtype=np.float64)
+    f = np.maximum(f, 1e-12)
+
+    low = float(min(float(root_freq_hz), float(extension_freq_hz)))
+    high = float(max(float(root_freq_hz), float(extension_freq_hz)))
+    low = max(low, 1e-12)
+    high = max(high, low * 1.0000001)
+
+    out = np.zeros_like(f)
+
+    below = float(below_root_db_per_oct)
+    if below > 0.0:
+        # If f < low, octaves below = log2(low/f)
+        oct_below = np.maximum(0.0, np.log2(low / f))
+        slope = np.power(10.0, below / 20.0) - 1.0
+        out = out + slope * oct_below
+
+    above = float(above_extension_db_per_oct)
+    if above > 0.0:
+        # If f > high, octaves above = log2(f/high)
+        oct_above = np.maximum(0.0, np.log2(f / high))
+        slope = np.power(10.0, above / 20.0) - 1.0
+        out = out + slope * oct_above
+
+    return out
+
+
 def sine_dissonance(
     f1_hz: np.ndarray,
     f2_hz: np.ndarray,
@@ -812,66 +853,6 @@ def chord_pairwise_dissonance_matrix(
 
     return M
 
-
-def _mask_excluding_nearby_ticks(
-    all_ticks: np.ndarray,
-    chosen_ticks: Sequence[int],
-    radius_ticks: int,
-) -> np.ndarray:
-    """Mask for excluding ticks within +/- radius_ticks of any chosen tick.
-
-    Assumes all_ticks is a dense arange with step=1.
-    """
-
-    ticks = np.asarray(all_ticks, dtype=np.int64)
-    mask = np.ones_like(ticks, dtype=bool)
-    r = int(radius_ticks)
-    if ticks.size == 0 or len(chosen_ticks) == 0:
-        return mask
-
-    # If r == 0, exclude only the exact chosen ticks (prevents duplicates).
-    if r == 0:
-        min_tick = int(ticks[0])
-        n = int(mask.size)
-        for t in chosen_ticks:
-            idx = int(t) - min_tick
-            if 0 <= idx < n:
-                mask[idx] = False
-        return mask
-
-    if r < 0:
-        return mask
-
-    min_tick = int(ticks[0])
-    n = int(mask.size)
-    for t in chosen_ticks:
-        start = max(0, int(t) - r - min_tick)
-        end = min(n, int(t) + r - min_tick + 1)
-        if start < end:
-            mask[start:end] = False
-    return mask
-
-
-def _microtonal_exclusion_radius_ticks(steps_per_semitone: int, radius_semitones: float = 0.25) -> int:
-    """Radius in integer ticks to exclude notes closer than `radius_semitones`.
-
-    We treat the radius as *strictly less than* the given semitone distance.
-    This ensures that with 4 steps/semitone (quarter-tone grid), a distance of
-    exactly 0.25 semitones is allowed (so microtonal mode doesn't remove the
-    original semitone-grid candidates once a quarter-step note is chosen).
-    """
-
-    steps = int(steps_per_semitone)
-    if steps <= 1:
-        return 0
-
-    r = float(radius_semitones)
-    if r <= 0.0:
-        return 0
-
-    return max(0, int(np.floor(r * steps - 1e-12)))
-
-
 def select_chord_midis_greedy_harmonic_subharmonic(
     root_note: str,
     extension_note: str,
@@ -896,7 +877,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     below_root_penalty_db_per_oct: float = 0.0,
     above_extension_penalty_db_per_oct: float = 0.0,
     a4_hz: float = 440.0,
-    candidate_steps_per_semitone: int = 1,
+    extension_midi: float | None = None,
+    quantize_to_semitones: bool = True,
     search_n_harmonics: int = 16,
 ) -> List[float]:
     """Greedy selection where candidates come only from harmonics+subharmonics.
@@ -907,9 +889,9 @@ def select_chord_midis_greedy_harmonic_subharmonic(
         for k=2..search_n_harmonics.
 
         Pitch handling:
-            - If candidate_steps_per_semitone == 1: candidates are snapped to semitones.
-            - If candidate_steps_per_semitone > 1 (microtonal mode): candidates are
-                evaluated as *continuous* frequencies with no grid snapping.
+            - If quantize_to_semitones is True: candidates are snapped to semitones.
+            - If quantize_to_semitones is False: candidates are evaluated as
+              *continuous* frequencies with no snapping.
 
     `search_n_harmonics` controls how many harmonic/subharmonic relations are used
     to generate candidates (k=2..K). This is independent of the number of overtones
@@ -921,21 +903,21 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     if max_midi <= min_midi:
         raise ValueError("max_note must be above min_note")
 
-    steps = int(candidate_steps_per_semitone)
-    if steps <= 0:
-        raise ValueError("candidate_steps_per_semitone must be >= 1")
+    snap = bool(quantize_to_semitones)
 
     root_midi = note_to_midi(root_note)
-    ext_midi = note_to_midi(extension_note)
+    ext_midi_val = float(extension_midi) if extension_midi is not None else float(note_to_midi(extension_note))
+    ext_midi_int = int(round(ext_midi_val))
     root_freq = midi_to_frequency(root_midi, a4_hz=a4_hz)
-    ext_freq = midi_to_frequency(ext_midi, a4_hz=a4_hz)
+    ext_freq = float(float(a4_hz) * (2.0 ** ((ext_midi_val - 69.0) / 12.0)))
     chosen_freqs: list[float] = [float(root_freq)]
     chosen_midis_int: list[int] = [int(root_midi)]
-    if int(ext_midi) != int(root_midi):
+    same_root_ext = bool(np.isclose(ext_midi_val, float(root_midi), rtol=0.0, atol=1e-9))
+    if not same_root_ext:
         chosen_freqs.append(float(ext_freq))
-        chosen_midis_int.append(int(ext_midi))
+        chosen_midis_int.append(int(ext_midi_int))
     ext_w = float(extension_weight)
-    if int(ext_midi) == int(root_midi):
+    if same_root_ext:
         ext_w = 1.0
 
     min_freq = midi_to_frequency(min_midi, a4_hz=a4_hz)
@@ -945,27 +927,37 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     if K < 2:
         K = 2
 
-    def _freq_to_midi(f_hz: float) -> float | None:
-        f = float(f_hz)
-        if not np.isfinite(f) or f <= 0.0:
-            return None
-        return float(69.0 + 12.0 * np.log2(f / float(a4_hz)))
+    def _freqs_to_midis(freqs_hz: np.ndarray) -> np.ndarray:
+        f = np.asarray(freqs_hz, dtype=np.float64)
+        # Caller is expected to have filtered to finite, >0 frequencies.
+        return 69.0 + 12.0 * np.log2(f / float(a4_hz))
 
-    def _exclude_nearby_midis(cand_midis: np.ndarray, chosen_midis: Sequence[float], radius_semitones: float = 0.25) -> np.ndarray:
-        if cand_midis.size == 0:
-            return cand_midis
+    def _exclude_nearby_freqs_mask(
+        cand_freqs_hz: np.ndarray,
+        chosen_freqs_hz: Sequence[float],
+        radius_semitones: float = 0.25,
+    ) -> np.ndarray:
+        cand = np.asarray(cand_freqs_hz, dtype=np.float64)
+        if cand.size == 0:
+            return np.zeros((0,), dtype=bool)
+
         r = float(radius_semitones)
-        if r <= 0:
-            return cand_midis
+        if r <= 0.0:
+            return np.ones((cand.size,), dtype=bool)
 
-        chosen = np.asarray([float(m) for m in chosen_midis], dtype=np.float64)
+        chosen = np.asarray([float(f) for f in chosen_freqs_hz], dtype=np.float64)
+        chosen = chosen[np.isfinite(chosen)]
+        chosen = chosen[chosen > 0.0]
         if chosen.size == 0:
-            return cand_midis
+            return np.ones((cand.size,), dtype=bool)
 
-        # Exclude candidates within strictly < r semitones of any chosen.
-        d = np.abs(cand_midis[:, None] - chosen[None, :])
+        cand = np.maximum(cand, 1e-12)
+        chosen = np.maximum(chosen, 1e-12)
+
+        # Semitone distance: 12*abs(log2(f_cand/f_chosen)).
+        d = 12.0 * np.abs(np.log2(cand[:, None] / chosen[None, :]))
         keep = np.all(d >= (r - 1e-12), axis=1)
-        return cand_midis[keep]
+        return keep
 
     for _ in range(int(n_additional)):
         # Generate candidate fundamentals from harmonic/subharmonic relations.
@@ -986,34 +978,34 @@ def select_chord_midis_greedy_harmonic_subharmonic(
         cand_freqs_arr = cand_freqs_arr[np.isfinite(cand_freqs_arr)]
         cand_freqs_arr = cand_freqs_arr[(cand_freqs_arr > 0.0) & (cand_freqs_arr >= (min_freq - 1e-12)) & (cand_freqs_arr <= (max_freq + 1e-12))]
 
-        # Convert to midis for boundary penalties and de-dup.
-        cand_midis_arr = np.asarray([m for m in (_freq_to_midi(f) for f in cand_freqs_arr.tolist()) if m is not None], dtype=np.float64)
-        if cand_midis_arr.size == 0:
-            # If range is too tight, fall back to semitone grid candidates.
-            all_midis = np.arange(min_midi, max_midi + 1, dtype=np.float64)
-            cand_midis_arr = all_midis
+        if cand_freqs_arr.size == 0:
+            raise RuntimeError("No harmonic/subharmonic candidates within range")
 
-        if steps > 1:
-            # Microtonal: do NOT snap; keep continuous candidates.
-            candidate_midis = _exclude_nearby_midis(cand_midis_arr, chosen_midis=[_freq_to_midi(f) for f in chosen_freqs if _freq_to_midi(f) is not None])
-            # De-dup with a fine rounding to prevent huge repeats.
-            candidate_midis = np.unique(np.round(candidate_midis, 6))
-        else:
-            # Semitone mode: snap to integer midis.
-            candidate_midis = np.unique(np.round(cand_midis_arr))
+        # Common pipeline (both modes): exclude anything within 0.25 semitones
+        # of existing chosen notes, operating purely in frequency domain.
+        keep = _exclude_nearby_freqs_mask(cand_freqs_arr, chosen_freqs_hz=chosen_freqs, radius_semitones=0.25)
+        candidate_freqs = cand_freqs_arr[keep]
+
+        # De-dup exact duplicate frequencies (no rounding/quantization).
+        if candidate_freqs.size:
+            candidate_freqs = np.unique(candidate_freqs)
+
+        if candidate_freqs.size == 0:
+            raise RuntimeError("No candidates after excluding nearby notes")
+
+        if snap:
+            # Only difference vs microtonal: quantize surviving candidates to semitones.
+            candidate_midis = np.unique(np.round(_freqs_to_midis(candidate_freqs)))
             if chosen_midis_int:
                 candidate_midis = candidate_midis[~np.isin(candidate_midis, np.asarray(chosen_midis_int, dtype=np.float64))]
 
-        # Remove any out-of-range candidates (after snapping/rounding).
-        candidate_midis = candidate_midis[(candidate_midis >= float(min_midi) - 1e-9) & (candidate_midis <= float(max_midi) + 1e-9)]
+            candidate_midis = candidate_midis[(candidate_midis >= float(min_midi) - 1e-9) & (candidate_midis <= float(max_midi) + 1e-9)]
+            if candidate_midis.size == 0:
+                raise RuntimeError("No candidates within MIDI range after snapping")
 
-        if candidate_midis.size == 0:
-            # As a last resort, fall back to the full semitone grid.
-            candidate_midis = np.arange(min_midi, max_midi + 1, dtype=np.float64)
+            candidate_freqs = midi_to_frequency_continuous(candidate_midis, a4_hz=a4_hz)
 
-        candidate_freqs = midi_to_frequency_continuous(candidate_midis, a4_hz=a4_hz)
-
-        if int(ext_midi) == int(root_midi):
+        if same_root_ext:
             chosen_weights = [1.0] + [1.0] * max(0, len(chosen_freqs) - 1)
         else:
             chosen_weights = [1.0, ext_w] + [1.0] * max(0, len(chosen_freqs) - 2)
@@ -1036,20 +1028,24 @@ def select_chord_midis_greedy_harmonic_subharmonic(
             set_aggregation=set_aggregation,
             existing_weights=chosen_weights,
         )
-        D = D + _boundary_penalty_midis(
-            candidate_midis,
-            root_midi=root_midi,
-            extension_midi=ext_midi,
+        D = D + _boundary_penalty_freqs(
+            candidate_freqs,
+            root_freq_hz=root_freq,
+            extension_freq_hz=ext_freq,
             below_root_db_per_oct=below_root_penalty_db_per_oct,
             above_extension_db_per_oct=above_extension_penalty_db_per_oct,
         )
 
         best_idx = int(np.argmin(D))
         chosen_freqs.append(float(candidate_freqs[best_idx]))
-        if steps == 1:
+        if snap:
+            # candidate_midis exists only in snap mode.
             chosen_midis_int.append(int(np.round(float(candidate_midis[best_idx]))))
 
-    # Return as (possibly fractional) midis.
+    if snap:
+        return sorted([float(m) for m in chosen_midis_int])
+
+    # Microtonal: return as (possibly fractional) midis.
     out_midis = [float(69.0 + 12.0 * np.log2(float(f) / float(a4_hz))) for f in chosen_freqs]
     return sorted(out_midis)
 
@@ -1071,6 +1067,7 @@ def curve_for_fixed_chord(
     min_note: str,
     max_note: str,
     overtone_weights: np.ndarray,
+    extension_midi: float | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -1120,7 +1117,7 @@ def curve_for_fixed_chord(
     curve_midis_arr = np.arange(min_midi, (max_midi + 1) + 1e-9, midi_step, dtype=np.float64)
     curve_freqs_arr = midi_to_frequency_continuous(curve_midis_arr, a4_hz=a4_hz)
 
-    ext_midi = float(note_to_midi(extension_note))
+    ext_midi = float(extension_midi) if extension_midi is not None else float(note_to_midi(extension_note))
     ext_w = float(extension_weight)
     chord_weights = [ext_w if np.isclose(m, ext_midi, rtol=0.0, atol=1e-9) else 1.0 for m in chord_midis_sorted]
     cand_weight = np.where(np.isclose(curve_midis_arr, ext_midi, rtol=0.0, atol=1e-9), ext_w, 1.0)
@@ -1146,7 +1143,7 @@ def curve_for_fixed_chord(
         candidate_weight=cand_weight,
     )
     root_midi = note_to_midi(root_note)
-    ext_midi_i = note_to_midi(extension_note)
+    ext_midi_i = float(extension_midi) if extension_midi is not None else float(note_to_midi(extension_note))
     curve_values = (
         curve_values
         + _boundary_penalty_midis(

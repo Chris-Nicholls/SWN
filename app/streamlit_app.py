@@ -16,6 +16,7 @@ from chord_model import (
     curve_for_fixed_chord,
     make_note_list,
     midi_to_frequency,
+    midi_to_note_microtonal,
     midi_to_note,
     note_to_midi,
     select_chord_midis_greedy_harmonic_subharmonic,
@@ -52,10 +53,13 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
     defaults: dict[str, Any] = {
         "root_note": "C4",
         "extension_note": "E5",
+        "extension_midi_cont": 76.0,
         "extension_weight": 1.0,
         "n_additional": 4,
+        # Renamed from "microtonal_mode". If you have old settings on disk,
+        # we migrate them below.
+        "unquantized_mode": False,
         "microtonal_mode": False,
-        "candidate_steps_per_semitone": 1,
         "freeze_assignment": False,
         "search_n_harmonics": 16,
         "lowpass_cutoff_hz": 20000,
@@ -67,24 +71,30 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "set_aggregation_ui": "Sum",
         "chord_metric_ui": "Sum",
         "sine_kernel_ui": "Linear (triangle)",
-        "peak_semitones_c2": 1.16,
-        "peak_semitones_c6": 0.2,
+        "peak_semitones_c2": 0.75,
+        "peak_semitones_c6": 0.4,
         # Unified tail unit helpers (semitones to drop by half height).
         # These are stored for *both* kernels so switching kernels restores the
         # previous values.
-        "tail_half_linear_c2": 12.7 / 2.0,
-        "tail_half_linear_c6": 12.0 / 2.0,
-        "tail_half_exponential_c2": 72.24719895935512 / 25.0,
-        "tail_half_exponential_c6": 72.24719895935512 / 110.0,
+        "tail_half_linear_c2": 3.0,
+        "tail_half_linear_c6": 1.5,
+        "tail_half_exponential_c2": 2.25,
+        "tail_half_exponential_c6": 1.2,
         "height_c2": 1.0,
-        "height_c6": 0.75,
-        "below_root_penalty_db_per_oct": 0.0,
-        "above_extension_penalty_db_per_oct": 2.0,
+        "height_c6": 1.0,
+        "below_root_penalty_db_per_oct": 1.0,
+        "above_extension_penalty_db_per_oct": 1.0,
     }
 
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = settings.get(k, v)
+
+    # Settings migration: older versions stored this as "microtonal_mode".
+    if "unquantized_mode" not in settings and "microtonal_mode" in settings:
+        st.session_state["unquantized_mode"] = bool(settings.get("microtonal_mode", False))
+    # Keep the legacy key in sync so old settings files still reflect the UI state.
+    st.session_state["microtonal_mode"] = bool(st.session_state.get("unquantized_mode", False))
 
     raw = settings.get("raw_weights")
     logits = settings.get("logits")
@@ -109,8 +119,10 @@ def _persist_settings() -> None:
     keys = [
         "root_note",
         "extension_note",
+        "extension_midi_cont",
         "extension_weight",
         "n_additional",
+        "unquantized_mode",
         "microtonal_mode",
         "freeze_assignment",
         "search_n_harmonics",
@@ -160,12 +172,78 @@ with st.sidebar:
         st.session_state["root_note"] = "C4" if "C4" in full_notes else full_notes[0]
     root_note = st.select_slider("Root note", options=full_notes, key="root_note")
 
+    unquantized_mode = st.checkbox(
+        "Unquantized mode (continuous pitches)",
+        key="unquantized_mode",
+        help="When enabled, additional notes are not snapped to semitones (harmonic/subharmonic candidates are evaluated as continuous pitches).",
+    )
+    # Keep the legacy key in sync (backward-compatible settings/persistence).
+    st.session_state["microtonal_mode"] = bool(unquantized_mode)
+
+    prev_unquantized = st.session_state.get("_prev_unquantized_mode")
+    mode_toggled = (prev_unquantized is not None) and (bool(prev_unquantized) != bool(unquantized_mode))
+    st.session_state["_prev_unquantized_mode"] = bool(unquantized_mode)
+
+    midi_min = note_to_midi("A0")
+    midi_max = note_to_midi("C8")
+    root_midi = note_to_midi(root_note)
+
     # Keep extension at/above root to match the range rule.
     root_idx = full_notes.index(root_note)
     ext_options = full_notes[root_idx:]
-    if st.session_state["extension_note"] not in ext_options:
-        st.session_state["extension_note"] = "E5" if "E5" in ext_options else ext_options[0]
-    extension_note = st.select_slider("Extension note", options=ext_options, key="extension_note")
+
+    # Canonical extension pitch state is always a (possibly fractional) MIDI value.
+    # We clamp it for safety any time root changes.
+    st.session_state["extension_midi_cont"] = float(
+        np.clip(float(st.session_state.get("extension_midi_cont", note_to_midi("E5"))), float(root_midi), float(midi_max))
+    )
+
+    if unquantized_mode:
+        # Continuous extension pitch in fractional MIDI.
+        extension_midi_cont = st.slider(
+            "Extension note (continuous)",
+            min_value=float(root_midi),
+            max_value=float(midi_max),
+            step=0.01,
+            key="extension_midi_cont",
+            help="In unquantized mode the extension pitch is continuous (fractional MIDI).",
+        )
+
+        # Keep a nearest-semitone note name around for compatibility/persistence.
+        extension_note = midi_to_note(int(round(float(extension_midi_cont))))
+        if extension_note not in ext_options:
+            extension_note = ext_options[0]
+        st.session_state["extension_note"] = extension_note
+        st.caption(f"Extension: {midi_to_note_microtonal(float(extension_midi_cont))}")
+    else:
+        # Quantized (semitone) extension.
+        # Important: do NOT overwrite extension_midi_cont unless the user actually changes
+        # the discrete extension slider; this preserves the last selected continuous pitch
+        # across mode toggles.
+        cont_val = float(st.session_state.get("extension_midi_cont", float(note_to_midi("E5"))))
+        nearest_note = midi_to_note(int(round(cont_val)))
+        if nearest_note not in ext_options:
+            nearest_note = "E5" if "E5" in ext_options else ext_options[0]
+
+        # Use a dedicated widget key so we can safely seed it on mode transitions.
+        if (
+            mode_toggled
+            or ("extension_note_quantized" not in st.session_state)
+            or (st.session_state.get("extension_note_quantized") not in ext_options)
+        ):
+            st.session_state["extension_note_quantized"] = nearest_note
+
+        extension_note = st.select_slider(
+            "Extension note",
+            options=ext_options,
+            key="extension_note_quantized",
+        )
+        st.session_state["extension_note"] = extension_note
+        selected_midi = int(note_to_midi(extension_note))
+        if selected_midi != int(round(cont_val)):
+            st.session_state["extension_midi_cont"] = float(selected_midi)
+            cont_val = float(selected_midi)
+        extension_midi_cont = float(cont_val)
 
     extension_weight = st.slider(
         "Extension weight",
@@ -177,13 +255,11 @@ with st.sidebar:
     )
 
     # Candidate range rule
-    midi_min = note_to_midi("A0")
-    midi_max = note_to_midi("C8")
-    root_midi = note_to_midi(root_note)
-    ext_midi = note_to_midi(extension_note)
+    ext_midi_cont = float(extension_midi_cont)
+    ext_midi_for_range = int(round(ext_midi_cont))
 
     min_candidate_midi = max(midi_min, root_midi - 24)
-    max_candidate_midi = min(midi_max, ext_midi + 12)
+    max_candidate_midi = min(midi_max, ext_midi_for_range + 24)
     min_note = midi_to_note(min_candidate_midi)
     max_note = midi_to_note(max_candidate_midi)
 
@@ -193,13 +269,6 @@ with st.sidebar:
     st.divider()
 
     n_additional = st.slider("Additional notes", min_value=0, max_value=8, step=1, key="n_additional")
-
-    microtonal_mode = st.checkbox(
-        "Microtonal mode (filler notes)",
-        key="microtonal_mode",
-        help="When enabled, additional notes can be placed between semitones (root/extension stay on the note list).",
-    )
-    candidate_steps_per_semitone = 4 if microtonal_mode else 1
 
     st.divider()
     st.header("Assignment")
@@ -663,91 +732,50 @@ def _render_continuous_synth(
 
 
 def _select_midis() -> list[float]:
-    def _select_for_steps(steps: int) -> list[float]:
-        common = dict(
-            root_note=root_note,
-            extension_note=extension_note,
-            extension_weight=extension_weight,
-            overtone_weights=weights,
-            min_note=min_note,
-            max_note=max_note,
-            n_additional=n_additional,
-            candidate_steps_per_semitone=int(steps),
-            lowpass_cutoff_hz=lowpass_cutoff_hz,
-            lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
-            lowpass_renormalize=lowpass_renormalize,
-            set_aggregation=set_aggregation,
-            peak_semitones_c2=peak_semitones_c2,
-            peak_semitones_c6=peak_semitones_c6,
-            fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-            fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-            decay_db_per_oct_c2=decay_db_per_oct_c2,
-            decay_db_per_oct_c6=decay_db_per_oct_c6,
-            height_c2=height_c2,
-            height_c6=height_c6,
-            sine_kernel=sine_kernel,
-            below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
-            above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
-            search_n_harmonics=int(search_n_harmonics),
-        )
-        return select_chord_midis_greedy_harmonic_subharmonic(**common)
-
-    def _avg_d_for_midis(midis: list[float]) -> float:
-        m = np.asarray(midis, dtype=np.float64)
-        freqs = 440.0 * (2.0 ** ((m - 69.0) / 12.0))
-        same_root_ext = str(root_note) == str(extension_note)
-        ext_freq_hz = None if same_root_ext else midi_to_frequency(note_to_midi(extension_note))
-        ext_w = 1.0 if same_root_ext else float(extension_weight)
-        return float(
-            average_note_dissonance(
-                chord_freqs_hz=freqs.tolist(),
-                overtone_weights=weights,
-                extension_freq_hz=ext_freq_hz,
-                extension_weight=ext_w,
-                peak_semitones_c2=peak_semitones_c2,
-                peak_semitones_c6=peak_semitones_c6,
-                fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-                fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-                decay_db_per_oct_c2=decay_db_per_oct_c2,
-                decay_db_per_oct_c6=decay_db_per_oct_c6,
-                height_c2=height_c2,
-                height_c6=height_c6,
-                sine_kernel=sine_kernel,
-                lowpass_cutoff_hz=lowpass_cutoff_hz,
-                lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
-                lowpass_renormalize=lowpass_renormalize,
-                set_aggregation=set_aggregation,
-                chord_aggregation=chord_metric,
-            )
-        )
-
-    # Guarantee: microtonal mode can't be worse than semitone-grid for the
-    # displayed average dissonance metric.
-    if microtonal_mode:
-        midis_micro = _select_for_steps(candidate_steps_per_semitone)
-        midis_semi = _select_for_steps(1)
-        if _avg_d_for_midis(midis_semi) <= _avg_d_for_midis(midis_micro):
-            return midis_semi
-        return midis_micro
-
-    return _select_for_steps(candidate_steps_per_semitone)
+    common = dict(
+        root_note=root_note,
+        extension_note=extension_note,
+        extension_midi=float(ext_midi_cont) if bool(unquantized_mode) else None,
+        extension_weight=extension_weight,
+        overtone_weights=weights,
+        min_note=min_note,
+        max_note=max_note,
+        n_additional=n_additional,
+        quantize_to_semitones=not bool(unquantized_mode),
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
+        lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
+        lowpass_renormalize=lowpass_renormalize,
+        set_aggregation=set_aggregation,
+        peak_semitones_c2=peak_semitones_c2,
+        peak_semitones_c6=peak_semitones_c6,
+        fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
+        fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
+        decay_db_per_oct_c2=decay_db_per_oct_c2,
+        decay_db_per_oct_c6=decay_db_per_oct_c6,
+        height_c2=height_c2,
+        height_c6=height_c6,
+        sine_kernel=sine_kernel,
+        below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
+        above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
+        search_n_harmonics=int(search_n_harmonics),
+    )
+    return select_chord_midis_greedy_harmonic_subharmonic(**common)
 
 # Compute model
 try:
     freeze_key = (
         root_note,
-        extension_note,
+        float(ext_midi_cont),
         float(extension_weight),
         min_note,
         max_note,
         int(n_additional),
-        bool(microtonal_mode),
+        bool(unquantized_mode),
         int(search_n_harmonics),
         float(lowpass_cutoff_hz),
         float(lowpass_slope_db_per_oct),
         bool(lowpass_renormalize),
         str(set_aggregation),
-        str(chord_metric),
     )
 
     if freeze_assignment:
@@ -764,6 +792,7 @@ try:
             chord_midis=fixed_midis,
             root_note=root_note,
             extension_note=extension_note,
+            extension_midi=float(ext_midi_cont),
             extension_weight=extension_weight,
             min_note=min_note,
             max_note=max_note,
@@ -791,6 +820,7 @@ try:
             chord_midis=chord_midis,
             root_note=root_note,
             extension_note=extension_note,
+            extension_midi=float(ext_midi_cont),
             extension_weight=extension_weight,
             min_note=min_note,
             max_note=max_note,
@@ -824,8 +854,8 @@ with col_right:
     st.subheader("Chord")
     st.write(" ".join(result.chord_notes_sorted))
 
-    same_root_ext = str(root_note) == str(extension_note)
-    ext_freq_hz = None if same_root_ext else midi_to_frequency(note_to_midi(extension_note))
+    same_root_ext = bool(np.isclose(float(note_to_midi(root_note)), float(ext_midi_cont), rtol=0.0, atol=1e-9))
+    ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))
     ext_w = 1.0 if same_root_ext else float(extension_weight)
 
     avg_d = average_note_dissonance(
@@ -919,7 +949,7 @@ with col_left:
     st.subheader("Dissonance matrix")
     st.caption("Pairwise overtone-weighted roughness between chord notes.")
 
-    ext_freq_hz = None if same_root_ext else midi_to_frequency(note_to_midi(extension_note))
+    ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))
     mat = chord_pairwise_dissonance_matrix(
         chord_freqs_hz=result.chord_freqs_sorted_hz,
         overtone_weights=weights,
