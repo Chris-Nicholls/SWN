@@ -31,6 +31,25 @@ st.title("Chord Dissonance Explorer")
 
 MAX_OVERTONES = 24
 SETTINGS_PATH = Path.home() / ".swn_chord_explorer_settings.json"
+RESET_DEFAULTS_FLAG = "__reset_to_defaults__"
+
+
+# If the user requested a full reset, do it before we instantiate widgets.
+if bool(st.session_state.get(RESET_DEFAULTS_FLAG, False)):
+    try:
+        if SETTINGS_PATH.exists():
+            SETTINGS_PATH.unlink()
+    except Exception:
+        pass
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    try:
+        st.session_state.clear()
+    except Exception:
+        pass
+    st.rerun()
 
 
 def _load_settings() -> dict[str, Any]:
@@ -164,10 +183,137 @@ def _note_list(min_note: str, max_note: str) -> list[str]:
     return make_note_list(min_note=min_note, max_note=max_note)
 
 
-with st.sidebar:
-    st.header("Notes")
+def _parse_sequencer_steps(text: str, full_notes: list[str]) -> tuple[list[tuple[str, float]], str | None]:
+    """Parse sequencer steps from text.
 
-    full_notes = _note_list("A0", "C8")
+    Format: one step per line: "ROOT EXT".
+    EXT can be a note name (e.g. E5) or a float MIDI value (e.g. 76.25).
+    Returns (steps, error_message).
+    """
+
+    steps: list[tuple[str, float]] = []
+    bad_lines: list[str] = []
+
+    midi_max = float(note_to_midi("C8"))
+
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        parts = line.replace(",", " ").split()
+        if len(parts) < 2:
+            bad_lines.append(raw)
+            continue
+
+        root = parts[0]
+        if root not in full_notes:
+            bad_lines.append(raw)
+            continue
+
+        root_midi = float(note_to_midi(root))
+        ext_token = parts[1]
+        try:
+            ext_midi = float(ext_token)
+        except Exception:
+            try:
+                ext_midi = float(note_to_midi(ext_token))
+            except Exception:
+                bad_lines.append(raw)
+                continue
+
+        ext_midi = float(np.clip(ext_midi, root_midi, midi_max))
+        steps.append((root, ext_midi))
+
+    if bad_lines and not steps:
+        return [], "Invalid sequence lines (expected: ROOT EXT per line)."
+    if bad_lines:
+        return steps, f"Ignored {len(bad_lines)} invalid line(s)."
+    return steps, None
+
+
+def _init_sequencer_state() -> None:
+    if "sequencer_steps_text" not in st.session_state:
+        st.session_state["sequencer_steps_text"] = "C4 E5\nD4 F5\nE4 G5\nF4 A5"
+    if "sequencer_step_s" not in st.session_state:
+        st.session_state["sequencer_step_s"] = 0.5
+    if "sequencer_run" not in st.session_state:
+        st.session_state["sequencer_run"] = False
+    if "sequencer_index" not in st.session_state:
+        st.session_state["sequencer_index"] = 0
+    if "sequencer_next_ts" not in st.session_state:
+        st.session_state["sequencer_next_ts"] = 0.0
+
+
+def _advance_sequencer_if_due(full_notes: list[str]) -> bool:
+    """Advance sequencer by one step if due.
+
+    Must be called before widgets are instantiated so we can safely set
+    st.session_state values for widget keys like "root_note".
+    """
+
+    if not bool(st.session_state.get("sequencer_run", False)):
+        return False
+
+    steps, _ = _parse_sequencer_steps(str(st.session_state.get("sequencer_steps_text", "")), full_notes)
+    if not steps:
+        return False
+
+    now = time.monotonic()
+    next_ts = float(st.session_state.get("sequencer_next_ts", 0.0) or 0.0)
+    if now < next_ts:
+        return False
+
+    idx = int(st.session_state.get("sequencer_index", 0) or 0)
+    root, ext_midi = steps[idx % len(steps)]
+
+    st.session_state["root_note"] = root
+    st.session_state["extension_midi_cont"] = float(ext_midi)
+    ext_note_name = midi_to_note(int(round(float(ext_midi))))
+    st.session_state["extension_note"] = ext_note_name
+    st.session_state["extension_note_quantized"] = ext_note_name
+
+    step_s = float(st.session_state.get("sequencer_step_s", 0.5) or 0.5)
+    step_s = float(np.clip(step_s, 0.05, 60.0))
+    st.session_state["sequencer_index"] = int((idx + 1) % len(steps))
+    st.session_state["sequencer_next_ts"] = float(now + step_s)
+    return True
+
+
+# Precompute note list and run sequencer tick BEFORE widgets are created.
+full_notes = _note_list("A0", "C8")
+_init_sequencer_state()
+
+# Reset the sequencer position when toggled on.
+prev_run = st.session_state.get("_prev_sequencer_run")
+cur_run = bool(st.session_state.get("sequencer_run", False))
+if prev_run is None:
+    st.session_state["_prev_sequencer_run"] = cur_run
+elif bool(prev_run) != cur_run:
+    st.session_state["_prev_sequencer_run"] = cur_run
+    if cur_run:
+        st.session_state["sequencer_index"] = 0
+        st.session_state["sequencer_next_ts"] = 0.0
+
+
+@st.fragment(run_every=0.1)
+def _sequencer_fragment() -> None:
+    if _advance_sequencer_if_due(full_notes):
+        st.rerun()
+
+
+_sequencer_fragment()
+
+
+with st.sidebar:
+    st.subheader("App")
+    if st.button("Reset to defaults"):
+        st.session_state[RESET_DEFAULTS_FLAG] = True
+        st.rerun()
+    st.caption(f"Settings persist to: {SETTINGS_PATH}")
+    st.divider()
+
+    st.header("Notes")
 
     if st.session_state["root_note"] not in full_notes:
         st.session_state["root_note"] = "C4" if "C4" in full_notes else full_notes[0]
@@ -205,7 +351,7 @@ with st.sidebar:
             "Extension note (continuous)",
             min_value=float(root_midi),
             max_value=float(midi_max),
-            step=0.01,
+            step=0.1,
             key="extension_midi_cont",
             help="In unquantized mode the extension pitch is continuous (fractional MIDI).",
         )
@@ -254,6 +400,31 @@ with st.sidebar:
         key="extension_weight",
         help="Scales the relative importance of the extension note in the dissonance objective (0 = ignore extension, 1 = normal, 2 = twice as important).",
     )
+
+    st.divider()
+    st.subheader("Sequencer")
+
+    sequencer_run = st.toggle("Run sequencer", key="sequencer_run", value=bool(st.session_state.get("sequencer_run", False)))
+    st.slider(
+        "Step (seconds)",
+        min_value=0.1,
+        max_value=5.0,
+        step=0.05,
+        key="sequencer_step_s",
+    )
+    st.text_area(
+        "Sequence (one per line: ROOT EXT)",
+        key="sequencer_steps_text",
+        height=120,
+    )
+    if st.button("Reset step"):
+        st.session_state["sequencer_index"] = 0
+        st.session_state["sequencer_next_ts"] = 0.0
+
+    steps, parse_msg = _parse_sequencer_steps(str(st.session_state.get("sequencer_steps_text", "")), full_notes)
+    if parse_msg:
+        st.caption(parse_msg)
+    st.caption(f"Steps: {len(steps)}")
 
     # Candidate range rule
     ext_midi_cont = float(extension_midi_cont)
