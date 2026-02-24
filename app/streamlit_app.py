@@ -565,170 +565,351 @@ _persist_settings()
 
 
 def _render_continuous_synth(
-        freqs_hz: list[float],
-        overtone_weights: np.ndarray,
-        timbre: str,
-        volume: float,
+    freqs_hz: list[float],
+    overtone_weights: np.ndarray,
+    timbre: str,
+    volume: float,
     lowpass_cutoff_hz: float,
     lowpass_slope_db_per_oct: float,
     lowpass_renormalize: bool,
-):
-        """Continuous additive synth using WebAudio oscillators (no loop gap)."""
-        freqs = [float(f) for f in freqs_hz]
-        weights_list = [float(x) for x in np.asarray(overtone_weights, dtype=np.float64).tolist()]
-        payload = {
-                "freqs": freqs,
-                "weights": weights_list,
-                "timbre": str(timbre),
-                "volume": float(volume),
-            "lp_cutoff": float(lowpass_cutoff_hz),
-            "lp_slope": float(lowpass_slope_db_per_oct),
-            "lp_norm": bool(lowpass_renormalize),
-        }
-        data = json.dumps(payload)
+    enabled: bool,
+    height: int,
+) -> None:
+    """Continuous additive synth using WebAudio oscillators.
 
-        # Note: browsers require a user gesture to start audio; the Start button satisfies this.
-        html = f"""
+    To avoid an audible gap when Streamlit re-renders this iframe, the audio engine
+    is stored on `window.top` and re-used across reloads. Updates retune an existing
+    oscillator pool with short ramps instead of recreating oscillators.
+    """
+
+    freqs = [float(f) for f in freqs_hz]
+    weights_list = [float(x) for x in np.asarray(overtone_weights, dtype=np.float64).tolist()]
+    payload = {
+        "enabled": bool(enabled),
+        "freqs": freqs,
+        "weights": weights_list,
+        "timbre": str(timbre),
+        "volume": float(volume),
+        "lp_cutoff": float(lowpass_cutoff_hz),
+        "lp_slope": float(lowpass_slope_db_per_oct),
+        "lp_norm": bool(lowpass_renormalize),
+    }
+    data = json.dumps(payload)
+
+    html = """
 <!doctype html>
 <html>
     <head>
         <meta charset="utf-8" />
         <style>
-            body {{ font-family: sans-serif; margin: 0; padding: 0; }}
+            :root {{ color-scheme: light dark; }}
+            body {{ font-family: sans-serif; margin: 0; padding: 0; color: CanvasText; background: Canvas; }}
             .small {{ font-size: 12px; opacity: 0.8; }}
             .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; }}
         </style>
     </head>
     <body>
         <div class="small" id="status" style="padding: 6px 0;">starting…</div>
-        <div class="small">Continuous oscillators (no loop pause). Changing Streamlit controls restarts audio.</div>
+        <div class="small">Continuous oscillators (no loop pause). Changing Streamlit controls retunes audio.</div>
         <div class="mono" id="info" style="padding-top: 4px;"></div>
 
         <script>
-            const cfg = {data};
+            const cfg = __CFG__;
 
-            let ctx = null;
-            let master = null;
-            let oscillators = [];
+            // Store the audio engine somewhere that survives re-renders.
+            // Prefer window.top, but fall back to window if cross-origin access is blocked.
+            let HOST = window;
+            try {
+                if (window.top && window.top !== window) {
+                    // Property access throws on cross-origin; that's our signal to fall back.
+                    void window.top.__swn_audio_engine__;
+                    HOST = window.top;
+                }
+            } catch (e) {
+                HOST = window;
+            }
 
-            function setStatus(s) {{ document.getElementById('status').textContent = s; }}
-            function stopAll() {{
-                try {{ oscillators.forEach(o => {{ try {{ o.stop(); }} catch(e) {{}} }}); }} catch(e) {{}}
-                oscillators = [];
-                if (master) {{ try {{ master.disconnect(); }} catch(e) {{}} }}
-                master = null;
+            const ENGINE_KEY = '__swn_audio_engine__';
+
+            const statusEl = document.getElementById('status');
+            const infoEl = document.getElementById('info');
+            function setStatus(s) {{ try {{ statusEl.textContent = String(s); }} catch(e) {{}} }}
+
+            function clamp01(x) {{
+                const v = Number(x);
+                if (!isFinite(v)) return 0.0;
+                return Math.max(0.0, Math.min(1.0, v));
             }}
 
-            function start() {{
-                if (!cfg.freqs || cfg.freqs.length === 0) {{ setStatus('no freqs'); return; }}
-                if (!ctx) {{ ctx = new (window.AudioContext || window.webkitAudioContext)(); }}
-                stopAll();
+            function createEngine(host) {{
+                const engine = {{
+                    host: host,
+                    ctx: null,
+                    master: null,
+                    pool: [],
+                    pendingCfg: null,
 
-                master = ctx.createGain();
-                master.gain.value = Math.max(0.0, Math.min(1.0, cfg.volume ?? 0.2));
-                master.connect(ctx.destination);
-
-                const now = ctx.currentTime;
-                const fade = 0.01;
-                master.gain.setValueAtTime(0.0, now);
-                master.gain.linearRampToValueAtTime(Math.max(0.0, Math.min(1.0, cfg.volume ?? 0.2)), now + fade);
-
-                const timbre = (cfg.timbre || 'Pure sine');
-                const weights = (cfg.weights || []);
-                const lpCutoff = Number(cfg.lp_cutoff ?? 0);
-                const lpSlope = Number(cfg.lp_slope ?? 0);
-                const lpNorm = Boolean(cfg.lp_norm ?? false);
-                const nyquist = ctx.sampleRate / 2.0;
-                const perNote = 1.0 / cfg.freqs.length;
-
-                function lowpassGain(fh) {{
-                    const f = Number(fh);
-                    if (!isFinite(f) || f <= 0) return 0;
-                    if (!(lpSlope > 0) || !(lpCutoff > 0)) return 1.0;
-                    if (f <= lpCutoff) return 1.0;
-                    const oct = Math.log2(f / lpCutoff);
-                    const db = lpSlope * Math.max(0.0, oct);
-                    return Math.pow(10.0, -db / 20.0);
-                }}
-
-                let created = 0;
-                for (const f0 of cfg.freqs) {{
-                    const f = Number(f0);
-                    if (!isFinite(f) || f <= 0) continue;
-
-                    if (timbre === 'Pure sine') {{
-                        if (f >= nyquist) continue;
-                        const osc = ctx.createOscillator();
-                        const g = ctx.createGain();
-                        osc.type = 'sine';
-                        osc.frequency.value = f;
-                        g.gain.value = perNote;
-                        osc.connect(g).connect(master);
-                        osc.start();
-                        oscillators.push(osc);
-                        created += 1;
-                    }} else {{
-                        // Apply low-pass per harmonic; optionally renormalize per note.
-                        let parts = [];
-                        let sumAmp = 0.0;
-                        for (let i = 0; i < weights.length; i++) {{
-                            const amp0 = Number(weights[i]);
-                            if (!isFinite(amp0) || amp0 <= 1e-4) continue;
-                            const harmonic = i + 1;
-                            const fh = f * harmonic;
-                            if (fh >= nyquist) break;
-                            const amp = amp0 * lowpassGain(fh);
-                            if (!(amp > 1e-10)) continue;
-                            parts.push([fh, amp]);
-                            sumAmp += amp;
+                    canRun: function() {{
+                        try {{
+                            return !!(this.ctx && this.ctx.state === 'running');
+                        }} catch (e) {{
+                            return false;
                         }}
-                        const inv = (lpNorm && sumAmp > 1e-12) ? (1.0 / sumAmp) : 1.0;
-                        for (const p of parts) {{
-                            const fh = p[0];
-                            const amp = p[1] * inv;
-                            const osc = ctx.createOscillator();
-                            const g = ctx.createGain();
+                    },
+
+                    start: function() {{
+                        // MUST be called from a user gesture (click/tap) to satisfy autoplay policies.
+                        this.lastStartError = null;
+                        try {{
+                            const st = this.ctx ? String(this.ctx.state) : 'none';
+                            if (!this.ctx || st === 'closed') {{
+                                // If the old context was created in a torn-down iframe, it will be "closed".
+                                // Creating the context on the top window lets it survive Streamlit rerenders.
+                                const AC = (this.host && (this.host.AudioContext || this.host.webkitAudioContext))
+                                    || (window.AudioContext || window.webkitAudioContext);
+                                this.ctx = new AC();
+                                // Nodes are tied to a context; reset pool/master when replacing the context.
+                                this.master = null;
+                                this.pool = [];
+                            }}
+                        }} catch (e) {{
+                            this.lastStartError = e;
+                            // Fall back to local window context.
+                            try {{
+                                const AC = (window.AudioContext || window.webkitAudioContext);
+                                this.ctx = new AC();
+                                this.master = null;
+                                this.pool = [];
+                            }} catch (e2) {{
+                                this.lastStartError = e2;
+                            }}
+                        }}
+                        // Don't await resume(): some environments never resolve it, and we want the
+                        // UI to keep polling ctx.state rather than hanging forever on "starting…".
+                        try {{
+                            if (this.ctx && this.ctx.state !== 'running' && this.ctx.resume) {{
+                                const p = this.ctx.resume();
+                                if (p && p.catch) {{
+                                    p.catch((e) => {{ this.lastStartError = e; }});
+                                }}
+                            }}
+                        }} catch (e) {{
+                            this.lastStartError = e;
+                        }}
+
+                        if (this.ctx && !this.master) {{
+                            this.master = this.ctx.createGain();
+                            this.master.gain.value = 0.0;
+                            this.master.connect(this.ctx.destination);
+                        }}
+                    },
+
+                    stop: function() {{
+                        if (!this.ctx || !this.master) return;
+                        const now = this.ctx.currentTime;
+                        try {{ this.master.gain.setTargetAtTime(0.0, now, 0.02); }} catch(e) {{}}
+                        try {{
+                            for (const ch of this.pool) {{
+                                try {{ ch.g.gain.setTargetAtTime(0.0, now, 0.02); }} catch(e) {{}}
+                            }}
+                        }} catch(e) {{}}
+                    },
+
+                    update: function(nextCfg) {{
+                        // Called on every rerender; must NOT start AudioContext here.
+                        this.pendingCfg = nextCfg;
+
+                        if (!nextCfg || !nextCfg.enabled) {{
+                            this.stop();
+                            return 'disabled';
+                        }}
+
+                        if (!this.canRun()) {{
+                            // Autoplay policy: require a user gesture to start.
+                            return 'need_gesture';
+                        }
+
+                        const freqs = Array.isArray(nextCfg.freqs) ? nextCfg.freqs : [];
+                        if (!freqs.length) {{
+                            this.stop();
+                            return 'no_freqs';
+                        }}
+
+                        const timbre = String(nextCfg.timbre || 'Pure sine');
+                        const weights = Array.isArray(nextCfg.weights) ? nextCfg.weights : [];
+                        const lpCutoff = Number(nextCfg.lp_cutoff ?? 0);
+                        const lpSlope = Number(nextCfg.lp_slope ?? 0);
+                        const lpNorm = Boolean(nextCfg.lp_norm ?? false);
+                        const volume = clamp01(nextCfg.volume ?? 0.2);
+
+                        const nyquist = this.ctx.sampleRate / 2.0;
+                        const perNote = 1.0 / Math.max(1, freqs.length);
+
+                        function lowpassGain(fh) {{
+                            const f = Number(fh);
+                            if (!isFinite(f) || f <= 0) return 0;
+                            if (!(lpSlope > 0) || !(lpCutoff > 0)) return 1.0;
+                            if (f <= lpCutoff) return 1.0;
+                            const oct = Math.log2(f / lpCutoff);
+                            const db = lpSlope * Math.max(0.0, oct);
+                            return Math.pow(10.0, -db / 20.0);
+                        }}
+
+                        // Build the desired partial list (frequency + gain).
+                        const desired = [];
+                        for (const f0 of freqs) {{
+                            const f = Number(f0);
+                            if (!isFinite(f) || f <= 0) continue;
+
+                            if (timbre === 'Pure sine') {{
+                                if (f >= nyquist) continue;
+                                desired.push([f, perNote]);
+                                continue;
+                            }}
+
+                            let parts = [];
+                            let sumAmp = 0.0;
+                            for (let i = 0; i < weights.length; i++) {{
+                                const amp0 = Number(weights[i]);
+                                if (!isFinite(amp0) || amp0 <= 1e-4) continue;
+                                const harmonic = i + 1;
+                                const fh = f * harmonic;
+                                if (fh >= nyquist) break;
+                                const amp = amp0 * lowpassGain(fh);
+                                if (!(amp > 1e-10)) continue;
+                                parts.push([fh, amp]);
+                                sumAmp += amp;
+                            }}
+                            const inv = (lpNorm && sumAmp > 1e-12) ? (1.0 / sumAmp) : 1.0;
+                            for (const p of parts) {{
+                                desired.push([p[0], perNote * p[1] * inv]);
+                            }}
+                        }}
+
+                        const now = this.ctx.currentTime;
+                        try {{ this.master.gain.setTargetAtTime(volume, now, 0.02); }} catch(e) {{}}
+
+                        // Grow the pool if needed.
+                        while (this.pool.length < desired.length) {{
+                            const osc = this.ctx.createOscillator();
+                            const g = this.ctx.createGain();
                             osc.type = 'sine';
-                            osc.frequency.value = fh;
-                            g.gain.value = perNote * amp;
-                            osc.connect(g).connect(master);
+                            g.gain.value = 0.0;
+                            osc.connect(g).connect(this.master);
                             osc.start();
-                            oscillators.push(osc);
-                            created += 1;
+                            this.pool.push({{ osc, g }});
                         }}
-                    }}
-                }}
 
-                document.getElementById('info').textContent = 'timbre=' + timbre + '  freqs=' + cfg.freqs.length + '  osc=' + created;
-                setStatus('playing');
-            }}
+                        // Retune/re-gain active channels.
+                        for (let i = 0; i < desired.length; i++) {{
+                            const ch = this.pool[i];
+                            const f = Number(desired[i][0]);
+                            const g = Number(desired[i][1]);
+                            try {{ ch.osc.frequency.setTargetAtTime(f, now, 0.02); }} catch(e) {{}}
+                            try {{ ch.g.gain.setTargetAtTime(g, now, 0.02); }} catch(e) {{}}
+                        }}
 
-            function stop() {{
-                if (ctx && master) {{
-                    const now = ctx.currentTime;
-                    try {{ master.gain.cancelScheduledValues(now); }} catch(e) {{}}
-                    try {{ master.gain.setValueAtTime(master.gain.value, now); }} catch(e) {{}}
-                    try {{ master.gain.linearRampToValueAtTime(0.0, now + 0.02); }} catch(e) {{}}
-                    setTimeout(() => {{ stopAll(); setStatus('stopped'); }}, 30);
-                }} else {{
-                    stopAll();
+                        // Silence unused pool channels (keep them running for reuse).
+                        for (let i = desired.length; i < this.pool.length; i++) {{
+                            const ch = this.pool[i];
+                            try {{ ch.g.gain.setTargetAtTime(0.0, now, 0.02); }} catch(e) {{}}
+                        }}
+                        return 'playing';
+                    }},
+                }};
+                return engine;
+            }
+
+            let engine = null;
+            try { engine = HOST[ENGINE_KEY]; } catch (e) { engine = null; }
+            if (!engine) {
+                engine = createEngine(HOST);
+                try { HOST[ENGINE_KEY] = engine; } catch (e) { /* ignore */ }
+            }
+
+            try {
+                const r = engine.update(cfg);
+                if (r === 'playing') {
+                    setStatus('playing');
+                } else if (r === 'disabled') {
                     setStatus('stopped');
-                }}
-            }}
+                } else if (r === 'no_freqs') {
+                    setStatus('no freqs');
+                } else {
+                    // need_gesture or unknown
+                    const st = (engine.ctx && engine.ctx.state) ? String(engine.ctx.state) : 'not-started';
+                    setStatus('click inside this panel to start audio (' + st + ')');
+                }
+            } catch (e) {
+                setStatus('error');
+            }
 
-            // Auto-start. If the browser blocks autoplay, the user interaction that toggled
-            // the Streamlit control usually counts as a gesture; otherwise the next click
-            // anywhere in the iframe will start it.
-            start();
-            document.body.addEventListener('click', () => {{ if (!oscillators.length) start(); }});
-            window.addEventListener('pagehide', stop);
-            document.addEventListener('visibilitychange', () => {{ if (document.hidden) stop(); }});
+            try {{
+                infoEl.textContent = 'timbre=' + String(cfg.timbre || '') + '  freqs=' + (Array.isArray(cfg.freqs) ? cfg.freqs.length : 0);
+            }} catch(e) {{}}
+
+            // If autoplay is blocked, a click inside the iframe counts as a user gesture.
+            document.body.addEventListener('click', async () => {
+                try {
+                    setStatus('starting…');
+                    // Must be called inside the gesture handler.
+                    engine.start();
+
+                    let attempts = 0;
+                    const maxAttempts = 20; // ~2s @ 100ms
+                    const tickMs = 100;
+                    const run = () => {
+                        attempts += 1;
+                        let r = 'unknown';
+                        try {
+                            r = engine.update(engine.pendingCfg || cfg);
+                        } catch (e) {
+                            r = 'error';
+                        }
+
+                        const st = (engine.ctx && engine.ctx.state) ? String(engine.ctx.state) : 'unknown';
+                        if (r === 'playing') {
+                            setStatus('playing');
+                            return;
+                        }
+
+                        if (attempts < maxAttempts) {
+                            setStatus('starting… (' + st + ')');
+                            setTimeout(run, tickMs);
+                            return;
+                        }
+
+                        let msg = 'not playing (' + r + ', ' + st + ')';
+                        try {
+                            if (engine.lastStartError) {
+                                const e = engine.lastStartError;
+                                msg = msg + ' start_err=' + (e && e.message ? e.message : String(e));
+                            }
+                        } catch (e) {}
+                        setStatus(msg);
+                    };
+
+                    // Run on the next tick so any resume() promise can progress.
+                    setTimeout(run, 0);
+                } catch (e) {
+                    try {
+                        setStatus('error: ' + (e && e.message ? e.message : String(e)));
+                    } catch (e2) {
+                        setStatus('error');
+                    }
+                }
+            });
         </script>
     </body>
 </html>
 """
 
-        components.html(html, height=110, scrolling=False)
+    # The template previously lived in an f-string, so it uses doubled braces.
+    # Now it's a plain string; normalize back to valid JS/CSS braces.
+    html = html.replace("{{", "{").replace("}}", "}")
+    html = html.replace("__CFG__", data)
+
+    components.html(html, height=int(height), scrolling=False)
 
 
 def _select_midis() -> list[float]:
@@ -895,17 +1076,19 @@ with col_right:
     play_continuous = st.toggle("Enable continuous synth", value=False)
     volume = st.slider("Volume", min_value=0.0, max_value=1.0, value=0.2, step=0.01)
 
-    if play_continuous:
-        _render_continuous_synth(
-            freqs_hz=list(result.chord_freqs_sorted_hz),
-            overtone_weights=weights,
-            timbre=str(timbre),
-            volume=float(volume),
-            lowpass_cutoff_hz=float(lowpass_cutoff_hz),
-            lowpass_slope_db_per_oct=float(lowpass_slope_db_per_oct),
-            lowpass_renormalize=bool(lowpass_renormalize),
-        )
-    else:
+    _render_continuous_synth(
+        freqs_hz=list(result.chord_freqs_sorted_hz) if play_continuous else [],
+        overtone_weights=weights,
+        timbre=str(timbre),
+        volume=float(volume),
+        lowpass_cutoff_hz=float(lowpass_cutoff_hz),
+        lowpass_slope_db_per_oct=float(lowpass_slope_db_per_oct),
+        lowpass_renormalize=bool(lowpass_renormalize),
+        enabled=bool(play_continuous),
+        height=110 if play_continuous else 0,
+    )
+
+    if not play_continuous:
         st.caption("Enable continuous synth to start playback.")
 
     st.subheader("Overtone weights")
