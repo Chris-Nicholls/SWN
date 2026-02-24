@@ -396,6 +396,8 @@ def overtone_dissonance(
     f1_hz: np.ndarray,
     f2_hz: np.ndarray,
     overtone_weights: np.ndarray,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -421,21 +423,48 @@ def overtone_dissonance(
         # Avoid all-zero weights degeneracy.
         w = w.copy()
         w[0] = 1.0
-    n = np.arange(1, w.size + 1, dtype=np.float64)
+
+    n_over = int(w.size)
+    use_sub = bool(include_subharmonics) and n_over >= 2
+
+    # Partials are defined as frequency multipliers applied to the fundamental.
+    # Harmonics: 1,2,3,...,N
+    # Optional subharmonics: 1/2,1/3,...,1/N (no duplicate fundamental)
+    mult_h = np.arange(1, n_over + 1, dtype=np.float64)
+    if use_sub:
+        mult_s = 1.0 / np.arange(2, n_over + 1, dtype=np.float64)
+        mult = np.concatenate([mult_h, mult_s])
+
+        if subharmonic_weights is None:
+            w_sub = w[1:]
+        else:
+            ws = np.asarray(subharmonic_weights, dtype=np.float64)
+            ws = np.clip(ws, 0.0, None)
+            if ws.size == n_over:
+                w_sub = ws[1:]
+            elif ws.size == (n_over - 1):
+                w_sub = ws
+            else:
+                # Fall back to the legacy behavior if shape is unexpected.
+                w_sub = w[1:]
+
+        w_full = np.concatenate([w, w_sub])
+    else:
+        mult = mult_h
+        w_full = w
 
     f1_base = np.asarray(f1_hz, dtype=np.float64)
     f2_base = np.asarray(f2_hz, dtype=np.float64)
 
-    # Overtone frequencies per tone (used for low-pass weighting).
-    f1_over = f1_base[..., None] * n[None, :]
-    f2_over = f2_base[..., None] * n[None, :]
+    # Partial frequencies per tone (used for low-pass weighting).
+    f1_part = f1_base[..., None] * mult[None, :]
+    f2_part = f2_base[..., None] * mult[None, :]
 
-    g1 = _lowpass_gain(f1_over, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
-    g2 = _lowpass_gain(f2_over, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
+    g1 = _lowpass_gain(f1_part, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
+    g2 = _lowpass_gain(f2_part, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
 
-    # Apply low-pass. Optionally renormalize per tone so overall loudness stays comparable.
-    w1_raw = g1 * w[None, :]
-    w2_raw = g2 * w[None, :]
+    w1_raw = g1 * w_full[None, :]
+    w2_raw = g2 * w_full[None, :]
     if bool(lowpass_renormalize):
         w1 = _normalize_weights_last_dim(w1_raw)
         w2 = _normalize_weights_last_dim(w2_raw)
@@ -443,9 +472,8 @@ def overtone_dissonance(
         w1 = w1_raw
         w2 = w2_raw
 
-    f1 = f1_base[..., None, None] * n[None, :, None]
-    f2 = f2_base[..., None, None] * n[None, None, :]
-
+    f1 = f1_base[..., None, None] * mult[None, :, None]
+    f2 = f2_base[..., None, None] * mult[None, None, :]
     w_outer = (w1[..., :, None] * w2[..., None, :])
 
     base = sine_dissonance(
@@ -462,8 +490,6 @@ def overtone_dissonance(
         sine_kernel=sine_kernel,
     )
 
-
-    # Sum over harmonic pairs; squeeze so scalar inputs return a scalar.
     return np.sum(w_outer * base, axis=(-2, -1)).squeeze()
 
 
@@ -471,6 +497,8 @@ def dissonance_to_set(
     candidate_freqs_hz: np.ndarray,
     existing_freqs_hz: Sequence[float],
     overtone_weights: np.ndarray,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -516,6 +544,8 @@ def dissonance_to_set(
                     freqs,
                     f_exist,
                     overtone_weights,
+                    include_subharmonics=include_subharmonics,
+                    subharmonic_weights=subharmonic_weights,
                     peak_semitones_c2=peak_semitones_c2,
                     peak_semitones_c6=peak_semitones_c6,
                     fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -543,6 +573,8 @@ def dissonance_to_set(
                 freqs,
                 f_exist,
                 overtone_weights,
+                include_subharmonics=include_subharmonics,
+                subharmonic_weights=subharmonic_weights,
                 peak_semitones_c2=peak_semitones_c2,
                 peak_semitones_c6=peak_semitones_c6,
                 fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -570,6 +602,8 @@ def dissonance_to_set(
 def average_note_dissonance(
     chord_freqs_hz: Sequence[float],
     overtone_weights: np.ndarray,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -628,6 +662,8 @@ def average_note_dissonance(
                 np.array([freqs[i]], dtype=np.float64),
                 others,
                 overtone_weights,
+                include_subharmonics=include_subharmonics,
+                subharmonic_weights=subharmonic_weights,
                 peak_semitones_c2=peak_semitones_c2,
                 peak_semitones_c6=peak_semitones_c6,
                 fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -661,6 +697,8 @@ def average_note_dissonance(
 def chord_partial_dissonance_matrix(
     chord_freqs_hz: Sequence[float],
     overtone_weights: np.ndarray,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -703,16 +741,39 @@ def chord_partial_dissonance_matrix(
     if float(np.sum(w_base)) <= 1e-12 and w_base.size > 0:
         w_base = w_base.copy()
         w_base[0] = 1.0
+
     n_over = int(w_base.size)
     if n_over <= 0:
         return np.zeros((0, n_notes), dtype=np.float64)
 
-    harmonics = np.arange(1, n_over + 1, dtype=np.float64)
-    partial_freqs = freqs[:, None] * harmonics[None, :]
+    use_sub = bool(include_subharmonics) and n_over >= 2
+    mult_h = np.arange(1, n_over + 1, dtype=np.float64)
+    if use_sub:
+        mult_s = 1.0 / np.arange(2, n_over + 1, dtype=np.float64)
+        mult = np.concatenate([mult_h, mult_s])
+
+        if subharmonic_weights is None:
+            w_sub = w_base[1:]
+        else:
+            ws = np.asarray(subharmonic_weights, dtype=np.float64)
+            ws = np.clip(ws, 0.0, None)
+            if ws.size == n_over:
+                w_sub = ws[1:]
+            elif ws.size == (n_over - 1):
+                w_sub = ws
+            else:
+                w_sub = w_base[1:]
+
+        w_full = np.concatenate([w_base, w_sub])
+    else:
+        mult = mult_h
+        w_full = w_base
+
+    partial_freqs = freqs[:, None] * mult[None, :]
 
     # Per-note harmonic weights (after low-pass), optionally renormalized per note.
     g = _lowpass_gain(partial_freqs, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
-    w_note_raw = g * w_base[None, :]
+    w_note_raw = g * w_full[None, :]
     if bool(lowpass_renormalize):
         w_note = _normalize_weights_last_dim(w_note_raw)
     else:
@@ -732,7 +793,8 @@ def chord_partial_dissonance_matrix(
     if mode not in ("sum", "max", "rms"):
         raise ValueError("set_aggregation must be 'sum', 'max', or 'rms'")
 
-    out = np.zeros((n_notes, n_over), dtype=np.float64)
+    n_partials = int(w_full.size)
+    out = np.zeros((n_notes, n_partials), dtype=np.float64)
     for i in range(n_notes):
         if mode == "rms":
             acc_sum_sq = np.zeros((n_over,), dtype=np.float64)
@@ -744,8 +806,8 @@ def chord_partial_dissonance_matrix(
                 continue
 
             # Kernel for all harmonic pairs between note i and j.
-            f_i = partial_freqs[i][:, None]  # (H,1)
-            f_j = partial_freqs[j][None, :]  # (1,H)
+            f_i = partial_freqs[i][:, None]  # (P,1)
+            f_j = partial_freqs[j][None, :]  # (1,P)
             base = sine_dissonance(
                 f_i,
                 f_j,
@@ -761,7 +823,7 @@ def chord_partial_dissonance_matrix(
             )
 
             w_outer = (w_note[i][:, None] * w_note[j][None, :])
-            pair = (w_outer * base)  # (H,H)
+            pair = (w_outer * base)  # (P,P)
 
             pair_scale = note_weights[i] * note_weights[j]
             if mode == "rms":
@@ -779,13 +841,15 @@ def chord_partial_dissonance_matrix(
         else:
             out[i] = acc
 
-    # Return as (H, N)
+    # Return as (P, N)
     return out.T
 
 
 def chord_pairwise_dissonance_matrix(
     chord_freqs_hz: Sequence[float],
     overtone_weights: np.ndarray,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -833,6 +897,8 @@ def chord_pairwise_dissonance_matrix(
                     freqs[i],
                     freqs[j],
                     overtone_weights,
+                    include_subharmonics=include_subharmonics,
+                    subharmonic_weights=subharmonic_weights,
                     peak_semitones_c2=peak_semitones_c2,
                     peak_semitones_c6=peak_semitones_c6,
                     fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -860,6 +926,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     min_note: str,
     max_note: str,
     n_additional: int,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
     fall_to_zero_semitones_c2: float = 12.0,
@@ -988,6 +1056,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
             cand_freqs_hz,
             existing_freqs_hz,
             overtone_weights,
+            include_subharmonics=include_subharmonics,
+            subharmonic_weights=subharmonic_weights,
             peak_semitones_c2=peak_semitones_c2,
             peak_semitones_c6=peak_semitones_c6,
             fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -1177,6 +1247,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
                 cand_freqs_all,
                 others,
                 overtone_weights,
+                include_subharmonics=include_subharmonics,
+                subharmonic_weights=subharmonic_weights,
                 peak_semitones_c2=peak_semitones_c2,
                 peak_semitones_c6=peak_semitones_c6,
                 fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -1294,6 +1366,8 @@ def curve_for_fixed_chord(
     min_note: str,
     max_note: str,
     overtone_weights: np.ndarray,
+    include_subharmonics: bool = False,
+    subharmonic_weights: np.ndarray | None = None,
     extension_midi: float | None = None,
     peak_semitones_c2: float = 1.00,
     peak_semitones_c6: float = 1.00,
@@ -1353,6 +1427,8 @@ def curve_for_fixed_chord(
         curve_freqs_arr,
         chord_freqs_sorted,
         overtone_weights,
+        include_subharmonics=include_subharmonics,
+        subharmonic_weights=subharmonic_weights,
         peak_semitones_c2=peak_semitones_c2,
         peak_semitones_c6=peak_semitones_c6,
         fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,

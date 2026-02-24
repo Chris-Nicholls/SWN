@@ -12,8 +12,6 @@ import streamlit.components.v1 as components
 import json
 
 from chord_model import (
-    average_note_dissonance,
-    chord_pairwise_dissonance_matrix,
     curve_for_fixed_chord,
     make_note_list,
     midi_to_frequency,
@@ -85,11 +83,9 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "lowpass_cutoff_hz": 20000,
         "lowpass_slope_db_per_oct": 0.0,
         "lowpass_renormalize": False,
+        "include_subharmonics": False,
         "n_overtones": 12,
-        "weight_mode": "Raw weights (auto-normalized)",
-        "weight_preset": "All equal",
         "set_aggregation_ui": "Sum",
-        "chord_metric_ui": "Sum",
         "sine_kernel_ui": "Linear (triangle)",
         "peak_semitones_c2": 0.75,
         "peak_semitones_c6": 0.4,
@@ -124,21 +120,25 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
     st.session_state["microtonal_mode"] = bool(st.session_state.get("unquantized_mode", False))
 
     raw = settings.get("raw_weights")
-    logits = settings.get("logits")
+    sub = settings.get("sub_weights")
     if not isinstance(raw, list):
         raw = [1.0 / float(defaults["n_overtones"]) for _ in range(MAX_OVERTONES)]
-    if not isinstance(logits, list):
-        logits = [0.0 for _ in range(MAX_OVERTONES)]
 
+    # Default subharmonics to match the legacy behavior: same weights as overtones.
+    if not isinstance(sub, list):
+        sub = list(raw)
     raw = (raw + [0.0] * MAX_OVERTONES)[:MAX_OVERTONES]
-    logits = (logits + [0.0] * MAX_OVERTONES)[:MAX_OVERTONES]
+    sub = (sub + [0.0] * MAX_OVERTONES)[:MAX_OVERTONES]
+    # There is no 1/1 subharmonic term; keep this at 0 for clarity.
+    if sub:
+        sub[0] = 0.0
     for i in range(MAX_OVERTONES):
         rk = f"raw_w_{i+1}"
-        lk = f"logit_{i+1}"
+        sk = f"sub_w_{i+1}"
         if rk not in st.session_state:
             st.session_state[rk] = float(raw[i])
-        if lk not in st.session_state:
-            st.session_state[lk] = float(logits[i])
+        if sk not in st.session_state:
+            st.session_state[sk] = float(sub[i])
 
 
 def _persist_settings() -> None:
@@ -156,11 +156,9 @@ def _persist_settings() -> None:
         "lowpass_cutoff_hz",
         "lowpass_slope_db_per_oct",
         "lowpass_renormalize",
+        "include_subharmonics",
         "n_overtones",
-        "weight_mode",
-        "weight_preset",
         "set_aggregation_ui",
-        "chord_metric_ui",
         "sine_kernel_ui",
         "peak_semitones_c2",
         "peak_semitones_c6",
@@ -185,7 +183,7 @@ def _persist_settings() -> None:
             data[k] = st.session_state[k]
 
     data["raw_weights"] = [float(st.session_state.get(f"raw_w_{i+1}", 0.0)) for i in range(MAX_OVERTONES)]
-    data["logits"] = [float(st.session_state.get(f"logit_{i+1}", 0.0)) for i in range(MAX_OVERTONES)]
+    data["sub_weights"] = [float(st.session_state.get(f"sub_w_{i+1}", 0.0)) for i in range(MAX_OVERTONES)]
     _save_settings(data)
 
 
@@ -497,6 +495,12 @@ with st.sidebar:
     st.header("Overtones")
     n_overtones = st.slider("Number of overtones", min_value=1, max_value=MAX_OVERTONES, step=1, key="n_overtones")
 
+    include_subharmonics = st.checkbox(
+        "Include subharmonics",
+        key="include_subharmonics",
+        help="If enabled, the dissonance model (and synth timbre) also includes subharmonic partials 1/2..1/N with the same per-index weights.",
+    )
+
     lowpass_cutoff_hz = st.slider(
         "Low-pass cutoff (Hz)",
         min_value=50,
@@ -554,18 +558,6 @@ with st.sidebar:
         set_aggregation = "max"
     else:
         set_aggregation = "rms"
-
-    chord_metric_opts = ["Sum", "Mean", "RMS"]
-    if st.session_state.get("chord_metric_ui") not in chord_metric_opts:
-        st.session_state["chord_metric_ui"] = chord_metric_opts[0]
-    chord_metric_ui = st.radio(
-        "Chord metric",
-        chord_metric_opts,
-        horizontal=True,
-        key="chord_metric_ui",
-        help="How to aggregate per-note dissonances into a single chord score. RMS penalizes a few high dissonances more than Sum/Mean.",
-    )
-    chord_metric = chord_metric_ui.lower()
 
     peak_semitones_c2 = st.slider(
         "Peak position @ C2 (semitones)",
@@ -689,68 +681,9 @@ with st.sidebar:
         help="Adds an extra penalty for candidate notes above the extension, increasing linearly with distance (in octaves). 0 disables.",
     )
 
-    weight_mode_opts = ["Raw weights (auto-normalized)", "Logits (softmax)", "Preset"]
-    if st.session_state["weight_mode"] not in weight_mode_opts:
-        st.session_state["weight_mode"] = weight_mode_opts[0]
-    mode = st.radio("Slider mode", weight_mode_opts, key="weight_mode")
-
-    preset = None
-    if mode == "Preset":
-        preset_opts = [
-            "All equal",
-            "1/n rolloff",
-            "Strong fundamental",
-            "Odd harmonics",
-            "Even harmonics",
-        ]
-        if st.session_state["weight_preset"] not in preset_opts:
-            st.session_state["weight_preset"] = preset_opts[0]
-        preset = st.selectbox("Preset", preset_opts, key="weight_preset")
-
-
-
-
-def _get_weights(n: int, mode: str, preset: str | None) -> np.ndarray:
-    if mode == "Preset":
-        if preset == "All equal":
-            w = np.ones(n)
-        elif preset == "1/n rolloff":
-            idx = np.arange(1, n + 1)
-            w = 1.0 / idx
-        elif preset == "Strong fundamental":
-            w = np.zeros(n)
-            w[0] = 1.0
-            if n > 1:
-                w[1] = 0.25
-            if n > 2:
-                w[2] = 0.125
-        elif preset == "Odd harmonics":
-            w = np.array([1.0 if (i % 2 == 0) else 0.0 for i in range(n)], dtype=float)
-        elif preset == "Even harmonics":
-            w = np.array([0.0 if (i % 2 == 0) else 1.0 for i in range(n)], dtype=float)
-        else:
-            w = np.ones(n)
-        return np.asarray(w, dtype=np.float64)
-
+def _get_weights(n: int, include_subharmonics: bool) -> tuple[np.ndarray, np.ndarray | None]:
     st.sidebar.caption("Overtone weights are per-overtone amplitudes")
 
-    if mode == "Logits (softmax)":
-        logits = []
-        for i in range(n):
-            logits.append(
-                st.sidebar.slider(
-                    f"logit[{i+1}]",
-                    min_value=-6.0,
-                    max_value=6.0,
-                    step=0.1,
-                    key=f"logit_{i+1}",
-                )
-            )
-        logits = np.array(logits, dtype=float)
-        exp = np.exp(logits - logits.max())
-        return exp
-
-    # Raw weights
     raw = []
     for i in range(n):
         raw.append(
@@ -763,10 +696,29 @@ def _get_weights(n: int, mode: str, preset: str | None) -> np.ndarray:
             )
         )
     raw = np.array(raw, dtype=float)
-    return raw
+    sub = None
+    if bool(include_subharmonics):
+        st.sidebar.caption("Subharmonic weights are per-subharmonic amplitudes (1/2..1/N)")
+        # Build an array of length n; index i corresponds to harmonic (i+1).
+        # Only indices 1..n-1 are used for 1/2..1/N.
+        sub_vals = [float(st.session_state.get("sub_w_1", 0.0) or 0.0)]
+        for i in range(1, n):
+            h = i + 1
+            sub_vals.append(
+                st.sidebar.slider(
+                    f"sub w[{h}] (1/{h})",
+                    min_value=0.0,
+                    max_value=1.0,
+                    step=0.01,
+                    key=f"sub_w_{h}",
+                )
+            )
+        sub = np.array(sub_vals, dtype=float)
+
+    return raw, sub
 
 
-weights = _get_weights(n_overtones, mode, preset)
+weights, sub_weights = _get_weights(n_overtones, include_subharmonics=bool(include_subharmonics))
 
 # Best-effort persistence of sidebar controls + weight vectors.
 _persist_settings()
@@ -775,6 +727,8 @@ _persist_settings()
 def _render_continuous_synth(
     freqs_hz: list[float],
     overtone_weights: np.ndarray,
+    include_subharmonics: bool,
+    subharmonic_weights: np.ndarray | None,
     timbre: str,
     volume: float,
     lowpass_cutoff_hz: float,
@@ -796,6 +750,8 @@ def _render_continuous_synth(
         "enabled": bool(enabled),
         "freqs": freqs,
         "weights": weights_list,
+        "subharmonics": bool(include_subharmonics),
+        "subweights": None if subharmonic_weights is None else [float(x) for x in np.asarray(subharmonic_weights, dtype=np.float64).tolist()],
         "timbre": str(timbre),
         "volume": float(volume),
         "lp_cutoff": float(lowpass_cutoff_hz),
@@ -945,6 +901,8 @@ def _render_continuous_synth(
 
                         const timbre = String(nextCfg.timbre || 'Pure sine');
                         const weights = Array.isArray(nextCfg.weights) ? nextCfg.weights : [];
+                        const includeSub = Boolean(nextCfg.subharmonics ?? false);
+                        const subWeights = Array.isArray(nextCfg.subweights) ? nextCfg.subweights : null;
                         const lpCutoff = Number(nextCfg.lp_cutoff ?? 0);
                         const lpSlope = Number(nextCfg.lp_slope ?? 0);
                         const lpNorm = Boolean(nextCfg.lp_norm ?? false);
@@ -987,6 +945,18 @@ def _render_continuous_synth(
                                 if (!(amp > 1e-10)) continue;
                                 parts.push([fh, amp]);
                                 sumAmp += amp;
+
+                                if (includeSub && harmonic >= 2) {{
+                                    const fs = f / harmonic;
+                                    if (isFinite(fs) && fs > 0 && fs < nyquist) {{
+                                        const sw0 = (subWeights && subWeights.length > i) ? Number(subWeights[i]) : amp0;
+                                        const ampS = sw0 * lowpassGain(fs);
+                                        if (ampS > 1e-10) {{
+                                            parts.push([fs, ampS]);
+                                            sumAmp += ampS;
+                                        }}
+                                    }}
+                                }}
                             }}
                             const inv = (lpNorm && sumAmp > 1e-12) ? (1.0 / sumAmp) : 1.0;
                             for (const p of parts) {{
@@ -1135,6 +1105,8 @@ def _select_midis() -> list[float]:
         extension_midi=float(ext_midi_cont) if bool(unquantized_mode) else None,
         extension_weight=extension_weight,
         overtone_weights=weights,
+        include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+        subharmonic_weights=sub_weights,
         min_note=min_note,
         max_note=max_note,
         n_additional=n_additional,
@@ -1201,6 +1173,8 @@ try:
             min_note=min_note,
             max_note=max_note,
             overtone_weights=weights,
+            include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+            subharmonic_weights=sub_weights,
             peak_semitones_c2=peak_semitones_c2,
             peak_semitones_c6=peak_semitones_c6,
             fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -1229,6 +1203,8 @@ try:
             min_note=min_note,
             max_note=max_note,
             overtone_weights=weights,
+            include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+            subharmonic_weights=sub_weights,
             peak_semitones_c2=peak_semitones_c2,
             peak_semitones_c6=peak_semitones_c6,
             fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
@@ -1277,33 +1253,6 @@ with col_right:
     ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))
     ext_w = 1.0 if same_root_ext else float(extension_weight)
 
-    avg_d = average_note_dissonance(
-        chord_freqs_hz=result.chord_freqs_sorted_hz,
-        overtone_weights=weights,
-        extension_freq_hz=ext_freq_hz,
-        extension_weight=ext_w,
-        peak_semitones_c2=peak_semitones_c2,
-        peak_semitones_c6=peak_semitones_c6,
-        fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-        fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-        decay_db_per_oct_c2=decay_db_per_oct_c2,
-        decay_db_per_oct_c6=decay_db_per_oct_c6,
-        height_c2=height_c2,
-        height_c6=height_c6,
-        sine_kernel=sine_kernel,
-        lowpass_cutoff_hz=lowpass_cutoff_hz,
-        lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
-        lowpass_renormalize=lowpass_renormalize,
-        set_aggregation=set_aggregation,
-        chord_aggregation=chord_metric,
-    )
-    metric_label = {
-        "sum": "Total dissonance",
-        "mean": "Mean dissonance",
-        "rms": "RMS dissonance",
-    }.get(str(chord_metric), "Dissonance")
-    st.metric(metric_label, f"{avg_d:.4f}")
-
     st.subheader("Play")
     timbre = st.radio(
         "Timbre",
@@ -1317,6 +1266,8 @@ with col_right:
     _render_continuous_synth(
         freqs_hz=list(result.chord_freqs_sorted_hz) if play_continuous else [],
         overtone_weights=weights,
+        include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+        subharmonic_weights=sub_weights,
         timbre=str(timbre),
         volume=float(volume),
         lowpass_cutoff_hz=float(lowpass_cutoff_hz),
@@ -1366,43 +1317,3 @@ with col_left:
     st.pyplot(fig, clear_figure=True)
 
     st.caption("Dashed lines mark the selected chord notes.")
-
-    st.subheader("Dissonance matrix")
-    st.caption("Pairwise overtone-weighted roughness between chord notes.")
-
-    ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))
-    mat = chord_pairwise_dissonance_matrix(
-        chord_freqs_hz=result.chord_freqs_sorted_hz,
-        overtone_weights=weights,
-        extension_freq_hz=ext_freq_hz,
-        extension_weight=ext_w,
-        peak_semitones_c2=peak_semitones_c2,
-        peak_semitones_c6=peak_semitones_c6,
-        fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-        fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-        decay_db_per_oct_c2=decay_db_per_oct_c2,
-        decay_db_per_oct_c6=decay_db_per_oct_c6,
-        height_c2=height_c2,
-        height_c6=height_c6,
-        sine_kernel=sine_kernel,
-        lowpass_cutoff_hz=lowpass_cutoff_hz,
-        lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
-        lowpass_renormalize=lowpass_renormalize,
-    )
-
-    fig2, ax2 = plt.subplots(figsize=(10, 6))
-    im = ax2.imshow(mat, aspect="equal", origin="lower")
-
-    labels = [f"{n}\n{f:.1f}Hz" for n, f in zip(result.chord_notes_sorted, result.chord_freqs_sorted_hz)]
-    ax2.set_xlabel("Chord note")
-    ax2.set_ylabel("Chord note")
-
-    ax2.set_xticks(np.arange(mat.shape[1]))
-    ax2.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-
-    ax2.set_yticks(np.arange(mat.shape[0]))
-    ax2.set_yticklabels(labels, rotation=0, fontsize=8)
-
-    cbar = fig2.colorbar(im, ax=ax2)
-    cbar.set_label("Weighted dissonance")
-    st.pyplot(fig2, clear_figure=True)
