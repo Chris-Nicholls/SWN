@@ -85,7 +85,7 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "lowpass_renormalize": False,
         "include_subharmonics": False,
         "n_overtones": 12,
-        "set_aggregation_ui": "Sum",
+        "set_aggregation_ui": "Mean",
         "sine_kernel_ui": "Linear (triangle)",
         "peak_semitones_c2": 0.75,
         "peak_semitones_c6": 0.4,
@@ -263,14 +263,19 @@ def _init_sequencer_state() -> None:
         st.session_state["sequencer_next_ts"] = 0.0
 
 
-def _advance_sequencer_if_due(full_notes: list[str]) -> bool:
+def _request_sequencer_step() -> None:
+    st.session_state["_sequencer_step_once"] = True
+    st.session_state["_sequencer_manual_step_active"] = True
+
+
+def _advance_sequencer_if_due(full_notes: list[str], *, force: bool = False) -> bool:
     """Advance sequencer by one step if due.
 
     Must be called before widgets are instantiated so we can safely set
     st.session_state values for widget keys like "root_note".
     """
 
-    if not bool(st.session_state.get("sequencer_run", False)):
+    if (not force) and (not bool(st.session_state.get("sequencer_run", False))):
         return False
 
     steps, _ = _parse_sequencer_steps(str(st.session_state.get("sequencer_steps_text", "")), full_notes)
@@ -278,9 +283,10 @@ def _advance_sequencer_if_due(full_notes: list[str]) -> bool:
         return False
 
     now = time.monotonic()
-    next_ts = float(st.session_state.get("sequencer_next_ts", 0.0) or 0.0)
-    if now < next_ts:
-        return False
+    if not force:
+        next_ts = float(st.session_state.get("sequencer_next_ts", 0.0) or 0.0)
+        if now < next_ts:
+            return False
 
     idx = int(st.session_state.get("sequencer_index", 0) or 0)
     root, ext_midi = steps[idx % len(steps)]
@@ -301,6 +307,10 @@ def _advance_sequencer_if_due(full_notes: list[str]) -> bool:
 # Precompute note list and run sequencer tick BEFORE widgets are created.
 full_notes = _note_list("A0", "C8")
 _init_sequencer_state()
+
+# Manual step-through: apply the step before widgets are created.
+if bool(st.session_state.pop("_sequencer_step_once", False)):
+    _advance_sequencer_if_due(full_notes, force=True)
 
 # Reset the sequencer position when toggled on.
 prev_run = st.session_state.get("_prev_sequencer_run")
@@ -425,7 +435,8 @@ with st.sidebar:
     st.divider()
     st.subheader("Sequencer")
 
-    sequencer_run = st.toggle("Run sequencer", key="sequencer_run", value=bool(st.session_state.get("sequencer_run", False)))
+    st.toggle("Run sequencer", key="sequencer_run")
+    st.button("Step", on_click=_request_sequencer_step)
     st.slider(
         "Step (seconds)",
         min_value=0.1,
@@ -542,7 +553,7 @@ with st.sidebar:
     )
     sine_kernel = "linear" if sine_kernel_ui.startswith("Linear") else "exponential"
 
-    agg_opts = ["Sum", "Max", "RMS"]
+    agg_opts = ["Mean", "Max", "RMS"]
     if st.session_state["set_aggregation_ui"] not in agg_opts:
         st.session_state["set_aggregation_ui"] = agg_opts[0]
     set_aggregation_ui = st.radio(
@@ -550,10 +561,10 @@ with st.sidebar:
         agg_opts,
         horizontal=True,
         key="set_aggregation_ui",
-        help="How to combine dissonance against a set of existing notes: Sum, Max, or RMS over pairwise dissonances.",
+        help="How to combine dissonance against a set of existing notes: Mean, Max, or RMS over pairwise dissonances.",
     )
-    if set_aggregation_ui == "Sum":
-        set_aggregation = "sum"
+    if set_aggregation_ui == "Mean":
+        set_aggregation = "mean"
     elif set_aggregation_ui == "Max":
         set_aggregation = "max"
     else:
@@ -1091,8 +1102,9 @@ def _render_continuous_synth(
 
 
 def _select_midis() -> list[float]:
-    voice_leading_enabled = bool(st.session_state.get("sequencer_run", False)) and bool(
-        st.session_state.get("sequencer_voice_leading", False)
+    voice_leading_enabled = bool(st.session_state.get("sequencer_voice_leading", False)) and (
+        bool(st.session_state.get("sequencer_run", False))
+        or bool(st.session_state.get("_sequencer_manual_step_active", False))
     )
     prev_weight = float(st.session_state.get("sequencer_prev_weight", 0.0) or 0.0)
     prev_midis = st.session_state.get("voice_leading_prev_chord_midis") if voice_leading_enabled else None
@@ -1133,8 +1145,9 @@ def _select_midis() -> list[float]:
         prev_extension_midi=prev_ext_midi,
     )
     t0 = time.perf_counter()
-    midis = select_chord_midis_greedy_harmonic_subharmonic(**common)
+    midis, stats = select_chord_midis_greedy_harmonic_subharmonic(**common, return_stats=True)
     st.session_state["last_chord_search_s"] = float(time.perf_counter() - t0)
+    st.session_state["last_chord_candidates_evaluated"] = int(getattr(stats, "candidates_evaluated", 0) or 0)
     return midis
 
 # Compute model
@@ -1229,13 +1242,19 @@ except Exception as exc:
     st.stop()
 
 # Update voice-leading history for the *next* sequencer step.
-if bool(st.session_state.get("sequencer_run", False)) and bool(st.session_state.get("sequencer_voice_leading", False)):
+if bool(st.session_state.get("sequencer_voice_leading", False)) and (
+    bool(st.session_state.get("sequencer_run", False))
+    or bool(st.session_state.get("_sequencer_manual_step_active", False))
+):
     try:
         st.session_state["voice_leading_prev_chord_midis"] = list(result.chord_midis_sorted)
         st.session_state["voice_leading_prev_root_note"] = str(root_note)
         st.session_state["voice_leading_prev_extension_midi"] = float(ext_midi_cont)
     except Exception:
         pass
+
+# Clear one-shot manual-step flag after compute.
+st.session_state.pop("_sequencer_manual_step_active", None)
 
 col_left, col_right = st.columns([2, 1], gap="large")
 
@@ -1248,6 +1267,12 @@ with col_right:
         st.caption(f"Chord search time: {search_s * 1000.0:.1f} ms")
     else:
         st.caption("Chord search time: —")
+
+    candidates_evaluated = int(st.session_state.get("last_chord_candidates_evaluated", 0) or 0)
+    if candidates_evaluated > 0:
+        st.caption(f"Candidates evaluated: {candidates_evaluated:,}")
+    else:
+        st.caption("Candidates evaluated: —")
 
     same_root_ext = bool(np.isclose(float(note_to_midi(root_note)), float(ext_midi_cont), rtol=0.0, atol=1e-9))
     ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))

@@ -511,7 +511,7 @@ def dissonance_to_set(
     lowpass_slope_db_per_oct: float = 0.0,
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["sum", "max", "rms"] = "sum",
+    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
     existing_weights: Sequence[float] | None = None,
     candidate_weight: float | np.ndarray = 1.0,
 ) -> np.ndarray:
@@ -519,8 +519,11 @@ def dissonance_to_set(
 
     candidate = np.asarray(candidate_freqs_hz, dtype=np.float64)
     mode = str(set_aggregation).strip().lower()
-    if mode not in ("sum", "max", "rms"):
-        raise ValueError("set_aggregation must be 'sum', 'max', or 'rms'")
+    # Backward compatible alias: historically this mode was called "sum".
+    if mode == "sum":
+        mode = "mean"
+    if mode not in ("mean", "max", "rms"):
+        raise ValueError("set_aggregation must be 'mean', 'max', or 'rms'")
 
     existing = [float(f) for f in existing_freqs_hz]
     if existing_weights is None:
@@ -568,6 +571,7 @@ def dissonance_to_set(
             return total_here * w_cand
 
         total_here = np.zeros_like(freqs)
+        count = 0
         for f_exist, w_exist in zip(existing, weights_existing):
             d = overtone_dissonance(
                 freqs,
@@ -588,10 +592,15 @@ def dissonance_to_set(
                 lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
                 lowpass_renormalize=lowpass_renormalize,
             )
-            if mode == "sum":
+            if mode == "mean":
                 total_here = total_here + float(w_exist) * d
+                count += 1
             else:
                 total_here = np.maximum(total_here, float(w_exist) * d)
+
+        if mode == "mean":
+            denom = float(count) if count > 0 else 1.0
+            total_here = total_here / denom
 
         return total_here * w_cand
 
@@ -616,7 +625,7 @@ def average_note_dissonance(
     lowpass_slope_db_per_oct: float = 0.0,
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["sum", "max", "rms"] = "sum",
+    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
     chord_aggregation: Literal["sum", "mean", "rms"] = "sum",
     extension_freq_hz: float | None = None,
     extension_weight: float = 1.0,
@@ -631,9 +640,9 @@ def average_note_dissonance(
     - `mean`: mean of per-note dissonances
     - `rms`: root-mean-square of per-note dissonances (penalizes large values)
 
-    Note:
-    - With `set_aggregation='sum'`, per-note dissonance double-counts unordered
-      pairs (i,j) and (j,i). That's usually fine for comparisons.
+        Note:
+        - `set_aggregation='mean'` makes per-note scores less sensitive to chord size
+            (it averages across the other notes instead of summing).
     """
     freqs = [float(f) for f in chord_freqs_hz]
     n = len(freqs)
@@ -711,7 +720,7 @@ def chord_partial_dissonance_matrix(
     lowpass_slope_db_per_oct: float = 0.0,
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["sum", "max", "rms"] = "sum",
+    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
     extension_freq_hz: float | None = None,
     extension_weight: float = 1.0,
 ) -> np.ndarray:
@@ -726,7 +735,7 @@ def chord_partial_dissonance_matrix(
     - extension weighting (pairs involving the extension note are scaled)
 
     Aggregation uses the same semantics as the chord objective:
-    - set_aggregation='sum': sums contributions against all other chord notes
+        - set_aggregation='mean': averages contributions against all other chord notes
     - set_aggregation='max': takes the worst (maximum) contribution against any other note
       (still summed/maxed across the other note's harmonics).
     """
@@ -790,14 +799,19 @@ def chord_partial_dissonance_matrix(
     note_weights = np.array([ext_w if _is_ext(float(f)) else 1.0 for f in freqs], dtype=np.float64)
 
     mode = str(set_aggregation).strip().lower()
-    if mode not in ("sum", "max", "rms"):
-        raise ValueError("set_aggregation must be 'sum', 'max', or 'rms'")
+    if mode == "sum":
+        mode = "mean"
+    if mode not in ("mean", "max", "rms"):
+        raise ValueError("set_aggregation must be 'mean', 'max', or 'rms'")
 
     n_partials = int(w_full.size)
     out = np.zeros((n_notes, n_partials), dtype=np.float64)
     for i in range(n_notes):
         if mode == "rms":
             acc_sum_sq = np.zeros((n_over,), dtype=np.float64)
+            acc_count = 0
+        elif mode == "mean":
+            acc = np.zeros((n_over,), dtype=np.float64)
             acc_count = 0
         else:
             acc = np.zeros((n_over,), dtype=np.float64)
@@ -830,14 +844,18 @@ def chord_partial_dissonance_matrix(
                 v = pair_scale * pair.sum(axis=1)
                 acc_sum_sq = acc_sum_sq + (v * v)
                 acc_count += 1
-            elif mode == "sum":
+            elif mode == "mean":
                 acc = acc + pair_scale * pair.sum(axis=1)
+                acc_count += 1
             else:
                 acc = np.maximum(acc, pair_scale * pair.max(axis=1))
 
         if mode == "rms":
             denom = float(acc_count) if acc_count > 0 else 1.0
             out[i] = np.sqrt(acc_sum_sq / denom)
+        elif mode == "mean":
+            denom = float(acc_count) if acc_count > 0 else 1.0
+            out[i] = acc / denom
         else:
             out[i] = acc
 
@@ -940,7 +958,7 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     lowpass_slope_db_per_oct: float = 0.0,
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["sum", "max", "rms"] = "sum",
+    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
     extension_weight: float = 1.0,
     below_root_penalty_db_per_oct: float = 0.0,
     above_extension_penalty_db_per_oct: float = 0.0,
@@ -952,7 +970,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     prev_chord_weight: float = 0.0,
     prev_root_note: str | None = None,
     prev_extension_midi: float | None = None,
-) -> List[float]:
+    return_stats: bool = False,
+) -> List[float] | tuple[List[float], "ChordSearchStats"]:
     """Greedy selection where candidates come only from harmonics+subharmonics.
 
         Candidate fundamentals are generated from each currently-chosen note f as:
@@ -991,6 +1010,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     ext_w = float(extension_weight)
     if same_root_ext:
         ext_w = 1.0
+
+    candidates_evaluated = 0
 
     # Voice leading (sequencer mode): seed the chord from the previous chord,
     # then improve by replacing the most dissonant carried-over notes first.
@@ -1241,6 +1262,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
                 cand_freqs_all = cand_freqs_all[keep_mask]
                 cand_midis_all = cand_midis_all[keep_mask]
 
+            candidates_evaluated += int(np.asarray(cand_freqs_all).size)
+
             # Compute objective components so we can discount only the dissonance
             # term for the current note.
             diss = dissonance_to_set(
@@ -1334,6 +1357,8 @@ def select_chord_midis_greedy_harmonic_subharmonic(
 
             candidate_freqs = midi_to_frequency_continuous(candidate_midis, a4_hz=a4_hz)
 
+        candidates_evaluated += int(np.asarray(candidate_freqs).size)
+
         D = _candidate_objective(candidate_freqs, chosen_freqs)
 
         best_idx = int(np.argmin(D))
@@ -1343,11 +1368,21 @@ def select_chord_midis_greedy_harmonic_subharmonic(
             chosen_midis_int.append(int(np.round(float(candidate_midis[best_idx]))))
 
     if snap:
-        return sorted([float(m) for m in chosen_midis_int])
+        out_midis = sorted([float(m) for m in chosen_midis_int])
+        if return_stats:
+            return out_midis, ChordSearchStats(candidates_evaluated=int(candidates_evaluated))
+        return out_midis
 
     # Microtonal: return as (possibly fractional) midis.
-    out_midis = [float(69.0 + 12.0 * np.log2(float(f) / float(a4_hz))) for f in chosen_freqs]
-    return sorted(out_midis)
+    out_midis = sorted([float(69.0 + 12.0 * np.log2(float(f) / float(a4_hz))) for f in chosen_freqs])
+    if return_stats:
+        return out_midis, ChordSearchStats(candidates_evaluated=int(candidates_evaluated))
+    return out_midis
+
+
+@dataclass(frozen=True)
+class ChordSearchStats:
+    candidates_evaluated: int
 
 @dataclass(frozen=True)
 class ChordResult:
@@ -1381,7 +1416,7 @@ def curve_for_fixed_chord(
     lowpass_slope_db_per_oct: float = 0.0,
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["sum", "max", "rms"] = "sum",
+    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
     extension_weight: float = 1.0,
     below_root_penalty_db_per_oct: float = 0.0,
     above_extension_penalty_db_per_oct: float = 0.0,
