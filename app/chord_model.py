@@ -379,16 +379,20 @@ def sine_dissonance(
         D = scale * base
         return np.maximum(D, 0.0)
 
-    # Piecewise-linear triangular kernel in semitone-distance domain:
-    # - Linear rise from 0 at x=0 to height at x=x_peak
-    # - Linear fall to 0 at x=x_peak + fall_semitones
+    # Piecewise-linear triangular kernel with constant slope.
+    # - Calculate as if peak = 1.0
+    # - Then shift entire curve down by (1.0 - height)
+    # - Slope on falling edge: -1/fall_to_zero (constant, independent of height)
+    # - Zero crossing occurs at: peak + (height * fall_to_zero)
     fall = np.maximum(fall, 1e-12)
-    x_zero = x_peak + fall
 
-    up = np.where(x_peak > 1e-12, height * (x / x_peak), 0.0)
-    down = height * (1.0 - (x - x_peak) / fall)
+    # Calculate kernel as if peak height is 1.0
+    up = np.where(x_peak > 1e-12, x / x_peak, 0.0)
+    down = 1.0 - (x - x_peak) / fall
 
-    D = np.where(x <= x_peak, up, down)
+    # Shift entire curve down by (1.0 - height)
+    shift = 1.0 - height
+    D = np.where(x <= x_peak, up - shift, down - shift)
     return np.clip(D, 0.0, None)
 
 
@@ -500,7 +504,16 @@ def overtone_dissonance(
         sine_kernel=sine_kernel,
     )
 
-    return np.sum(w_outer * base, axis=(-2, -1)).squeeze()
+    # Apply harmonic weights using appropriate semantics for the kernel type
+    mode = str(sine_kernel).strip().lower()
+    if mode == "linear":
+        # Linear kernel: use shift semantics to preserve constant slope
+        # Shift down by (1 - w_outer) instead of multiplying
+        result = np.maximum(base - (1.0 - w_outer), 0.0)
+        return np.sum(result, axis=(-2, -1)).squeeze()
+    else:
+        # Exponential kernel: use multiplicative scaling
+        return np.sum(w_outer * base, axis=(-2, -1)).squeeze()
 
 
 def dissonance_to_set(
