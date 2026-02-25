@@ -410,6 +410,8 @@ def overtone_dissonance(
     lowpass_cutoff_hz: float = 20000.0,
     lowpass_slope_db_per_oct: float = 0.0,
     lowpass_renormalize: bool = True,
+    fundamental_only_f1: bool = False,
+    fundamental_only_f2: bool = False,
 ) -> np.ndarray:
     """Total dissonance between two complex tones with given overtone weights.
 
@@ -425,15 +427,10 @@ def overtone_dissonance(
         w[0] = 1.0
 
     n_over = int(w.size)
-    use_sub = bool(include_subharmonics) and n_over >= 2
 
-    # Partials are defined as frequency multipliers applied to the fundamental.
-    # Harmonics: 1,2,3,...,N
-    # Optional subharmonics: 1/2,1/3,...,1/N (no duplicate fundamental)
-    mult_h = np.arange(1, n_over + 1, dtype=np.float64)
-    if use_sub:
-        mult_s = 1.0 / np.arange(2, n_over + 1, dtype=np.float64)
-        mult = np.concatenate([mult_h, mult_s])
+    def _weights_for_tone(use_sub: bool) -> np.ndarray:
+        if not use_sub:
+            return w
 
         if subharmonic_weights is None:
             w_sub = w[1:]
@@ -448,23 +445,36 @@ def overtone_dissonance(
                 # Fall back to the legacy behavior if shape is unexpected.
                 w_sub = w[1:]
 
-        w_full = np.concatenate([w, w_sub])
-    else:
-        mult = mult_h
-        w_full = w
+        return np.concatenate([w, w_sub])
+
+    def _mult_and_weights(*, fundamental_only: bool) -> tuple[np.ndarray, np.ndarray]:
+        if fundamental_only:
+            return np.asarray([1.0], dtype=np.float64), np.asarray([w[0]], dtype=np.float64)
+
+        use_sub = bool(include_subharmonics) and n_over >= 2
+        mult_h = np.arange(1, n_over + 1, dtype=np.float64)
+        if use_sub:
+            mult_s = 1.0 / np.arange(2, n_over + 1, dtype=np.float64)
+            mult = np.concatenate([mult_h, mult_s])
+            return mult, _weights_for_tone(True)
+
+        return mult_h, _weights_for_tone(False)
+
+    mult1, w_full1 = _mult_and_weights(fundamental_only=bool(fundamental_only_f1))
+    mult2, w_full2 = _mult_and_weights(fundamental_only=bool(fundamental_only_f2))
 
     f1_base = np.asarray(f1_hz, dtype=np.float64)
     f2_base = np.asarray(f2_hz, dtype=np.float64)
 
     # Partial frequencies per tone (used for low-pass weighting).
-    f1_part = f1_base[..., None] * mult[None, :]
-    f2_part = f2_base[..., None] * mult[None, :]
+    f1_part = f1_base[..., None] * mult1[None, :]
+    f2_part = f2_base[..., None] * mult2[None, :]
 
     g1 = _lowpass_gain(f1_part, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
     g2 = _lowpass_gain(f2_part, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
 
-    w1_raw = g1 * w_full[None, :]
-    w2_raw = g2 * w_full[None, :]
+    w1_raw = g1 * w_full1[None, :]
+    w2_raw = g2 * w_full2[None, :]
     if bool(lowpass_renormalize):
         w1 = _normalize_weights_last_dim(w1_raw)
         w2 = _normalize_weights_last_dim(w2_raw)
@@ -472,8 +482,8 @@ def overtone_dissonance(
         w1 = w1_raw
         w2 = w2_raw
 
-    f1 = f1_base[..., None, None] * mult[None, :, None]
-    f2 = f2_base[..., None, None] * mult[None, None, :]
+    f1 = f1_base[..., None, None] * mult1[None, :, None]
+    f2 = f2_base[..., None, None] * mult2[None, None, :]
     w_outer = (w1[..., :, None] * w2[..., None, :])
 
     base = sine_dissonance(
@@ -512,6 +522,7 @@ def dissonance_to_set(
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
     set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
+    candidate_fundamental_only: bool = False,
     existing_weights: Sequence[float] | None = None,
     candidate_weight: float | np.ndarray = 1.0,
 ) -> np.ndarray:
@@ -561,6 +572,7 @@ def dissonance_to_set(
                     lowpass_cutoff_hz=lowpass_cutoff_hz,
                     lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
                     lowpass_renormalize=lowpass_renormalize,
+                    fundamental_only_f1=bool(candidate_fundamental_only),
                 )
                 v = float(w_exist) * d
                 sum_sq = sum_sq + (v * v)
@@ -591,6 +603,7 @@ def dissonance_to_set(
                 lowpass_cutoff_hz=lowpass_cutoff_hz,
                 lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
                 lowpass_renormalize=lowpass_renormalize,
+                fundamental_only_f1=bool(candidate_fundamental_only),
             )
             if mode == "mean":
                 total_here = total_here + float(w_exist) * d
@@ -959,6 +972,7 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
     set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
+    candidate_fundamental_only: bool = False,
     extension_weight: float = 1.0,
     below_root_penalty_db_per_oct: float = 0.0,
     above_extension_penalty_db_per_oct: float = 0.0,
@@ -1092,6 +1106,7 @@ def select_chord_midis_greedy_harmonic_subharmonic(
             lowpass_renormalize=lowpass_renormalize,
             sine_kernel=sine_kernel,
             set_aggregation=set_aggregation,
+            candidate_fundamental_only=bool(candidate_fundamental_only),
             existing_weights=_weights_for_existing(existing_freqs_hz),
         )
         D = D + _boundary_penalty_freqs(
@@ -1285,6 +1300,7 @@ def select_chord_midis_greedy_harmonic_subharmonic(
                 lowpass_renormalize=lowpass_renormalize,
                 sine_kernel=sine_kernel,
                 set_aggregation=set_aggregation,
+                candidate_fundamental_only=bool(candidate_fundamental_only),
                 existing_weights=_weights_for_existing(others),
             )
             # Discount dissonance for the current note (index 0).
@@ -1417,6 +1433,7 @@ def curve_for_fixed_chord(
     lowpass_renormalize: bool = True,
     sine_kernel: Literal["linear", "exponential"] = "linear",
     set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
+    candidate_fundamental_only: bool = False,
     extension_weight: float = 1.0,
     below_root_penalty_db_per_oct: float = 0.0,
     above_extension_penalty_db_per_oct: float = 0.0,
@@ -1477,6 +1494,7 @@ def curve_for_fixed_chord(
         lowpass_renormalize=lowpass_renormalize,
         sine_kernel=sine_kernel,
         set_aggregation=set_aggregation,
+        candidate_fundamental_only=bool(candidate_fundamental_only),
         existing_weights=chord_weights,
         candidate_weight=cand_weight,
     )

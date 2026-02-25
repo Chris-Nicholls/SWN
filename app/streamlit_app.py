@@ -84,6 +84,7 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "lowpass_slope_db_per_oct": 0.0,
         "lowpass_renormalize": False,
         "include_subharmonics": False,
+        "candidate_fundamental_only": False,
         "n_overtones": 12,
         "set_aggregation_ui": "Mean",
         "sine_kernel_ui": "Linear (triangle)",
@@ -157,6 +158,7 @@ def _persist_settings() -> None:
         "lowpass_slope_db_per_oct",
         "lowpass_renormalize",
         "include_subharmonics",
+        "candidate_fundamental_only",
         "n_overtones",
         "set_aggregation_ui",
         "sine_kernel_ui",
@@ -325,6 +327,12 @@ elif bool(prev_run) != cur_run:
         st.session_state.pop("voice_leading_prev_chord_midis", None)
         st.session_state.pop("voice_leading_prev_root_note", None)
         st.session_state.pop("voice_leading_prev_extension_midi", None)
+        # Advance immediately once on start so the UI reflects step 0 without
+        # relying on the fragment to call st.rerun() before widgets mount.
+        try:
+            _advance_sequencer_if_due(full_notes, force=True)
+        except Exception:
+            pass
 
 
 @st.fragment(run_every=0.1)
@@ -510,6 +518,12 @@ with st.sidebar:
         "Include subharmonics",
         key="include_subharmonics",
         help="If enabled, the dissonance model (and synth timbre) also includes subharmonic partials 1/2..1/N with the same per-index weights.",
+    )
+
+    st.checkbox(
+        "Evaluate candidates by fundamental only",
+        key="candidate_fundamental_only",
+        help="When enabled, candidate notes are scored using only their fundamental; existing chord notes still use full harmonics (and optional subharmonics). This affects the search + curve, not playback timbre.",
     )
 
     lowpass_cutoff_hz = st.slider(
@@ -1118,6 +1132,7 @@ def _select_midis() -> list[float]:
         extension_weight=extension_weight,
         overtone_weights=weights,
         include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+        candidate_fundamental_only=bool(st.session_state.get("candidate_fundamental_only", False)),
         subharmonic_weights=sub_weights,
         min_note=min_note,
         max_note=max_note,
@@ -1165,6 +1180,7 @@ try:
         float(lowpass_slope_db_per_oct),
         bool(lowpass_renormalize),
         str(set_aggregation),
+        bool(st.session_state.get("candidate_fundamental_only", False)),
     )
 
     if freeze_assignment:
@@ -1187,6 +1203,7 @@ try:
             max_note=max_note,
             overtone_weights=weights,
             include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+            candidate_fundamental_only=bool(st.session_state.get("candidate_fundamental_only", False)),
             subharmonic_weights=sub_weights,
             peak_semitones_c2=peak_semitones_c2,
             peak_semitones_c6=peak_semitones_c6,
@@ -1217,6 +1234,7 @@ try:
             max_note=max_note,
             overtone_weights=weights,
             include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
+            candidate_fundamental_only=bool(st.session_state.get("candidate_fundamental_only", False)),
             subharmonic_weights=sub_weights,
             peak_semitones_c2=peak_semitones_c2,
             peak_semitones_c6=peak_semitones_c6,
