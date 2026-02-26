@@ -146,23 +146,16 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 			if (wt_osc.wt_xfade[chan] > 0.0f) {
 				wt_osc.wt_xfade[chan] -= XFADE_INC;
 				if (wt_osc.wt_xfade[chan] < 0.0f) wt_osc.wt_xfade[chan] = 0.0f;
-				
-				fade_gain_prev = wt_osc.wt_xfade[chan];
-				fade_gain_current = 1.0f - fade_gain_prev;
-			} else {
-				fade_gain_prev = 0.0f;
-				// Calculate frequencies for new detuned voices (spread around base_inc)
-				// Use non-linear spacing for richer sound
-				// Factor scaling: Increased for wider unison
-				// Original: {0, -0.0012, 0.0012, -0.0028, 0.0028, -0.005, 0.005, -0.008};
-				static const float osc_detune_factors[8] = {0, -0.0024f, 0.0024f, -0.0056f, 0.0056f, -0.01f, 0.01f, -0.016f};
-
-				float base_inc = wt_osc.wt_head_pos_inc[chan][0]; // Assuming voice 0 holds the base increment
-				for (uint8_t v = 0; v < voice_count; v++) {
-					float detune_factor = 1.0f + (osc_detune_factors[v] * params.unison_spread_amt[chan] * 4.0f); // 4x scaling
-					wt_osc.wt_head_pos_inc[chan][v] = base_inc * detune_factor;
-				}
 			}
+			
+			// Always update unison increments to prevent pitch stalling/jumping
+			static const float osc_detune_factors[8] = {0, -0.0024f, 0.0024f, -0.0056f, 0.0056f, -0.01f, 0.01f, -0.016f};
+			float base_inc = wt_osc.wt_head_pos_inc[chan][0];
+			for (uint8_t v = 0; v < voice_count; v++) {
+				wt_osc.wt_head_pos_inc[chan][v] = base_inc * (1.0f + (osc_detune_factors[v] * params.unison_spread_amt[chan] * 4.0f));
+			}
+			fade_gain_prev = wt_osc.wt_xfade[chan];
+			fade_gain_current = 1.0f - fade_gain_prev;
 
 			for (uint8_t v = 0; v < voice_count; v++) 
 			{
