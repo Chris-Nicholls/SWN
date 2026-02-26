@@ -18,7 +18,7 @@ from chord_model import (
     midi_to_note_microtonal,
     midi_to_note,
     note_to_midi,
-    select_chord_midis_greedy_harmonic_subharmonic,
+    select_chord_freqs_greedy_harmonic_subharmonic,
 )
 
 
@@ -72,12 +72,8 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "root_note": "C4",
         "extension_note": "E5",
         "extension_midi_cont": 76.0,
-        "extension_weight": 1.0,
         "n_additional": 4,
-        # Renamed from "microtonal_mode". If you have old settings on disk,
-        # we migrate them below.
         "unquantized_mode": False,
-        "microtonal_mode": False,
         "freeze_assignment": False,
         "search_n_harmonics": 16,
         "lowpass_cutoff_hz": 20000,
@@ -114,12 +110,6 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         if k not in st.session_state:
             st.session_state[k] = settings.get(k, v)
 
-    # Settings migration: older versions stored this as "microtonal_mode".
-    if "unquantized_mode" not in settings and "microtonal_mode" in settings:
-        st.session_state["unquantized_mode"] = bool(settings.get("microtonal_mode", False))
-    # Keep the legacy key in sync so old settings files still reflect the UI state.
-    st.session_state["microtonal_mode"] = bool(st.session_state.get("unquantized_mode", False))
-
     raw = settings.get("raw_weights")
     sub = settings.get("sub_weights")
     if not isinstance(raw, list):
@@ -148,10 +138,8 @@ def _persist_settings() -> None:
         "root_note",
         "extension_note",
         "extension_midi_cont",
-        "extension_weight",
         "n_additional",
         "unquantized_mode",
-        "microtonal_mode",
         "freeze_assignment",
         "search_n_harmonics",
         "lowpass_cutoff_hz",
@@ -324,9 +312,7 @@ elif bool(prev_run) != cur_run:
     if cur_run:
         st.session_state["sequencer_index"] = 0
         st.session_state["sequencer_next_ts"] = 0.0
-        st.session_state.pop("voice_leading_prev_chord_midis", None)
-        st.session_state.pop("voice_leading_prev_root_note", None)
-        st.session_state.pop("voice_leading_prev_extension_midi", None)
+        st.session_state.pop("voice_leading_prev_chord_freqs_hz", None)
         # Advance immediately once on start so the UI reflects step 0 without
         # relying on the fragment to call st.rerun() before widgets mount.
         try:
@@ -363,8 +349,6 @@ with st.sidebar:
         key="unquantized_mode",
         help="When enabled, additional notes are not snapped to semitones (harmonic/subharmonic candidates are evaluated as continuous pitches).",
     )
-    # Keep the legacy key in sync (backward-compatible settings/persistence).
-    st.session_state["microtonal_mode"] = bool(unquantized_mode)
 
     prev_unquantized = st.session_state.get("_prev_unquantized_mode")
     mode_toggled = (prev_unquantized is not None) and (bool(prev_unquantized) != bool(unquantized_mode))
@@ -430,15 +414,6 @@ with st.sidebar:
             st.session_state["extension_midi_cont"] = float(selected_midi)
             cont_val = float(selected_midi)
         extension_midi_cont = float(cont_val)
-
-    extension_weight = st.slider(
-        "Extension weight",
-        min_value=0.0,
-        max_value=2.0,
-        step=0.05,
-        key="extension_weight",
-        help="Scales the relative importance of the extension note in the dissonance objective (0 = ignore extension, 1 = normal, 2 = twice as important).",
-    )
 
     st.divider()
     st.subheader("Sequencer")
@@ -1115,27 +1090,34 @@ def _render_continuous_synth(
     components.html(html, height=int(height), scrolling=False)
 
 
-def _select_midis() -> list[float]:
+def _select_freqs_hz() -> list[float]:
+    def _midi_to_freq_cont(m: float) -> float:
+        return float(440.0 * (2.0 ** ((float(m) - 69.0) / 12.0)))
+
     voice_leading_enabled = bool(st.session_state.get("sequencer_voice_leading", False)) and (
         bool(st.session_state.get("sequencer_run", False))
         or bool(st.session_state.get("_sequencer_manual_step_active", False))
     )
     prev_weight = float(st.session_state.get("sequencer_prev_weight", 0.0) or 0.0)
-    prev_midis = st.session_state.get("voice_leading_prev_chord_midis") if voice_leading_enabled else None
-    prev_root = st.session_state.get("voice_leading_prev_root_note") if voice_leading_enabled else None
-    prev_ext_midi = st.session_state.get("voice_leading_prev_extension_midi") if voice_leading_enabled else None
+    prev_freqs = st.session_state.get("voice_leading_prev_chord_freqs_hz") if voice_leading_enabled else None
+
+    root_freq_hz = float(midi_to_frequency(int(note_to_midi(root_note))))
+    if bool(unquantized_mode):
+        extension_freq_hz = float(_midi_to_freq_cont(float(ext_midi_cont)))
+    else:
+        extension_freq_hz = float(midi_to_frequency(int(note_to_midi(extension_note))))
+    min_freq_hz = float(midi_to_frequency(int(note_to_midi(min_note))))
+    max_freq_hz = float(midi_to_frequency(int(note_to_midi(max_note))))
 
     common = dict(
-        root_note=root_note,
-        extension_note=extension_note,
-        extension_midi=float(ext_midi_cont) if bool(unquantized_mode) else None,
-        extension_weight=extension_weight,
+        root_freq_hz=root_freq_hz,
+        extension_freq_hz=extension_freq_hz,
         overtone_weights=weights,
         include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
         candidate_fundamental_only=bool(st.session_state.get("candidate_fundamental_only", False)),
         subharmonic_weights=sub_weights,
-        min_note=min_note,
-        max_note=max_note,
+        min_freq_hz=min_freq_hz,
+        max_freq_hz=max_freq_hz,
         n_additional=n_additional,
         quantize_to_semitones=not bool(unquantized_mode),
         lowpass_cutoff_hz=lowpass_cutoff_hz,
@@ -1154,23 +1136,20 @@ def _select_midis() -> list[float]:
         below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
         above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
         search_n_harmonics=int(search_n_harmonics),
-        prev_chord_midis=prev_midis,
+        prev_chord_freqs_hz=prev_freqs,
         prev_chord_weight=prev_weight,
-        prev_root_note=prev_root,
-        prev_extension_midi=prev_ext_midi,
     )
     t0 = time.perf_counter()
-    midis, stats = select_chord_midis_greedy_harmonic_subharmonic(**common, return_stats=True)
+    freqs_hz, stats = select_chord_freqs_greedy_harmonic_subharmonic(**common, return_stats=True)
     st.session_state["last_chord_search_s"] = float(time.perf_counter() - t0)
     st.session_state["last_chord_candidates_evaluated"] = int(getattr(stats, "candidates_evaluated", 0) or 0)
-    return midis
+    return freqs_hz
 
 # Compute model
 try:
     freeze_key = (
         root_note,
         float(ext_midi_cont),
-        float(extension_weight),
         min_note,
         max_note,
         int(n_additional),
@@ -1185,22 +1164,25 @@ try:
 
     if freeze_assignment:
         prev_key = st.session_state.get("frozen_chord_key")
-        prev_midis = st.session_state.get("frozen_chord_midis")
-        need_refresh = refresh_frozen or (prev_key != freeze_key) or (not prev_midis)
+        prev_freqs = st.session_state.get("frozen_chord_freqs_hz")
+        need_refresh = refresh_frozen or (prev_key != freeze_key) or (not prev_freqs)
 
         if need_refresh:
             st.session_state["frozen_chord_key"] = freeze_key
-            st.session_state["frozen_chord_midis"] = _select_midis()
+            st.session_state["frozen_chord_freqs_hz"] = _select_freqs_hz()
 
-        fixed_midis = st.session_state["frozen_chord_midis"]
+        fixed_freqs = st.session_state["frozen_chord_freqs_hz"]
+
+        root_freq_hz = float(midi_to_frequency(int(note_to_midi(root_note))))
+        extension_freq_hz = float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0))) if bool(unquantized_mode) else float(midi_to_frequency(int(note_to_midi(extension_note))))
+        min_freq_hz = float(midi_to_frequency(int(note_to_midi(min_note))))
+        max_freq_hz = float(midi_to_frequency(int(note_to_midi(max_note))))
         result = curve_for_fixed_chord(
-            chord_midis=fixed_midis,
-            root_note=root_note,
-            extension_note=extension_note,
-            extension_midi=float(ext_midi_cont),
-            extension_weight=extension_weight,
-            min_note=min_note,
-            max_note=max_note,
+            chord_freqs_hz=fixed_freqs,
+            root_freq_hz=root_freq_hz,
+            extension_freq_hz=extension_freq_hz,
+            min_freq_hz=min_freq_hz,
+            max_freq_hz=max_freq_hz,
             overtone_weights=weights,
             include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
             candidate_fundamental_only=bool(st.session_state.get("candidate_fundamental_only", False)),
@@ -1223,15 +1205,18 @@ try:
             curve_steps_per_semitone=5,
         )
     else:
-        chord_midis = _select_midis()
+        chord_freqs = _select_freqs_hz()
+
+        root_freq_hz = float(midi_to_frequency(int(note_to_midi(root_note))))
+        extension_freq_hz = float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0))) if bool(unquantized_mode) else float(midi_to_frequency(int(note_to_midi(extension_note))))
+        min_freq_hz = float(midi_to_frequency(int(note_to_midi(min_note))))
+        max_freq_hz = float(midi_to_frequency(int(note_to_midi(max_note))))
         result = curve_for_fixed_chord(
-            chord_midis=chord_midis,
-            root_note=root_note,
-            extension_note=extension_note,
-            extension_midi=float(ext_midi_cont),
-            extension_weight=extension_weight,
-            min_note=min_note,
-            max_note=max_note,
+            chord_freqs_hz=chord_freqs,
+            root_freq_hz=root_freq_hz,
+            extension_freq_hz=extension_freq_hz,
+            min_freq_hz=min_freq_hz,
+            max_freq_hz=max_freq_hz,
             overtone_weights=weights,
             include_subharmonics=bool(st.session_state.get("include_subharmonics", False)),
             candidate_fundamental_only=bool(st.session_state.get("candidate_fundamental_only", False)),
@@ -1254,7 +1239,7 @@ try:
             curve_steps_per_semitone=5,
         )
         st.session_state["frozen_chord_key"] = freeze_key
-        st.session_state["frozen_chord_midis"] = result.chord_midis_sorted
+        st.session_state["frozen_chord_freqs_hz"] = result.chord_freqs_sorted_hz
 except Exception as exc:
     st.error(f"Failed to compute chord: {exc}")
     st.stop()
@@ -1265,9 +1250,7 @@ if bool(st.session_state.get("sequencer_voice_leading", False)) and (
     or bool(st.session_state.get("_sequencer_manual_step_active", False))
 ):
     try:
-        st.session_state["voice_leading_prev_chord_midis"] = list(result.chord_midis_sorted)
-        st.session_state["voice_leading_prev_root_note"] = str(root_note)
-        st.session_state["voice_leading_prev_extension_midi"] = float(ext_midi_cont)
+        st.session_state["voice_leading_prev_chord_freqs_hz"] = list(result.chord_freqs_sorted_hz)
     except Exception:
         pass
 
@@ -1291,10 +1274,6 @@ with col_right:
         st.caption(f"Candidates evaluated: {candidates_evaluated:,}")
     else:
         st.caption("Candidates evaluated: —")
-
-    same_root_ext = bool(np.isclose(float(note_to_midi(root_note)), float(ext_midi_cont), rtol=0.0, atol=1e-9))
-    ext_freq_hz = None if same_root_ext else float(440.0 * (2.0 ** ((float(ext_midi_cont) - 69.0) / 12.0)))
-    ext_w = 1.0 if same_root_ext else float(extension_weight)
 
     st.subheader("Play")
     timbre = st.radio(
