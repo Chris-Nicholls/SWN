@@ -633,336 +633,6 @@ def dissonance_to_set(
     return _total_at(candidate)
     
 
-
-def average_note_dissonance(
-    chord_freqs_hz: Sequence[float],
-    overtone_weights: np.ndarray,
-    include_subharmonics: bool = False,
-    subharmonic_weights: np.ndarray | None = None,
-    peak_semitones_c2: float = 1.00,
-    peak_semitones_c6: float = 1.00,
-    fall_to_zero_semitones_c2: float = 12.0,
-    fall_to_zero_semitones_c6: float = 12.0,
-    decay_db_per_oct_c2: float = 20.0,
-    decay_db_per_oct_c6: float = 20.0,
-    height_c2: float = 1.0,
-    height_c6: float = 1.0,
-    lowpass_cutoff_hz: float = 20000.0,
-    lowpass_slope_db_per_oct: float = 0.0,
-    lowpass_renormalize: bool = True,
-    sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
-    chord_aggregation: Literal["sum", "mean", "rms"] = "sum",
-    extension_freq_hz: float | None = None,
-    extension_weight: float = 1.0,
-) -> float:
-    """Chord dissonance proxy aggregated across notes.
-
-    For each note i, compute dissonance of i against the rest of the chord
-    (using `dissonance_to_set` with the configured `set_aggregation`).
-
-    Returns an aggregate across chord notes:
-    - `sum`: sum of per-note dissonances (scales with chord size)
-    - `mean`: mean of per-note dissonances
-    - `rms`: root-mean-square of per-note dissonances (penalizes large values)
-
-        Note:
-        - `set_aggregation='mean'` makes per-note scores less sensitive to chord size
-            (it averages across the other notes instead of summing).
-    """
-    freqs = [float(f) for f in chord_freqs_hz]
-    n = len(freqs)
-    if n < 2:
-        return 0.0
-
-    ext = float(extension_freq_hz) if extension_freq_hz is not None else None
-    ext_w = float(extension_weight)
-
-    def _is_ext(f: float) -> bool:
-        if ext is None:
-            return False
-        return bool(np.isclose(float(f), ext, rtol=1e-9, atol=1e-6))
-
-    per_note = []
-    for i in range(n):
-        others = [freqs[j] for j in range(n) if j != i]
-
-        cand_w = ext_w if _is_ext(freqs[i]) else 1.0
-        other_ws = None
-        if ext is not None:
-            other_ws = [ext_w if _is_ext(f) else 1.0 for f in others]
-
-        d = float(
-            dissonance_to_set(
-                np.array([freqs[i]], dtype=np.float64),
-                others,
-                overtone_weights,
-                include_subharmonics=include_subharmonics,
-                subharmonic_weights=subharmonic_weights,
-                peak_semitones_c2=peak_semitones_c2,
-                peak_semitones_c6=peak_semitones_c6,
-                fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-                fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-                decay_db_per_oct_c2=decay_db_per_oct_c2,
-                decay_db_per_oct_c6=decay_db_per_oct_c6,
-                height_c2=height_c2,
-                height_c6=height_c6,
-                lowpass_cutoff_hz=lowpass_cutoff_hz,
-                lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
-                lowpass_renormalize=lowpass_renormalize,
-                sine_kernel=sine_kernel,
-                set_aggregation=set_aggregation,
-                existing_weights=other_ws,
-                candidate_weight=cand_w,
-            )[0]
-        )
-        per_note.append(d)
-    per_note_arr = np.asarray(per_note, dtype=np.float64)
-
-    agg = str(chord_aggregation).strip().lower()
-    if agg == "sum":
-        return float(np.sum(per_note_arr))
-    if agg == "mean":
-        return float(np.mean(per_note_arr))
-    if agg == "rms":
-        return float(np.sqrt(np.mean(per_note_arr * per_note_arr)))
-    raise ValueError("chord_aggregation must be 'sum', 'mean', or 'rms'")
-
-
-def chord_partial_dissonance_matrix(
-    chord_freqs_hz: Sequence[float],
-    overtone_weights: np.ndarray,
-    include_subharmonics: bool = False,
-    subharmonic_weights: np.ndarray | None = None,
-    peak_semitones_c2: float = 1.00,
-    peak_semitones_c6: float = 1.00,
-    fall_to_zero_semitones_c2: float = 12.0,
-    fall_to_zero_semitones_c6: float = 12.0,
-    decay_db_per_oct_c2: float = 20.0,
-    decay_db_per_oct_c6: float = 20.0,
-    height_c2: float = 1.0,
-    height_c6: float = 1.0,
-    lowpass_cutoff_hz: float = 20000.0,
-    lowpass_slope_db_per_oct: float = 0.0,
-    lowpass_renormalize: bool = True,
-    sine_kernel: Literal["linear", "exponential"] = "linear",
-    set_aggregation: Literal["mean", "sum", "max", "rms"] = "mean",
-    extension_freq_hz: float | None = None,
-    extension_weight: float = 1.0,
-) -> np.ndarray:
-    """Per-note/per-overtone dissonance heatmap for a chord.
-
-    Returns an array shaped (n_overtones, n_notes). Each entry corresponds to the
-    weighted roughness contributed by *that* partial (note i, harmonic k) against
-    the rest of the chord.
-
-    Weighting includes:
-    - overtone weights (including optional low-pass + optional per-note renormalization)
-    - extension weighting (pairs involving the extension note are scaled)
-
-    Aggregation uses the same semantics as the chord objective:
-        - set_aggregation='mean': averages contributions against all other chord notes
-    - set_aggregation='max': takes the worst (maximum) contribution against any other note
-      (still summed/maxed across the other note's harmonics).
-    """
-
-    freqs = np.asarray([float(f) for f in chord_freqs_hz], dtype=np.float64)
-    n_notes = int(freqs.size)
-    if n_notes == 0:
-        return np.zeros((int(np.asarray(overtone_weights).size), 0), dtype=np.float64)
-
-    w_base = np.asarray(overtone_weights, dtype=np.float64)
-    w_base = np.clip(w_base, 0.0, None)
-    if float(np.sum(w_base)) <= 1e-12 and w_base.size > 0:
-        w_base = w_base.copy()
-        w_base[0] = 1.0
-
-    n_over = int(w_base.size)
-    if n_over <= 0:
-        return np.zeros((0, n_notes), dtype=np.float64)
-
-    use_sub = bool(include_subharmonics) and n_over >= 2
-    mult_h = np.arange(1, n_over + 1, dtype=np.float64)
-    if use_sub:
-        mult_s = 1.0 / np.arange(2, n_over + 1, dtype=np.float64)
-        mult = np.concatenate([mult_h, mult_s])
-
-        if subharmonic_weights is None:
-            w_sub = w_base[1:]
-        else:
-            ws = np.asarray(subharmonic_weights, dtype=np.float64)
-            ws = np.clip(ws, 0.0, None)
-            if ws.size == n_over:
-                w_sub = ws[1:]
-            elif ws.size == (n_over - 1):
-                w_sub = ws
-            else:
-                w_sub = w_base[1:]
-
-        w_full = np.concatenate([w_base, w_sub])
-    else:
-        mult = mult_h
-        w_full = w_base
-
-    partial_freqs = freqs[:, None] * mult[None, :]
-
-    # Per-note harmonic weights (after low-pass), optionally renormalized per note.
-    g = _lowpass_gain(partial_freqs, cutoff_hz=lowpass_cutoff_hz, slope_db_per_oct=lowpass_slope_db_per_oct)
-    w_note_raw = g * w_full[None, :]
-    if bool(lowpass_renormalize):
-        w_note = _normalize_weights_last_dim(w_note_raw)
-    else:
-        w_note = w_note_raw
-
-    ext = float(extension_freq_hz) if extension_freq_hz is not None else None
-    ext_w = float(extension_weight)
-
-    def _is_ext(f0: float) -> bool:
-        if ext is None:
-            return False
-        return bool(np.isclose(float(f0), ext, rtol=1e-9, atol=1e-6))
-
-    note_weights = np.array([ext_w if _is_ext(float(f)) else 1.0 for f in freqs], dtype=np.float64)
-
-    mode = str(set_aggregation).strip().lower()
-    if mode == "sum":
-        mode = "mean"
-    if mode not in ("mean", "max", "rms"):
-        raise ValueError("set_aggregation must be 'mean', 'max', or 'rms'")
-
-    n_partials = int(w_full.size)
-    out = np.zeros((n_notes, n_partials), dtype=np.float64)
-    for i in range(n_notes):
-        if mode == "rms":
-            acc_sum_sq = np.zeros((n_over,), dtype=np.float64)
-            acc_count = 0
-        elif mode == "mean":
-            acc = np.zeros((n_over,), dtype=np.float64)
-            acc_count = 0
-        else:
-            acc = np.zeros((n_over,), dtype=np.float64)
-        for j in range(n_notes):
-            if j == i:
-                continue
-
-            # Kernel for all harmonic pairs between note i and j.
-            f_i = partial_freqs[i][:, None]  # (P,1)
-            f_j = partial_freqs[j][None, :]  # (1,P)
-            base = sine_dissonance(
-                f_i,
-                f_j,
-                peak_semitones_c2=peak_semitones_c2,
-                peak_semitones_c6=peak_semitones_c6,
-                fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-                fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-                decay_db_per_oct_c2=decay_db_per_oct_c2,
-                decay_db_per_oct_c6=decay_db_per_oct_c6,
-                height_c2=height_c2,
-                height_c6=height_c6,
-                sine_kernel=sine_kernel,
-            )
-
-            w_outer = (w_note[i][:, None] * w_note[j][None, :])
-            pair = (w_outer * base)  # (P,P)
-
-            pair_scale = note_weights[i] * note_weights[j]
-            if mode == "rms":
-                v = pair_scale * pair.sum(axis=1)
-                acc_sum_sq = acc_sum_sq + (v * v)
-                acc_count += 1
-            elif mode == "mean":
-                acc = acc + pair_scale * pair.sum(axis=1)
-                acc_count += 1
-            else:
-                acc = np.maximum(acc, pair_scale * pair.max(axis=1))
-
-        if mode == "rms":
-            denom = float(acc_count) if acc_count > 0 else 1.0
-            out[i] = np.sqrt(acc_sum_sq / denom)
-        elif mode == "mean":
-            denom = float(acc_count) if acc_count > 0 else 1.0
-            out[i] = acc / denom
-        else:
-            out[i] = acc
-
-    # Return as (P, N)
-    return out.T
-
-
-def chord_pairwise_dissonance_matrix(
-    chord_freqs_hz: Sequence[float],
-    overtone_weights: np.ndarray,
-    include_subharmonics: bool = False,
-    subharmonic_weights: np.ndarray | None = None,
-    peak_semitones_c2: float = 1.00,
-    peak_semitones_c6: float = 1.00,
-    fall_to_zero_semitones_c2: float = 12.0,
-    fall_to_zero_semitones_c6: float = 12.0,
-    decay_db_per_oct_c2: float = 20.0,
-    decay_db_per_oct_c6: float = 20.0,
-    height_c2: float = 1.0,
-    height_c6: float = 1.0,
-    lowpass_cutoff_hz: float = 20000.0,
-    lowpass_slope_db_per_oct: float = 0.0,
-    lowpass_renormalize: bool = True,
-    sine_kernel: Literal["linear", "exponential"] = "linear",
-    extension_freq_hz: float | None = None,
-    extension_weight: float = 1.0,
-) -> np.ndarray:
-    """Pairwise note-vs-note dissonance matrix for a chord.
-
-    Returns an array shaped (n_notes, n_notes) where entry (i,j) is the
-    overtone-weighted roughness between note i and note j (summing over all
-    harmonic pairs), including low-pass shaping and extension weighting.
-
-    Diagonal is 0.
-    """
-
-    freqs = np.asarray([float(f) for f in chord_freqs_hz], dtype=np.float64)
-    n = int(freqs.size)
-    if n == 0:
-        return np.zeros((0, 0), dtype=np.float64)
-
-    ext = float(extension_freq_hz) if extension_freq_hz is not None else None
-    ext_w = float(extension_weight)
-
-    def _is_ext(f0: float) -> bool:
-        if ext is None:
-            return False
-        return bool(np.isclose(float(f0), ext, rtol=1e-9, atol=1e-6))
-
-    note_weights = np.array([ext_w if _is_ext(float(f)) else 1.0 for f in freqs], dtype=np.float64)
-
-    M = np.zeros((n, n), dtype=np.float64)
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = float(
-                overtone_dissonance(
-                    freqs[i],
-                    freqs[j],
-                    overtone_weights,
-                    include_subharmonics=include_subharmonics,
-                    subharmonic_weights=subharmonic_weights,
-                    peak_semitones_c2=peak_semitones_c2,
-                    peak_semitones_c6=peak_semitones_c6,
-                    fall_to_zero_semitones_c2=fall_to_zero_semitones_c2,
-                    fall_to_zero_semitones_c6=fall_to_zero_semitones_c6,
-                    decay_db_per_oct_c2=decay_db_per_oct_c2,
-                    decay_db_per_oct_c6=decay_db_per_oct_c6,
-                    height_c2=height_c2,
-                    height_c6=height_c6,
-                    sine_kernel=sine_kernel,
-                    lowpass_cutoff_hz=lowpass_cutoff_hz,
-                    lowpass_slope_db_per_oct=lowpass_slope_db_per_oct,
-                    lowpass_renormalize=lowpass_renormalize,
-                )
-            )
-            d = d * float(note_weights[i]) * float(note_weights[j])
-            M[i, j] = d
-            M[j, i] = d
-
-    return M
-
 def select_chord_midis_greedy_harmonic_subharmonic(
     root_note: str,
     extension_note: str,
@@ -1031,10 +701,14 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     chosen_freqs: list[float] = [float(root_freq)]
     chosen_midis_int: list[int] = [int(root_midi)]
     same_root_ext = bool(np.isclose(ext_midi_val, float(root_midi), rtol=0.0, atol=1e-9))
-    if not same_root_ext:
+    ext_w = float(extension_weight)
+    
+    # Only add extension note if it's different from root AND has non-zero weight
+    include_extension = not same_root_ext and ext_w > 1e-6
+    if include_extension:
         chosen_freqs.append(float(ext_freq))
         chosen_midis_int.append(int(ext_midi_int))
-    ext_w = float(extension_weight)
+    
     if same_root_ext:
         ext_w = 1.0
 
@@ -1089,12 +763,13 @@ def select_chord_midis_greedy_harmonic_subharmonic(
         return keep
 
     def _weights_for_existing(existing_freqs_hz: Sequence[float]) -> list[float]:
-        # Convention: first is always root, second is extension if present.
-        if same_root_ext:
-            return [1.0] + [1.0] * max(0, len(existing_freqs_hz) - 1)
+        # Convention: first is always root, second is extension if extension is included.
+        if same_root_ext or not include_extension:
+            # No separate extension note in the chord
+            return [1.0] * len(existing_freqs_hz)
         if len(existing_freqs_hz) >= 2:
             return [1.0, ext_w] + [1.0] * max(0, len(existing_freqs_hz) - 2)
-        return [1.0]
+        return [1.0] * len(existing_freqs_hz)
 
     def _candidate_objective(
         cand_freqs_hz: np.ndarray,
@@ -1135,7 +810,10 @@ def select_chord_midis_greedy_harmonic_subharmonic(
         m = _freqs_to_midis(np.asarray([float(freq_hz)], dtype=np.float64))
         return int(round(float(m[0])))
 
-    def _generate_candidates(existing_freqs_hz: Sequence[float]) -> tuple[np.ndarray, np.ndarray | None]:
+    def _generate_candidates(
+        existing_freqs_hz: Sequence[float],
+        quantize: bool = False,
+    ) -> np.ndarray:
         cand_freqs: list[float] = []
         for f0 in existing_freqs_hz:
             f0 = float(f0)
@@ -1146,86 +824,38 @@ def select_chord_midis_greedy_harmonic_subharmonic(
                 cand_freqs.append(f0 / float(k))
 
         if not cand_freqs:
-            return np.zeros((0,), dtype=np.float64), None
+            return np.zeros((0,), dtype=np.float64)
 
         cand_freqs_arr = np.asarray(cand_freqs, dtype=np.float64)
         cand_freqs_arr = cand_freqs_arr[np.isfinite(cand_freqs_arr)]
         cand_freqs_arr = cand_freqs_arr[(cand_freqs_arr > 0.0) & (cand_freqs_arr >= (min_freq - 1e-12)) & (cand_freqs_arr <= (max_freq + 1e-12))]
         if cand_freqs_arr.size == 0:
-            return np.zeros((0,), dtype=np.float64), None
+            return np.zeros((0,), dtype=np.float64)
 
         keep = _exclude_nearby_freqs_mask(cand_freqs_arr, chosen_freqs_hz=existing_freqs_hz, radius_semitones=0.25)
         candidate_freqs = cand_freqs_arr[keep]
         if candidate_freqs.size:
             candidate_freqs = np.unique(candidate_freqs)
         if candidate_freqs.size == 0:
-            return np.zeros((0,), dtype=np.float64), None
+            return np.zeros((0,), dtype=np.float64)
 
-        if not snap:
-            return candidate_freqs, None
-
-        # Snap mode: quantize to semitones and keep MIDI array for exclusion.
+        if not quantize:
+            return candidate_freqs
+        
+        # Quantize to MIDI and deduplicate before evaluation
         candidate_midis = np.unique(np.round(_freqs_to_midis(candidate_freqs)))
+        
+        # Exclude MIDI notes already in the chord
+        exclude_midis = _freqs_to_midis(np.asarray(existing_freqs_hz, dtype=np.float64))
+        exclude_arr = np.asarray(exclude_midis, dtype=np.float64)
+        candidate_midis = candidate_midis[~np.isin(candidate_midis, exclude_arr)]
+    
         if candidate_midis.size == 0:
-            return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+            return np.zeros((0,), dtype=np.float64)
+        
+        # Convert back to frequencies for evaluation
+        return midi_to_frequency_continuous(candidate_midis, a4_hz=a4_hz)
 
-        candidate_midis = candidate_midis[(candidate_midis >= float(min_midi) - 1e-9) & (candidate_midis <= float(max_midi) + 1e-9)]
-        if candidate_midis.size == 0:
-            return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
-
-        candidate_freqs = midi_to_frequency_continuous(candidate_midis, a4_hz=a4_hz)
-        return np.asarray(candidate_freqs, dtype=np.float64), np.asarray(candidate_midis, dtype=np.float64)
-
-    def _carry_over_from_prev(prev_midis: Sequence[float]) -> list[float]:
-        try:
-            pm = np.asarray(list(prev_midis), dtype=np.float64)
-        except Exception:
-            return []
-        pm = pm[np.isfinite(pm)]
-        if pm.size == 0:
-            return []
-
-        pf = midi_to_frequency_continuous(pm, a4_hz=a4_hz)
-        pf = np.asarray(pf, dtype=np.float64)
-        pf = pf[np.isfinite(pf)]
-        pf = pf[(pf > 0.0) & (pf >= (min_freq - 1e-12)) & (pf <= (max_freq + 1e-12))]
-        if pf.size == 0:
-            return []
-
-        # Exclude anything too close to the required root/extension.
-        keep = _exclude_nearby_freqs_mask(pf, chosen_freqs_hz=chosen_freqs, radius_semitones=0.25)
-        pf = pf[keep]
-        if pf.size == 0:
-            return []
-
-        pf = np.unique(pf)
-        pf = np.sort(pf)
-
-        carried = [float(x) for x in pf.tolist()]
-
-        # Exclude the *previous* step's root/extension if provided, so we are truly
-        # taking the old chord and swapping in the new root+extension.
-        prev_exclude: list[float] = []
-        try:
-            if prev_root_note:
-                prev_exclude.append(float(midi_to_frequency(note_to_midi(str(prev_root_note)), a4_hz=a4_hz)))
-        except Exception:
-            pass
-        try:
-            if prev_extension_midi is not None:
-                prev_exclude.append(float(float(a4_hz) * (2.0 ** ((float(prev_extension_midi) - 69.0) / 12.0))))
-        except Exception:
-            pass
-
-        if prev_exclude:
-            keep_prev = _exclude_nearby_freqs_mask(
-                np.asarray(carried, dtype=np.float64),
-                chosen_freqs_hz=prev_exclude,
-                radius_semitones=0.25,
-            )
-            carried = [float(x) for x in np.asarray(carried, dtype=np.float64)[keep_prev].tolist()]
-
-        return carried
 
     # If voice leading is enabled and we have a previous chord, build the chord
     # incrementally from the old chord:
@@ -1234,69 +864,55 @@ def select_chord_midis_greedy_harmonic_subharmonic(
     #   with a better candidate given the notes chosen so far.
     base_count = len(chosen_freqs)
     if vl_strength > 0.0 and prev_chord_midis is not None:
-        carried = _carry_over_from_prev(prev_chord_midis)
-        carried = [float(f) for f in carried]
+        # carried = _carry_over_from_prev(prev_chord_midis)
+        # carried = [float(f) for f in carried]
+        if len(prev_chord_midis) > 0:
+            carried = midi_to_frequency_continuous(np.array(prev_chord_midis))
+        else: 
+            carried = None
 
         # Processing order: start with the most dissonant carried-over note (against
-        # the chord so far: root+extension), then proceed in that sorted order.
+        # the previous chord + new root and extension, then proceed in that sorted order.
         # Tie-breaker: lower frequency first for determinism.
-        if carried:
+        if len(prev_chord_midis) > 0:
             contrib: list[tuple[float, float]] = []
+            mixed_chord = list(carried) + chosen_freqs
             for f in carried:
-                d = float(_candidate_objective(np.asarray([float(f)], dtype=np.float64), chosen_freqs)[0])
+                d = float(_candidate_objective(np.asarray([float(f)], dtype=np.float64), mixed_chord)[0])
                 contrib.append((d, float(f)))
             contrib.sort(key=lambda t: (-t[0], t[1]))
             carried = [float(f) for _, f in contrib]
 
         # Add up to n_additional voices from the previous chord, one-by-one.
-        for f in carried[: max(0, int(n_additional))]:
-            # Add this voice as-is.
-            chosen_freqs.append(float(f))
-            if snap:
-                chosen_midis_int.append(_freq_to_midi_int(float(f)))
+        while len(chosen_freqs) < 2 + int(n_additional) and carried:
+            f = carried.pop(0)
+            if f in chosen_freqs:
+                continue
 
-            # Now allow *this* voice to change (or stay) given the notes chosen so far.
-            idx = len(chosen_freqs) - 1
-            old_f = float(chosen_freqs[idx])
-            others = [float(chosen_freqs[j]) for j in range(len(chosen_freqs)) if j != idx]
-
-            cand_freqs, cand_midis = _generate_candidates(others)
+            # Generate candidates, excluding MIDI notes already used by others
+              
+            cand_freqs = _generate_candidates(carried, quantize=snap)
 
             # Always include the current note as a candidate, and apply a
             # (1 - vl_strength) discount to *its dissonance term*.
             if cand_freqs.size:
                 cand_freqs_all = np.concatenate([
-                    np.asarray([old_f], dtype=np.float64),
+                    np.asarray([f], dtype=np.float64),
                     np.asarray(cand_freqs, dtype=np.float64),
                 ])
-                cand_midis_all = None
-                if snap and cand_midis is not None:
-                    cand_midis_all = np.concatenate([
-                        np.asarray([float(_freq_to_midi_int(old_f))], dtype=np.float64),
-                        np.asarray(cand_midis, dtype=np.float64),
-                    ])
             else:
-                cand_freqs_all = np.asarray([old_f], dtype=np.float64)
-                cand_midis_all = None
-                if snap:
-                    cand_midis_all = np.asarray([float(_freq_to_midi_int(old_f))], dtype=np.float64)
-
-            if snap and cand_midis_all is not None:
-                used = [_freq_to_midi_int(float(x)) for x in others]
-                used_arr = np.asarray(used, dtype=np.float64)
-                keep_mask = ~np.isin(np.round(cand_midis_all), np.round(used_arr))
-                # Ensure the current note (first element) is always present.
-                keep_mask[0] = True
-                cand_freqs_all = cand_freqs_all[keep_mask]
-                cand_midis_all = cand_midis_all[keep_mask]
-
+                cand_freqs_all = np.asarray([f], dtype=np.float64)
+               
+            #dedup candidates that are exactly the same frequency (e.g. from different relations)
+            cand_freqs_all = np.unique(cand_freqs_all)
             candidates_evaluated += int(np.asarray(cand_freqs_all).size)
 
             # Compute objective components so we can discount only the dissonance
             # term for the current note.
+            mixed_chord = chosen_freqs + carried
             diss = dissonance_to_set(
                 cand_freqs_all,
-                others,
+                mixed_chord,
                 overtone_weights,
                 include_subharmonics=include_subharmonics,
                 subharmonic_weights=subharmonic_weights,
@@ -1314,12 +930,15 @@ def select_chord_midis_greedy_harmonic_subharmonic(
                 sine_kernel=sine_kernel,
                 set_aggregation=set_aggregation,
                 candidate_fundamental_only=bool(candidate_fundamental_only),
-                existing_weights=_weights_for_existing(others),
+                existing_weights=_weights_for_existing(chosen_freqs) + [vl_strength] * len(carried),
             )
             # Discount dissonance for the current note (index 0).
-            if diss.size:
-                diss = np.asarray(diss, dtype=np.float64)
-                diss[0] = diss[0] * (1.0 - float(vl_strength))
+            # if diss.size:
+            #     diss = np.asarray(diss, dtype=np.float64)
+            #     if sine_kernel == "exponential":
+            #         diss[0] = diss[0] * (1.0 - float(vl_strength))
+            #     else:
+            #         diss[0] = max(0,diss[0] - float(vl_strength))
 
             D = diss + _boundary_penalty_freqs(
                 np.asarray(cand_freqs_all, dtype=np.float64),
@@ -1329,81 +948,52 @@ def select_chord_midis_greedy_harmonic_subharmonic(
                 above_extension_db_per_oct=above_extension_penalty_db_per_oct,
             )
 
+            # Add the selected candidate (which may be the original note if it's still best) to the chord, and proceed to the next carried note.
             best_i = int(np.argmin(D))
-            # If best_i==0, keep the existing note.
-            if best_i != 0:
-                chosen_freqs[idx] = float(cand_freqs_all[best_i])
-                if snap:
-                    chosen_midis_int[idx] = _freq_to_midi_int(float(chosen_freqs[idx]))
+            
+            if snap:
+                #quantize the chosen frequency to MIDI and add to chord if not already present
+                chosen_midi_int = _freq_to_midi_int(float(cand_freqs_all[best_i]))
+                if chosen_midi_int not in chosen_midis_int:
+                    chosen_midis_int.append(chosen_midi_int)
+                    chosen_freqs.append(float(cand_freqs_all[best_i]))
+            else:
+                if float(cand_freqs_all[best_i]) not in chosen_freqs:
+                    chosen_freqs.append(float(cand_freqs_all[best_i]))
+                
 
     # Add any remaining voices using the original greedy growth rule.
-    n_existing_additional = max(0, len(chosen_freqs) - base_count)
-    n_to_add = max(0, int(n_additional) - int(n_existing_additional))
+    n_existing_additional = max(0, len(chosen_freqs))
+    n_to_add = max(0, int(n_additional) - int(n_existing_additional) +2)
 
     for _ in range(int(n_to_add)):
         # Generate candidate fundamentals from harmonic/subharmonic relations.
-        cand_freqs: list[float] = []
-        for f0 in chosen_freqs:
-            f0 = float(f0)
-            if not np.isfinite(f0) or f0 <= 0.0:
-                continue
-
-            for k in range(2, K + 1):
-                cand_freqs.append(f0 * float(k))
-                cand_freqs.append(f0 / float(k))
-
-        if not cand_freqs:
-            raise RuntimeError("No harmonic/subharmonic candidates generated")
-
-        cand_freqs_arr = np.asarray(cand_freqs, dtype=np.float64)
-        cand_freqs_arr = cand_freqs_arr[np.isfinite(cand_freqs_arr)]
-        cand_freqs_arr = cand_freqs_arr[(cand_freqs_arr > 0.0) & (cand_freqs_arr >= (min_freq - 1e-12)) & (cand_freqs_arr <= (max_freq + 1e-12))]
-
-        if cand_freqs_arr.size == 0:
-            raise RuntimeError("No harmonic/subharmonic candidates within range")
-
-        # Common pipeline (both modes): exclude anything within 0.25 semitones
-        # of existing chosen notes, operating purely in frequency domain.
-        keep = _exclude_nearby_freqs_mask(cand_freqs_arr, chosen_freqs_hz=chosen_freqs, radius_semitones=0.25)
-        candidate_freqs = cand_freqs_arr[keep]
-
-        # De-dup exact duplicate frequencies (no rounding/quantization).
-        if candidate_freqs.size:
-            candidate_freqs = np.unique(candidate_freqs)
-
+        # In snap mode, quantize and deduplicate before evaluation
+        candidate_freqs = _generate_candidates(
+            chosen_freqs,
+            quantize=snap,
+        )
+        
         if candidate_freqs.size == 0:
-            raise RuntimeError("No candidates after excluding nearby notes")
-
-        if snap:
-            # Only difference vs microtonal: quantize surviving candidates to semitones.
-            candidate_midis = np.unique(np.round(_freqs_to_midis(candidate_freqs)))
-            if chosen_midis_int:
-                candidate_midis = candidate_midis[~np.isin(candidate_midis, np.asarray(chosen_midis_int, dtype=np.float64))]
-
-            candidate_midis = candidate_midis[(candidate_midis >= float(min_midi) - 1e-9) & (candidate_midis <= float(max_midi) + 1e-9)]
-            if candidate_midis.size == 0:
-                raise RuntimeError("No candidates within MIDI range after snapping")
-
-            candidate_freqs = midi_to_frequency_continuous(candidate_midis, a4_hz=a4_hz)
-
-        candidates_evaluated += int(np.asarray(candidate_freqs).size)
+            raise RuntimeError("No harmonic/subharmonic candidates generated")
+        
+        candidates_evaluated += int(candidate_freqs.size)
 
         D = _candidate_objective(candidate_freqs, chosen_freqs)
 
         best_idx = int(np.argmin(D))
         chosen_freqs.append(float(candidate_freqs[best_idx]))
         if snap:
-            # candidate_midis exists only in snap mode.
-            chosen_midis_int.append(int(np.round(float(candidate_midis[best_idx]))))
+            chosen_midis_int.append(_freq_to_midi_int(float(candidate_freqs[best_idx])))
 
     if snap:
-        out_midis = sorted([float(m) for m in chosen_midis_int])
+        out_midis = ([float(m) for m in chosen_midis_int])
         if return_stats:
             return out_midis, ChordSearchStats(candidates_evaluated=int(candidates_evaluated))
         return out_midis
 
     # Microtonal: return as (possibly fractional) midis.
-    out_midis = sorted([float(69.0 + 12.0 * np.log2(float(f) / float(a4_hz))) for f in chosen_freqs])
+    out_midis = ([float(69.0 + 12.0 * np.log2(float(f) / float(a4_hz))) for f in chosen_freqs])
     if return_stats:
         return out_midis, ChordSearchStats(candidates_evaluated=int(candidates_evaluated))
     return out_midis
