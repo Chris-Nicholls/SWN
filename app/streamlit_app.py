@@ -13,11 +13,13 @@ import json
 
 from chord_model import (
     curve_for_fixed_chord,
+    get_scale_mask,
     make_note_list,
     midi_to_frequency,
     midi_to_note_microtonal,
     midi_to_note,
     note_to_midi,
+    SCALE_NAMES,
     select_chord_freqs_greedy_harmonic_subharmonic,
 )
 
@@ -97,6 +99,9 @@ def _init_session_defaults(settings: dict[str, Any]) -> None:
         "height_c6": 1.0,
         "below_root_penalty_db_per_oct": 1.0,
         "above_extension_penalty_db_per_oct": 1.0,
+        "scale_name": "Chromatic",
+        "scale_key": "C",
+        "scale_penalty": 0.0,
 
         # Sequencer
         "sequencer_run": False,
@@ -160,6 +165,9 @@ def _persist_settings() -> None:
         "height_c6",
         "below_root_penalty_db_per_oct",
         "above_extension_penalty_db_per_oct",
+        "scale_name",
+        "scale_key",
+        "scale_penalty",
 
         # Sequencer
         "sequencer_run",
@@ -681,6 +689,38 @@ with st.sidebar:
         help="Adds an extra penalty for candidate notes above the extension, increasing linearly with distance (in octaves). 0 disables.",
     )
 
+    st.subheader("Scale Constraint")
+    
+    PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    
+    col_scale, col_key = st.columns(2)
+    with col_scale:
+        scale_name = st.selectbox(
+            "Scale",
+            options=SCALE_NAMES,
+            index=SCALE_NAMES.index(st.session_state.get("scale_name", "Chromatic")),
+            key="scale_name",
+            help="Select a scale to constrain chord notes. Notes outside the scale receive a dissonance penalty.",
+        )
+    
+    with col_key:
+        scale_key = st.selectbox(
+            "Key",
+            options=PITCH_CLASSES,
+            index=PITCH_CLASSES.index(st.session_state.get("scale_key", "C")),
+            key="scale_key",
+            help="Root note of the scale (e.g., 'G' for G Major or G Minor).",
+        )
+    
+    scale_penalty = st.slider(
+        "Out-of-scale penalty",
+        min_value=0.0,
+        max_value=2.0,
+        step=0.05,
+        key="scale_penalty",
+        help="Dissonance penalty added to candidates not in the selected scale. 0 = no constraint (chromatic). Higher values make out-of-scale notes less likely.",
+    )
+
 def _get_weights(n: int, include_subharmonics: bool) -> tuple[np.ndarray, np.ndarray | None]:
     st.sidebar.caption("Overtone weights are per-overtone amplitudes")
 
@@ -1135,6 +1175,8 @@ def _select_freqs_hz() -> list[float]:
         sine_kernel=sine_kernel,
         below_root_penalty_db_per_oct=below_root_penalty_db_per_oct,
         above_extension_penalty_db_per_oct=above_extension_penalty_db_per_oct,
+        scale_mask=get_scale_mask(scale_name, scale_key),
+        scale_penalty=scale_penalty,
         search_n_harmonics=int(search_n_harmonics),
         prev_chord_freqs_hz=prev_freqs,
         prev_chord_weight=prev_weight,

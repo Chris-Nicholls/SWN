@@ -130,6 +130,7 @@ enum MuteNoteKeyStates {
 #define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float) + sizeof(float)*2)  // pregain + resonator envelope
 #define FW_UNISON_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(uint8_t)*NUM_CHANNELS)
 #define FW_V2X2_EQ_PARAMS_SIZE (sizeof(uint16_t) * 6)  // 6 EQ slider values
+#define FW_CHORD_WEIGHTS_SIZE (sizeof(float) * 7)  // 7 overtone weights for chord generation
 
 // Soft clip pregain constants
 #define DEFAULT_SOFT_CLIP_PREGAIN 0.05f
@@ -236,7 +237,10 @@ typedef struct o_params{
 	// EQ settings (v2.x2)
 	uint16_t	eq_slider_values[6];				// EQ slider positions (2048 = flat)
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE];
+	// Chord generation overtone weights (v2.x4)
+	float		chord_overtone_weights[7];			// Weights for fundamental + 6 overtones (0.0 to 1.0)
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE];
 } o_params;
 
 

@@ -22,6 +22,56 @@ NOTE_TO_SEMITONE = {
 }
 SEMITONE_TO_NOTE = {v: k for k, v in NOTE_TO_SEMITONE.items()}
 
+# Scale masks: 12-bit mask where bit N = 1 means semitone N is in scale (C=0, C#=1, etc.)
+# Scales are defined relative to the root note C; they rotate based on actual root.
+SCALE_MASKS = {
+    "Chromatic": 0xFFF,           # All 12 notes
+    "Major": 0b101010110101,       # C D E F G A B = 0,2,4,5,7,9,11
+    "Natural Minor": 0b010110101101,  # C D Eb F G Ab Bb = 0,2,3,5,7,8,10
+    "Harmonic Minor": 0b100110101101, # C D Eb F G Ab B = 0,2,3,5,7,8,11
+    "Melodic Minor": 0b101010101101,  # C D Eb F G A B = 0,2,3,5,7,9,11
+    "Dorian": 0b010110101101,      # Same as natural minor relative to different root
+    "Phrygian": 0b010101101011,    # C Db Eb F G Ab Bb = 0,1,3,5,7,8,10
+    "Lydian": 0b101011010101,      # C D E F# G A B = 0,2,4,6,7,9,11
+    "Mixolydian": 0b011010110101,  # C D E F G A Bb = 0,2,4,5,7,9,10
+    "Locrian": 0b010101101011,     # C Db Eb F Gb Ab Bb = 0,1,3,5,6,8,10
+    "Pentatonic Major": 0b001010010101,  # C D E G A = 0,2,4,7,9
+    "Pentatonic Minor": 0b010010101001,  # C Eb F G Bb = 0,3,5,7,10
+    "Blues": 0b010011101001,       # C Eb F F# G Bb = 0,3,5,6,7,10
+    "Whole Tone": 0b010101010101,  # C D E F# G# A# = 0,2,4,6,8,10
+    "Diminished (HW)": 0b011011011011,  # Half-whole: 0,1,3,4,6,7,9,10
+    "Diminished (WH)": 0b110110110110,  # Whole-half: 0,2,3,5,6,8,9,11
+}
+
+SCALE_NAMES = list(SCALE_MASKS.keys())
+
+
+def get_scale_mask(scale_name: str, root_note: str = "C") -> int:
+    """Get the 12-bit scale mask for a given scale, rotated to the specified root."""
+    base_mask = SCALE_MASKS.get(scale_name, 0xFFF)
+    if base_mask == 0xFFF:
+        return base_mask  # Chromatic doesn't need rotation
+    
+    # Get root offset (how many semitones to rotate)
+    root_pitch = root_note.rstrip("0123456789")  # Strip octave number if present
+    root_offset = NOTE_TO_SEMITONE.get(root_pitch, 0)
+    
+    if root_offset == 0:
+        return base_mask
+    
+    # Rotate the mask: shift left by root_offset, wrap around
+    rotated = ((base_mask << root_offset) | (base_mask >> (12 - root_offset))) & 0xFFF
+    return rotated
+
+
+def is_in_scale(freq_hz: float, scale_mask: int, a4_hz: float = 440.0) -> bool:
+    """Check if a frequency falls on a scale degree."""
+    if scale_mask == 0xFFF:
+        return True  # Chromatic - all notes in scale
+    midi = 69.0 + 12.0 * np.log2(max(freq_hz, 1e-12) / a4_hz)
+    semitone_class = int(round(midi)) % 12
+    return bool((scale_mask >> semitone_class) & 1)
+
 def note_to_midi(note: str) -> int:
     # Expected format like 'C#4' or 'B2'
     pitch = note[:-1]
@@ -215,6 +265,33 @@ def _ab_from_peak_semitones_and_decay_db_per_oct(
     k = np.exp(u)  # k = b/a
     b = k * a
     return a, b
+
+
+def _scale_penalty_freqs(
+    candidate_freqs_hz: np.ndarray,
+    scale_mask: int,
+    scale_penalty: float = 0.0,
+    a4_hz: float = 440.0,
+) -> np.ndarray:
+    """Additive penalty for notes not in the selected scale.
+    
+    Returns scale_penalty for each candidate not in the scale, 0 otherwise.
+    """
+    if scale_mask == 0xFFF or scale_penalty <= 0.0:
+        return np.zeros_like(candidate_freqs_hz)
+    
+    f = np.asarray(candidate_freqs_hz, dtype=np.float64)
+    f = np.maximum(f, 1e-12)
+    
+    # Convert to MIDI and get semitone class (0-11)
+    midi = 69.0 + 12.0 * np.log2(f / float(a4_hz))
+    semitone_class = np.round(midi).astype(np.int64) % 12
+    
+    # Check if each semitone is in the scale mask
+    in_scale = ((scale_mask >> semitone_class) & 1).astype(bool)
+    
+    # Apply penalty to notes NOT in scale
+    return np.where(in_scale, 0.0, float(scale_penalty))
 
 
 def _boundary_penalty_freqs(
@@ -591,6 +668,8 @@ def select_chord_freqs_greedy_harmonic_subharmonic(
     candidate_fundamental_only: bool = False,
     below_root_penalty_db_per_oct: float = 0.0,
     above_extension_penalty_db_per_oct: float = 0.0,
+    scale_mask: int = 0xFFF,
+    scale_penalty: float = 0.0,
     a4_hz: float = 440.0,
     quantize_to_semitones: bool = True,
     search_n_harmonics: int = 16,
@@ -746,6 +825,11 @@ def select_chord_freqs_greedy_harmonic_subharmonic(
             extension_freq_hz=ext_freq,
             below_root_db_per_oct=below_root_penalty_db_per_oct,
             above_extension_db_per_oct=above_extension_penalty_db_per_oct,
+        ) + _scale_penalty_freqs(
+            np.asarray(cand_freqs_hz, dtype=np.float64),
+            scale_mask=scale_mask,
+            scale_penalty=scale_penalty,
+            a4_hz=a4_hz,
         )
 
     def _candidate_objective(
@@ -899,7 +983,19 @@ def select_chord_freqs_greedy_harmonic_subharmonic(
 
         D = _candidate_objective(candidate_freqs, chosen_freqs)
 
-        best_idx = int(np.argmin(D))
+        # Tie-breaking: among candidates with equal (within epsilon) dissonance,
+        # prefer the one with lowest frequency (matches C firmware behavior)
+        min_D = float(np.min(D))
+        epsilon = 1e-4
+        tie_mask = D <= (min_D + epsilon)
+        tied_indices = np.where(tie_mask)[0]
+        if tied_indices.size == 1:
+            best_idx = int(tied_indices[0])
+        else:
+            # Among tied candidates, pick lowest frequency
+            tied_freqs = candidate_freqs[tied_indices]
+            best_tied_idx = int(np.argmin(tied_freqs))
+            best_idx = int(tied_indices[best_tied_idx])
         if snap:
             chosen_midi_int = _freq_to_midi_int(float(candidate_freqs[best_idx]))
             _append_snapped_midi(chosen_midi_int)

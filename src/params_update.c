@@ -46,6 +46,7 @@
 #include "math_util.h"
 #include "params_wt_browse.h"
 #include "quantz_scales.h"
+#include "chord_gen.h"
 #include "wavetable_recording.h"
 #include "wavetable_editing.h"
 #include "oscillator.h"
@@ -254,6 +255,16 @@ void init_params(void){
 	for (i=0; i<(MAX_TOTAL_SPHERES/8); i++)
 		params.enabled_spheres[i]=0xFF;
 
+	// Chord overtone weights defaults 
+	params.chord_overtone_weights [0] = 1.0f;
+	params.chord_overtone_weights [1] = 0.3f;
+	params.chord_overtone_weights [2] = 0.75f;
+	params.chord_overtone_weights [3] = 0.2f;
+	params.chord_overtone_weights [4] = 0.5f;
+	params.chord_overtone_weights [5] = 0.1f;
+	params.chord_overtone_weights [6] = 0.1f;
+	
+
 }
 
 
@@ -339,6 +350,10 @@ void init_param_object(o_params *t_params){
 	for (chan = 0; chan < 6; chan++)
 		t_params->eq_slider_values[chan] = 2048;  // 50% = flat
 
+	// Chord overtone weights defaults (all 1.0)
+	for (chan = 0; chan < 7; chan++)
+		t_params->chord_overtone_weights[chan] = 1.0f;
+
 	// Unison defaults
 	for (chan=0; chan<NUM_CHANNELS; chan++) {
 		t_params->unison_spread_amt[chan] = 0.2f; // Slight detune by default
@@ -370,6 +385,19 @@ void init_calc_params(void)
 	calc_params.button_safe_release[0] = 0;
 	calc_params.button_safe_release[1] = 0;
 }
+
+static volatile uint8_t chord_mode_active = 0;
+static volatile float chord_freqs[NUM_CHANNELS] = {0};
+
+// Hysteresis for chord recalculation to prevent jitter
+static float last_chord_seed_freqs[NUM_CHANNELS] = {0};
+static uint8_t last_chord_num_seeds = 0;
+static uint8_t last_chord_num_fills = 0;
+static uint32_t last_chord_recalc_time_ms = 0;
+
+// 1/4 tone hysteresis = 50 cents = 2^(0.5/12) ≈ 1.029
+#define CHORD_HYSTERESIS_RATIO 1.029f
+#define CHORD_RECALC_MIN_MS 100
 
 void set_pitch_params_to_ttone(void) {
 	for (uint8_t chan=0; chan<NUM_CHANNELS; chan++)
@@ -743,6 +771,14 @@ void read_level_and_pan(uint8_t chan)
 		{
 			params.eq_slider_values[chan] = (uint16_t)slider_val;
 			eq_update_from_sliders(params.eq_slider_values);
+			return;  // Don't process as level
+		}
+		
+		// Oct+slider: update chord overtone weight for this harmonic
+		if (rotary_pressed(rotm_OCT))
+		{
+			// Slider chan maps to overtone_weight[chan+1] (harmonics 2-7)
+			params.chord_overtone_weights[chan + 1] = slider_val / 4095.0f;
 			return;  // Don't process as level
 		}
 		
@@ -1231,6 +1267,12 @@ void update_pitch(uint8_t chan)
 		}
 	}
 
+	// Override with chord logic if active AND this channel is part of chord
+	// chord_freqs[chan] > 0.0f means this channel was assigned a chord frequency
+	if (chord_mode_active && chord_freqs[chan] > 0.0f) {
+		calc_params.qtz_freq[chan] = chord_freqs[chan];
+	}
+
 	// Apply fine-tuning
 	calc_params.pitch[chan] = _CLAMP_F(calc_params.qtz_freq[chan] * calc_params.tuning[chan], F_MIN_FREQ, F_MAX_FREQ);
 
@@ -1419,6 +1461,196 @@ void read_freq(void){
 
 	// }
 	update_spread_cv();
+
+	// Harmonic Chord Mode: active when ANY voice 1V/oct jack is plugged with switch in 1V/oct mode
+	// Plugged voices become "seed" notes, unplugged + unlocked voices are filled harmonically
+	// Sliders control overtone weights (h2-h7), fundamental weight is always 1.0
+	{
+		float seed_freqs[NUM_CHANNELS];
+		uint8_t voices_to_fill[NUM_CHANNELS];
+		uint8_t num_seeds = 0;
+		uint8_t num_to_fill = 0;
+		uint8_t microtonal = 0;
+		uint8_t first_seed_chan = 0;  // Track first seed for scale/transpose
+		
+		// Build into local temp array to avoid race with timer interrupt
+		float temp_chord_freqs[NUM_CHANNELS] = {0};
+		
+		// Scan all 6 voice 1V/oct jacks
+		for (uint8_t chan = 0; chan < NUM_CHANNELS; chan++) {
+			uint8_t jack_plugged = analog_jack_plugged(A_VOCT + chan);
+			uint8_t switch_voct = (params.voct_switch_state[chan] == SW_VOCT);
+			
+			if (jack_plugged && switch_voct) {
+				// This voice is a seed - get its frequency from the CV input
+				float cv_val = (params.indiv_scale[chan] != sclm_NONE) 
+					? analog[A_VOCT + chan].bracketed_val
+					: analog[A_VOCT + chan].lpf_val;
+				float voct_mult = calc_expo_pitch(A_VOCT + chan, cv_val);
+				
+				// Apply transposition and octave
+				float trans = calc_params.transposition[chan];
+				int16_t oct_clamped = _CLAMP_I16(params.oct[chan], MIN_OCT, MAX_OCT);
+				float oct_mult = (oct_clamped >= 0) ? (float)(1 << oct_clamped) : 1.0f / (float)(1 << (-oct_clamped));
+				
+				// Track first seed for scale constraint
+				if (num_seeds == 0) {
+					first_seed_chan = chan;
+				}
+				
+				seed_freqs[num_seeds++] = F_BASE_FREQ * trans * voct_mult * oct_mult;
+			}
+			else if (!jack_plugged && !params.osc_param_lock[chan] && switch_voct) {
+				// Unplugged, unlocked, and in 1V/oct mode - this voice should be filled
+				voices_to_fill[num_to_fill++] = chan;
+			}
+			
+			// Check if any voice uses unquantized mode
+			if (params.indiv_scale[chan] == sclm_NONE) {
+				microtonal = 1;
+			}
+		}
+		
+		// Chord mode is active if we have at least one seed AND at least one voice to fill
+		uint8_t temp_chord_mode_active = (num_seeds > 0 && num_to_fill > 0);
+		
+		// Hysteresis: check if we need to recalculate the chord
+		uint8_t needs_recalc = 0;
+		uint32_t now_ms = HAL_GetTick() / TICKS_PER_MS;
+		
+		if (temp_chord_mode_active) {
+			// Always recalculate if chord mode just became active
+			if (!chord_mode_active) {
+				needs_recalc = 1;
+			}
+			// Recalculate if number of seeds or fills changed
+			else if (num_seeds != last_chord_num_seeds || num_to_fill != last_chord_num_fills) {
+				needs_recalc = 1;
+			}
+			// Check if any seed frequency changed by more than 1/4 tone
+			else {
+				for (uint8_t i = 0; i < num_seeds; i++) {
+					float ratio = seed_freqs[i] / last_chord_seed_freqs[i];
+					if (ratio > CHORD_HYSTERESIS_RATIO || ratio < (1.0f / CHORD_HYSTERESIS_RATIO)) {
+						needs_recalc = 1;
+						break;
+					}
+				}
+			}
+			
+			// Enforce minimum time between recalculations (except for first calc)
+			if (needs_recalc && chord_mode_active && (now_ms - last_chord_recalc_time_ms) < CHORD_RECALC_MIN_MS) {
+				needs_recalc = 0;  // Too soon, skip this recalculation
+			}
+		}
+		
+		if (temp_chord_mode_active && needs_recalc) {
+			// Use stored overtone weights (edited via OCT+slider combo)
+			// params.chord_overtone_weights[0] is fundamental (always 1.0)
+			// params.chord_overtone_weights[1-6] are harmonics 2-7
+			
+			// Calculate dynamic frequency bounds from seeds
+			// min = 2 octaves below lowest seed, max = 1 octave above highest seed
+			// This 3-octave span guarantees at least 3 candidates per existing note
+			float min_seed = seed_freqs[0];
+			float max_seed = seed_freqs[0];
+			for (uint8_t i = 1; i < num_seeds; i++) {
+				if (seed_freqs[i] < min_seed) min_seed = seed_freqs[i];
+				if (seed_freqs[i] > max_seed) max_seed = seed_freqs[i];
+			}
+			float min_freq = min_seed / 4.0f;  // 2 octaves below lowest
+			float max_freq = max_seed * 2.0f;  // 1 octave above highest
+			
+			// Calculate scale mask based on first seed's scale and transpose
+			// If microtonal (unquantized) mode, skip scale constraint entirely
+			uint16_t scale_mask = SCALE_MASK_CHROMATIC;
+			if (!microtonal) {
+				int8_t key_semitones = (int8_t)(calc_params.transpose[0] % 12);
+				uint8_t chord_scale = params.indiv_scale[first_seed_chan];
+				scale_mask = get_scale_mask_for_swn_scale(chord_scale, key_semitones);
+			}
+			
+			// Generate chord frequencies for voices to fill
+			float fill_freqs[NUM_CHANNELS];
+			// Initialize with octaves of first seed as fallback
+			for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+				fill_freqs[i] = seed_freqs[0] * (float)(1 << (i % 3));  // seed, oct+1, oct+2
+			}
+			build_harmonic_chord(seed_freqs, num_seeds, voices_to_fill, num_to_fill, 
+			                      params.chord_overtone_weights, microtonal, min_freq, max_freq,
+			                      scale_mask, CHORD_SCALE_PENALTY_DEFAULT, fill_freqs);
+			
+			// Safety: ensure all fill frequencies are valid (non-zero positive)
+			for (uint8_t i = 0; i < num_to_fill; i++) {
+				if (fill_freqs[i] <= 0.0f) {
+					fill_freqs[i] = seed_freqs[0];  // Fallback to first seed
+				}
+			}
+			
+			// Sort ONLY the fill frequencies from low to high (seeds stay exactly as CV input)
+			for (uint8_t i = 0; i < num_to_fill - 1; i++) {
+				for (uint8_t j = 0; j < num_to_fill - 1 - i; j++) {
+					if (fill_freqs[j] > fill_freqs[j + 1]) {
+						float temp = fill_freqs[j];
+						fill_freqs[j] = fill_freqs[j + 1];
+						fill_freqs[j + 1] = temp;
+					}
+				}
+			}
+			
+			// Assign frequencies to temp array:
+			// - Seeds get their EXACT CV-derived frequency (no change)
+			// - Fills get the sorted fill frequencies, assigned to fill channels in order
+			uint8_t seed_idx = 0;
+			uint8_t fill_idx = 0;
+			for (uint8_t chan = 0; chan < NUM_CHANNELS; chan++) {
+				uint8_t jack_plugged = analog_jack_plugged(A_VOCT + chan);
+				uint8_t switch_voct = (params.voct_switch_state[chan] == SW_VOCT);
+				
+				if (jack_plugged && switch_voct) {
+					// Seed voice: use exact CV frequency
+					temp_chord_freqs[chan] = seed_freqs[seed_idx++];
+				}
+				else {
+					// Check if this is a fill voice
+					for (uint8_t f = 0; f < num_to_fill; f++) {
+						if (voices_to_fill[f] == chan) {
+							temp_chord_freqs[chan] = fill_freqs[fill_idx++];
+							break;
+						}
+					}
+				}
+			}
+			
+			// Update hysteresis tracking
+			for (uint8_t i = 0; i < num_seeds; i++) {
+				last_chord_seed_freqs[i] = seed_freqs[i];
+			}
+			last_chord_num_seeds = num_seeds;
+			last_chord_num_fills = num_to_fill;
+			last_chord_recalc_time_ms = now_ms;
+			
+			// Atomically copy new chord to shared volatile array
+			__disable_irq();
+			chord_mode_active = 1;
+			for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+				chord_freqs[i] = temp_chord_freqs[i];
+			}
+			__enable_irq();
+		}
+		else if (!temp_chord_mode_active) {
+			// Chord mode inactive - clear everything
+			__disable_irq();
+			chord_mode_active = 0;
+			for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+				chord_freqs[i] = 0;
+			}
+			__enable_irq();
+			last_chord_num_seeds = 0;
+			last_chord_num_fills = 0;
+		}
+		// else: chord mode active but hysteresis says don't recalculate - keep existing chord_freqs
+	}
 }
 
 
