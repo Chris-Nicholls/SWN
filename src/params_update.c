@@ -393,11 +393,9 @@ static volatile float chord_freqs[NUM_CHANNELS] = {0};
 static float last_chord_seed_freqs[NUM_CHANNELS] = {0};
 static uint8_t last_chord_num_seeds = 0;
 static uint8_t last_chord_num_fills = 0;
-static uint32_t last_chord_recalc_time_ms = 0;
 
 // 1/4 tone hysteresis = 50 cents = 2^(0.5/12) ≈ 1.029
 #define CHORD_HYSTERESIS_RATIO 1.029f
-#define CHORD_RECALC_MIN_MS 100
 
 void set_pitch_params_to_ttone(void) {
 	for (uint8_t chan=0; chan<NUM_CHANNELS; chan++)
@@ -1516,7 +1514,6 @@ void read_freq(void){
 		
 		// Hysteresis: check if we need to recalculate the chord
 		uint8_t needs_recalc = 0;
-		uint32_t now_ms = HAL_GetTick() / TICKS_PER_MS;
 		
 		if (temp_chord_mode_active) {
 			// Always recalculate if chord mode just became active
@@ -1536,11 +1533,6 @@ void read_freq(void){
 						break;
 					}
 				}
-			}
-			
-			// Enforce minimum time between recalculations (except for first calc)
-			if (needs_recalc && chord_mode_active && (now_ms - last_chord_recalc_time_ms) < CHORD_RECALC_MIN_MS) {
-				needs_recalc = 0;  // Too soon, skip this recalculation
 			}
 		}
 		
@@ -1578,6 +1570,7 @@ void read_freq(void){
 			}
 			build_harmonic_chord(seed_freqs, num_seeds, voices_to_fill, num_to_fill, 
 			                      params.chord_overtone_weights, microtonal, min_freq, max_freq,
+			                      max_seed, CHORD_ABOVE_EXT_PENALTY_DB_PER_OCT,
 			                      scale_mask, CHORD_SCALE_PENALTY_DEFAULT, fill_freqs);
 			
 			// Safety: ensure all fill frequencies are valid (non-zero positive)
@@ -1628,7 +1621,6 @@ void read_freq(void){
 			}
 			last_chord_num_seeds = num_seeds;
 			last_chord_num_fills = num_to_fill;
-			last_chord_recalc_time_ms = now_ms;
 			
 			// Atomically copy new chord to shared volatile array
 			__disable_irq();

@@ -6,8 +6,9 @@
 
 extern o_params params;
 
-// Forward declaration (defined later in this file)
+// Forward declarations (defined later in this file)
 static float freq_to_semitones(float freq);
+static inline float fast_log2f(float x);
 
 // ============================================================================
 // Scale Mask Utilities
@@ -75,6 +76,23 @@ static inline float calc_scale_penalty(float freq_hz, uint16_t scale_mask, float
     }
     
     return is_freq_in_scale(freq_hz, scale_mask) ? 0.0f : scale_penalty;
+}
+
+// Calculate boundary penalty for frequencies above extension
+// Matches Python _boundary_penalty_freqs() - penalty grows linearly with octaves above boundary
+// above_db_per_oct: penalty in dB/octave (e.g., 2.0 means +2dB penalty per octave above)
+static inline float calc_boundary_penalty(float freq_hz, float extension_freq_hz, float above_db_per_oct) {
+    if (above_db_per_oct <= 0.0f || freq_hz <= extension_freq_hz) {
+        return 0.0f;
+    }
+    
+    // Octaves above = log2(freq / extension)
+    float oct_above = fast_log2f(freq_hz / extension_freq_hz);
+    
+    // Slope = 10^(dB/20) - 1, matching Python implementation
+    float slope = powf(10.0f, above_db_per_oct / 20.0f) - 1.0f;
+    
+    return slope * oct_above;
 }
 
 // ============================================================================
@@ -417,6 +435,8 @@ void build_harmonic_chord(
     uint8_t microtonal,
     float min_freq_hz,
     float max_freq_hz,
+    float extension_freq_hz,
+    float above_ext_db_per_oct,
     uint16_t scale_mask,
     float scale_penalty,
     float *chord_out
@@ -575,6 +595,9 @@ void build_harmonic_chord(
             
             // Add scale penalty for out-of-scale candidates
             mean_diss += calc_scale_penalty(cand_freq, scale_mask, scale_penalty);
+            
+            // Add boundary penalty for candidates above extension frequency
+            mean_diss += calc_boundary_penalty(cand_freq, extension_freq_hz, above_ext_db_per_oct);
             
             // Prefer lower dissonance, tie-break by lower frequency (matches Python's np.argmin on sorted array)
             // Use epsilon for tie detection to handle float32 vs float64 precision differences

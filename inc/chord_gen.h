@@ -24,6 +24,10 @@
 // Default scale penalty (dissonance units added for out-of-scale notes)
 #define CHORD_SCALE_PENALTY_DEFAULT 0.5f
 
+// Boundary penalty: dissonance added for notes above extension (dB/octave)
+// Penalty slope = 10^(dB/20) - 1, applied per octave above boundary
+#define CHORD_ABOVE_EXT_PENALTY_DB_PER_OCT 2.0f
+
 // Rotate a 12-bit scale mask by semitones (positive = up from C)
 uint16_t rotate_scale_mask(uint16_t base_mask, int8_t semitones);
 
@@ -39,6 +43,8 @@ uint16_t get_scale_mask_for_swn_scale(uint8_t scale_num, int8_t key_semitones);
 // microtonal: if non-zero, don't quantize to semitones
 // min_freq_hz: minimum allowed frequency for candidates
 // max_freq_hz: maximum allowed frequency for candidates
+// extension_freq_hz: upper boundary for extension penalty (highest seed freq)
+// above_ext_db_per_oct: penalty in dB/octave for notes above extension
 // scale_mask: 12-bit mask of allowed scale degrees (0xFFF = chromatic/all notes)
 // scale_penalty: dissonance penalty added for out-of-scale candidates (0 = disabled)
 // chord_out: output array of frequencies for each voice to fill (same order as voices_to_fill)
@@ -51,6 +57,8 @@ void build_harmonic_chord(
     uint8_t microtonal,
     float min_freq_hz,
     float max_freq_hz,
+    float extension_freq_hz,
+    float above_ext_db_per_oct,
     uint16_t scale_mask,
     float scale_penalty,
     float *chord_out
