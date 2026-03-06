@@ -149,6 +149,8 @@ void enter_wtediting(void)
 		set_params_for_editing();
 	}
 
+	if (params.wt_bank[0] >= 100 && params.wt_bank[0] < (100+NUM_PLAITS_SPHERES)) return; // Cannot edit Plaits spheres
+
 	spherebuf.data_source = SPHERESRC_SPHERE;
 	init_wt_edit_settings();
 	copy_current_sphere_to_recbuf(params.wt_bank[0]);

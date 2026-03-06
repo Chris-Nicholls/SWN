@@ -178,6 +178,8 @@ void save_sphere_to_flash(uint8_t wt_num, enum SphereTypes sphere_type, int16_t 
 
 void save_unformatted_sphere_to_flash(uint8_t wt_num, enum SphereTypes sphere_type, o_waveform sphere_data[WT_DIM_SIZE][WT_DIM_SIZE][WT_DIM_SIZE]){
 
+	if (wt_num >= 100 && wt_num < (100+NUM_PLAITS_SPHERES)) return; // Protect Plaits range
+
 	uint32_t sz;
 	uint32_t base_addr = get_wt_addr(wt_num);
 	uint8_t dim1 = 0;
@@ -355,4 +357,3 @@ uint8_t all_factory_spheres_present(void){
 	}
 	return 1;
 }
-

@@ -350,8 +350,16 @@ void CODEC_SAI_RX_DMA_IRQHandler(void)
 		src = (int32_t *)(rx_buffer_half);
 		dst = (int32_t *)(tx_buffer_half);
 
+		// Measure CPU Load in Audio Callback
+		uint32_t audio_start = DWT->CYCCNT;
+
 		//process_audio_block_codec(src, dst);
 		audio_callback(src, dst);
+
+		uint32_t audio_duration = DWT->CYCCNT - audio_start;
+		// Update global cycles for LED display (1.0ms = 216,000 cycles)
+		extern uint32_t cpu_usage_cycles;
+		cpu_usage_cycles = (cpu_usage_cycles * 7 + audio_duration) >> 3;
 
 		CODEC_SAI_RX_DMA->CODEC_SAI_RX_DMA_IFCR = CODEC_SAI_RX_DMA_FLAG_TC;
 	}
@@ -363,8 +371,15 @@ void CODEC_SAI_RX_DMA_IRQHandler(void)
 		src = (int32_t *)(rx_buffer_start);
 		dst = (int32_t *)(tx_buffer_start);
 
+		// Measure CPU Load in Audio Callback
+		uint32_t audio_start = DWT->CYCCNT;
+
 		//process_audio_block_codec(src, dst);
 		audio_callback(src, dst);
+
+		uint32_t audio_duration = DWT->CYCCNT - audio_start;
+		extern uint32_t cpu_usage_cycles;
+		cpu_usage_cycles = (cpu_usage_cycles * 7 + audio_duration) >> 3;
 
 		CODEC_SAI_RX_DMA->CODEC_SAI_RX_DMA_IFCR = CODEC_SAI_RX_DMA_FLAG_HT;
 	}
@@ -377,4 +392,3 @@ void CODEC_SAI_RX_DMA_IRQHandler(void)
 // {
 // 	HAL_DMA_IRQHandler(&hdma_sai2b_tx);
 // }
-

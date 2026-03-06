@@ -84,6 +84,9 @@ typedef struct o_wt_osc{
 	float						unison_spread_amt	[NUM_CHANNELS];
 	uint8_t						unison_voice_count	[NUM_CHANNELS];
 
+	// Plaits state
+	float						plaits_last_cv_input[NUM_CHANNELS];
+	uint32_t					plaits_refractory_timer[NUM_CHANNELS];
 	
 } o_wt_osc;
 

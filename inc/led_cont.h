@@ -55,6 +55,7 @@ enum ongoingDisplays{
 	ONGOING_DISPLAY_SELBUS,
 	ONGOING_DISPLAY_UNISON,
 	ONGOING_DISPLAY_SOFT_CLIP,
+	ONGOING_DISPLAY_CPU_USAGE,
 
 	NUM_ONGOING_DISPLAYS
 };
@@ -140,6 +141,8 @@ void 		start_ongoing_display_sphere_play_export(void);
 void 		start_ongoing_display_selbus(void);
 void		start_ongoing_display_soft_clip(void);
 void 		start_ongoing_display_unison(void);
+void 		start_ongoing_display_cpu_usage(void);
+void 		display_cpu_usage(void);
 void 		stop_all_displays(void);
 
 

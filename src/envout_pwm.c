@@ -30,6 +30,7 @@
 #include "globals.h"
 #include "params_update.h"
 #include "params_lfo.h"
+#include "plaits_shim.h"
 #include "led_cont.h"
 #include "gpio_pins.h"
 #include "timekeeper.h"
@@ -171,11 +172,31 @@ void update_envout_pwm(void){
 	static float vca_trig[NUM_CHANNELS] = {1.0};
 	const uint8_t GATE_THRESHOLD = 127;
 
-	update_lfos();
+	extern float lfo_phase_multiplier;
+	update_lfos(lfo_phase_multiplier);
 
 	for (j=0;j<NUM_CHANNELS;j++)
 	{		
 		envout_buf = lfos.preload[j];
+
+		// GLOBAL TRIGGER DETECTION (Runs for all modes)
+		// Detects rising edge crossing 50%
+		if (envout_buf <= PWM_MAX/2)
+			lfos.trig_armed[j]=1;
+		
+		else if ((envout_buf > PWM_MAX/2) && lfos.trig_armed[j])
+		{
+			lfos.trigout[j] = 1;
+			// vca_trig is used for TRIG mode's envelope generation
+			vca_trig[j] = F_TRIGVCADUR;
+			
+			lfos.trig_armed[j]++;
+			if (lfos.trig_armed[j] == TRIG_DURATION)
+				lfos.trig_armed[j] = 0;
+		}
+		else{
+			lfos.trigout[j]=0;
+		}
 
 		if (ui_mode == WTRECORDING && j>=3)
 		{ 						
@@ -193,22 +214,8 @@ void update_envout_pwm(void){
 				
 		else if (lfos.mode[j] == lfot_TRIG)
 		{
-			if (envout_buf <= PWM_MAX/2)
-				lfos.trig_armed[j]=1;
-			
-			else if ((envout_buf > PWM_MAX/2) && lfos.trig_armed[j])
-			{
-				lfos.trigout[j] = 1;
-				vca_trig[j] = F_TRIGVCADUR;
-				
-				lfos.trig_armed[j]++;
-				if (lfos.trig_armed[j] == TRIG_DURATION)
-					lfos.trig_armed[j] = 0;
-			}
-
-			else{
-				lfos.trigout[j]=0;
-			}
+			// Trigger logic handled globally above.
+			// Just handle the VCA envelope generation for the specific TRIG mode output behavior.
 									
 			if(vca_trig[j]>0) 	vca_trig[j]--;
 			else				vca_trig[j]=0;
@@ -217,6 +224,15 @@ void update_envout_pwm(void){
 			lfos.out_lpf[j] += LFO_TRIG_LPF * vca_trig[j] / F_TRIGVCADUR;			
 							
 			lfos.envout_pwm[j] = lfos.trigout[j] * PWM_MAX * lfos.gain[j];
+		} 
+
+		else if (lfos.mode[j] == lfot_LPG)
+		{
+			float env_val = Shim_LPG_GetEnvelope(j);
+			
+			// Apply LFO Gain scaling if desired (usually 1.0 in LPG mode, but lfos.gain handles level)
+			lfos.envout_pwm[j] = (uint32_t)(env_val * PWM_MAX * lfos.gain[j]);
+			lfos.out_lpf[j] = env_val * lfos.gain[j];
 		} 
 
 		else //lfos.mode[j] == lfot_SHAPE

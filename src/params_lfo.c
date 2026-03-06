@@ -60,12 +60,12 @@ uint16_t divmult_cv;
 
 // const float LFO_PHASE_TABLE[LFO_PHASE_TABLELEN]	= {0, 1.0/8.0, 1.0/7.0, 1.0/6.0, 1.0/5.0, 1.0/4.0, 2.0/7.0, 1.0/3.0, 3.0/8.0, 2.0/5.0, 3.0/7.0, 1.0/2.0, 4.0/7.0, 3.0/5.0, 5.0/8.0, 2.0/3.0, 5.0/7.0, 3.0/4.0, 4.0/5.0, 5.0/6.0, 6.0/7.0, 7.0/8.0};
 
-void update_lfos(void)
+void update_lfos(float multiplier)
 {
 	update_lfo_params();
 	read_ext_clk();
 	update_lfo_calcs();
-	update_lfo_wt_pos();
+	update_lfo_wt_pos(multiplier);
 	update_lfo_sample();
 }
 
@@ -271,7 +271,13 @@ void update_lfo_sample(void)
 				rh0 				= (uint16_t)pos_in_table;
 				rh1 				= (rh0 + 1) & (LFO_TABLELEN-1); //if rh0==255, then rh1 should = 0. (255+1)&(255) == 0x100 & 0x0FF == 0
 				lfo_frac 			= pos_in_table - (float)rh0;
-				lfos.preload[chan] 	= (((lfo_wavetable[lfos.shape[chan]][rh0] * (1.0-lfo_frac) + lfo_wavetable[lfos.shape[chan]][rh1] * lfo_frac))) ;
+
+				// In LPG Mode, we use lfos.shape for DECAY control.
+				// We must NOT let it change the Wavetable used for clocking, otherwise timing acts weird.
+				// Force Shape 0 (Sine/Standard) for stable triggering in LPG Mode.
+				uint8_t shape_idx = (lfos.mode[chan] == lfot_LPG) ? 0 : lfos.shape[chan];
+				
+				lfos.preload[chan] 	= (((lfo_wavetable[shape_idx][rh0] * (1.0-lfo_frac) + lfo_wavetable[shape_idx][rh1] * lfo_frac))) ;
 			}
 			else
 				lfos.preload[chan] 	= 0;	
@@ -466,8 +472,16 @@ void read_lfo_speed(int16_t turn)
 
 		flag_all_lfos_recalc();
 
+
 		if (lfos.use_ext_clock)
 			stage_resync_lfos();
+
+		// LPG OVERRIDE: Global Decay
+		for (i=0; i<NUM_CHANNELS; i++) {
+			if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
+				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
+			}
+		}
 
 	}
 
@@ -485,6 +499,11 @@ void read_lfo_speed(int16_t turn)
 				if (lfos.use_ext_clock) {
 					stage_resync(i);
 				}
+			}
+			
+			// LPG OVERRIDE: Individual Decay
+			if (button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
+				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
 			}
 		}
 	}
@@ -525,6 +544,29 @@ void read_LFO_phase(void)
 	enc_turn  = pop_encoder_q(sec_LFOPHASE);
 	enc_pressed = rotary_pressed(rotm_LFOSHAPE);
 	fine = switch_pressed(FINE_BUTTON);
+
+	if (enc_turn && rotary_pressed(rotm_LFOSPEED))
+	{
+		// LPG COLOR CONTROL (Speed + Phase)
+		// GLOBAL
+		if (macro_states.all_af_buttons_released){
+			for (i = 0; i < NUM_CHANNELS; i++){
+				if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
+					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
+				}
+			}
+		} 
+		// INDIVIDUAL
+		else {
+			for (i = 0; i < NUM_CHANNELS; i++){
+				if(button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
+					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
+					calc_params.already_handled_button[i] = 1;
+				}
+			}
+		}
+		return; // Don't process phase change
+	}
 
 	if (enc_pressed)
 	{
@@ -605,6 +647,9 @@ void read_LFO_shape(void)
 				if (!lfos.locked[i])
 				{
 					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					if (lfos.mode[i] == lfot_LPG)
+						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;								
 				}
@@ -617,6 +662,9 @@ void read_LFO_shape(void)
 				if(button_pressed(i))
 				{
 					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					if (lfos.mode[i] == lfot_LPG)
+						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+
 					calc_params.already_handled_button[i] = 1; 
 
 					led_cont.ongoing_lfoshape[i] = 1;

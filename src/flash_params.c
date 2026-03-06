@@ -139,13 +139,13 @@ void range_check_calibration_values(void)
 	//Todo, this should be moved to a check_valid_pwm_led_adjustments(), giving staging_system_cal as an argument
 	for (i=0;i<NUM_LED_IDs;i++)
 	{
-		if (isnan(staging_system_calibrations->rgbled_adjustments[i][c_RED]) || staging_system_calibrations->rgbled_adjustments[i][c_RED] > 5.5 || staging_system_calibrations->rgbled_adjustments[i][c_RED] < 0.05)
+		if (staging_system_calibrations->rgbled_adjustments[i][c_RED] > 5.5 || staging_system_calibrations->rgbled_adjustments[i][c_RED] < 0.05)
 			staging_system_calibrations->rgbled_adjustments[i][c_RED] = 1.0;
 
-		if (isnan(staging_system_calibrations->rgbled_adjustments[i][c_GREEN]) || staging_system_calibrations->rgbled_adjustments[i][c_GREEN] > 5.5 || staging_system_calibrations->rgbled_adjustments[i][c_GREEN] < 0.05)
+		if (staging_system_calibrations->rgbled_adjustments[i][c_GREEN] > 5.5 || staging_system_calibrations->rgbled_adjustments[i][c_GREEN] < 0.05)
 			staging_system_calibrations->rgbled_adjustments[i][c_GREEN] = 1.0;
 
-		if (isnan(staging_system_calibrations->rgbled_adjustments[i][c_BLUE]) || staging_system_calibrations->rgbled_adjustments[i][c_BLUE] > 5.5 || staging_system_calibrations->rgbled_adjustments[i][c_BLUE] < 0.05)
+		if (staging_system_calibrations->rgbled_adjustments[i][c_BLUE] > 5.5 || staging_system_calibrations->rgbled_adjustments[i][c_BLUE] < 0.05)
 			staging_system_calibrations->rgbled_adjustments[i][c_BLUE] = 1.0;
 
 	}
@@ -264,4 +264,3 @@ void copy_system_values_into_staging(void)
 	for (i=0;i<sizeof(o_systemSettings);i++)
 		*dst++ = *src++;
 }
-

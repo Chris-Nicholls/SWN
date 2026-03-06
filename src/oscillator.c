@@ -28,6 +28,8 @@
 
 #include "oscillator.h"
 #include "arm_math.h"
+#include "params_lfo.h"
+#include "plaits_shim.h"
 #include "globals.h"
 #include "analog_conditioning.h"
 #include "audio_util.h"
@@ -57,15 +59,16 @@ extern o_params 		params;
 extern o_calc_params	calc_params;
 extern o_systemSettings	system_settings;
 extern o_led_cont 		led_cont;
+extern o_analog 		analog[NUM_ANALOG_ELEMENTS];
 
 extern o_recbuf 		recbuf;
-o_wt_osc				wt_osc;
+__attribute__((aligned(32))) o_wt_osc	wt_osc;
 uint8_t 				audio_in_gate;
 
 //Private:
 void update_sphere_wt(void);
 
-void process_audio_block_codec(int32_t *src, int32_t *dst)
+void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict__ dst)
 {
 	int16_t 		i_sample;
 	uint8_t 		chan;
@@ -84,7 +87,7 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	static float 	prev_pan[NUM_CHANNELS] = {0.f};
 	float 			interpolated_pan, pan_inc;
 
-	float 			audio_in_sum;
+	float 			audio_in_sum = 0.0f;
 	static uint8_t	audio_gate_ctr=0;
 
 	float			read_pos;
@@ -92,26 +95,24 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 	// Resonator mode variables
 	uint8_t			resonator_mode_active;
 	float			audio_in_buffer[MONO_BUFSZ];
+	
+	// Plaits/Wavetable accumulation buffer
+	float			temp_buffer[MONO_BUFSZ];
+	uint8_t			is_plaits_mode;
 
-	// DEBUG0_ON;
-
-	//Todo: use a separate callback for WTTTONE mode, and another one for WTRECORDING/WTMONITORING/WTREC_WAIT
 	oscout_status = 	((ui_mode != WTRECORDING) && (ui_mode != WTMONITORING) && (ui_mode != WTREC_WAIT));
 	audiomon_status = 	((ui_mode == WTRECORDING) || (ui_mode == WTMONITORING) || (ui_mode == WTREC_WAIT) || (ui_mode == WTTTONE));
 
-	// Check if resonator mode is active (waveform input jack plugged)
 	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && oscout_status;
 
-	// Pre-read audio input buffer for resonator mode (needed for all channels)
-	if (resonator_mode_active) {
-		int32_t *src_temp = src;
-		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-			audio_in_buffer[i_sample] = (float)convert_s24_to_s32(*src_temp++) / 8388608.0f;
-			src_temp++;  // ignore right channel (not connected in hardware)
-		}
+	// 1. UNIFIED INPUT READING
+	int32_t *src_ptr = src;
+	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+		audio_in_sample = convert_s24_to_s32(*src_ptr++);
+		src_ptr++; // ignore right
+		audio_in_buffer[i_sample] = (float)audio_in_sample / 8388608.0f;
+		if (audio_in_sample < 0) audio_in_sum += (float)audio_in_sample;
 	}
-
-	audio_in_sum = 0;
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
@@ -124,25 +125,51 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 		interpolated_pan = prev_pan[chan];
 		prev_pan[chan] = params.pan[chan];
 
-		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
-		{
-			// ---------------------------------------------------------
-			// UNISON VOICE LOOP
-			// ---------------------------------------------------------
-			
-			smpl = 0.0f;
-			uint8_t voice_count = params.unison_voice_count[chan];
-			float voice_scale = 1.0f;
-			
-			// Simple gain compensation: 1/sqrt(N) to maintain roughly constant power
-			if (voice_count > 1) {
-				voice_scale = 1.0f / sqrtf((float)voice_count);
-				// boost slightly as sqrt can result in perceived volume drop
-				voice_scale *= 1.2f; 
+		is_plaits_mode = (params.wt_bank[chan] >= PLAITS_SPHERE_OFFSET);
+
+		// 1. Unified Trigger Detection & Policy (Refractory Lockout)
+		if (wt_osc.plaits_refractory_timer[chan] > 0) {
+			if (wt_osc.plaits_refractory_timer[chan] > MONO_BUFSZ) 
+				wt_osc.plaits_refractory_timer[chan] -= MONO_BUFSZ;
+			else 
+				wt_osc.plaits_refractory_timer[chan] = 0;
+		}
+
+		uint8_t jack_is_plugged = (analog[A_VOCT + chan].plug_sense_switch.pressed == PRESSED);
+		float vca_cv = (analog[A_VOCT + chan].polarity == AP_UNIPOLAR) ? (analog[A_VOCT + chan].lpf_val / 4095.0f) : (_CLAMP_F(analog[A_VOCT + chan].lpf_val - 2048.0f, 0.0f, 2048.0f) / 2048.0f);
+		
+		uint8_t jack_trig = 0;
+		if (vca_cv > 0.2f && wt_osc.plaits_last_cv_input[chan] <= 0.2f && wt_osc.plaits_refractory_timer[chan] == 0) {
+			jack_trig = 1;
+			wt_osc.plaits_refractory_timer[chan] = 480; // ~10ms refractory lockout
+		}
+		wt_osc.plaits_last_cv_input[chan] = vca_cv;
+
+		uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
+		
+		// Trigger Policy: Determine which sources are allowed based on LPG and Jack state
+		uint8_t allow_lfo_trig  = ( lpg_active && !jack_is_plugged);
+		uint8_t allow_jack_trig = jack_is_plugged && ( lpg_active || (params.voct_switch_state[chan] == SW_VCA));
+		uint8_t allow_note_trig = (!lpg_active &&  params.key_sw[chan] != ksw_MUTE);
+
+		uint8_t main_trigger = (allow_lfo_trig  && lfos.trigout[chan]) || 
+		                       (allow_jack_trig && jack_trig)          || 
+		                       (allow_note_trig && params.new_key[chan]);
+
+		if (is_plaits_mode) {
+			// --- PLAITS PATH ---
+			if (params.note_on[chan]) {
+				PlaitsParams p = params.plaits_params[chan];
+				p.trigger = (float)main_trigger;
+				Plaits_Render(chan, &p, temp_buffer, MONO_BUFSZ);
+			} else {
+				for(int k=0; k<MONO_BUFSZ; k++) temp_buffer[k] = 0.0f;
 			}
+		} else {
+			// --- WAVETABLE PATH ---
+			uint8_t voice_count = params.unison_voice_count[chan];
+			float voice_scale = (voice_count > 1) ? (1.2f / sqrtf((float)voice_count)) : 1.0f;
 
-
-			// Crossfade logic (update once per sample)
 			if (wt_osc.wt_xfade[chan] > 0.0f) {
 				wt_osc.wt_xfade[chan] -= XFADE_INC;
 				if (wt_osc.wt_xfade[chan] < 0.0f) wt_osc.wt_xfade[chan] = 0.0f;
@@ -157,157 +184,126 @@ void process_audio_block_codec(int32_t *src, int32_t *dst)
 			fade_gain_prev = wt_osc.wt_xfade[chan];
 			fade_gain_current = 1.0f - fade_gain_prev;
 
-			for (uint8_t v = 0; v < voice_count; v++) 
-			{
-				float voice_smpl = 0.0f;
-				
-				// Increment read head
-				wt_osc.wt_head_pos[chan][v] += wt_osc.wt_head_pos_inc[chan][v];
-				if (wt_osc.wt_head_pos[chan][v] >= WT_TABLELEN) wt_osc.wt_head_pos[chan][v] -= WT_TABLELEN;
-
-				// Calculate interpolation indices
-				read_pos = wt_osc.wt_head_pos[chan][v];
-				
-				wt_osc.rh0[chan][v] = (uint16_t)read_pos;
-				wt_osc.rh1[chan][v] = (wt_osc.rh0[chan][v] + 1) & (WT_TABLELEN - 1);
-				wt_osc.rhd[chan][v] = read_pos - (float)wt_osc.rh0[chan][v];
-				wt_osc.rhd_inv[chan][v] = 1.0f - wt_osc.rhd[chan][v];
-
-				// Read from wavetable (Crossfade between buffers)
-				float smpl_buff1 = wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan][v]] * wt_osc.rhd_inv[chan][v] + 
-								 wt_osc.mc[wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan][v]] * wt_osc.rhd[chan][v];
-
-				if (fade_gain_prev > 0.0f) {
-					float smpl_buff2 = wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh0[chan][v]] * wt_osc.rhd_inv[chan][v] + 
-									 wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][wt_osc.rh1[chan][v]] * wt_osc.rhd[chan][v];
-
-					voice_smpl = smpl_buff1 * fade_gain_current + smpl_buff2 * fade_gain_prev;
-				} else {
-					voice_smpl = smpl_buff1;
+			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+				float s = 0.0f;
+				for (uint8_t v = 0; v < voice_count; v++) {
+					wt_osc.wt_head_pos[chan][v] += wt_osc.wt_head_pos_inc[chan][v];
+					if (wt_osc.wt_head_pos[chan][v] >= WT_TABLELEN) wt_osc.wt_head_pos[chan][v] -= WT_TABLELEN;
+					read_pos = wt_osc.wt_head_pos[chan][v];
+					uint16_t rh0 = (uint16_t)read_pos;
+					uint16_t rh1 = (rh0 + 1) & (WT_TABLELEN - 1);
+					float rhd = read_pos - (float)rh0;
+					float smpl_v = wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0] * (1.0f - rhd) + wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1] * rhd;
+					if (fade_gain_prev > 0.0f) {
+						float smpl_v2 = wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][rh0] * (1.0f - rhd) + wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][rh1] * rhd;
+						s += smpl_v * fade_gain_current + smpl_v2 * fade_gain_prev;
+					} else {
+						s += smpl_v;
+					}
 				}
-				
-				smpl += voice_smpl;
+				temp_buffer[i_sample] = s * voice_scale;
 			}
+		}
+
+		// LPG Processing
+		if (lpg_active) {
+			float decay = params.plaits_params[chan].lpg_decay;
+			float color = params.plaits_params[chan].lpg_color;
 			
-			smpl *= voice_scale;
+			if (main_trigger) Shim_LPG_Trigger(chan);
+			Shim_LPG_Process(chan, temp_buffer, MONO_BUFSZ, decay, color);
+		}
 
-			// ---------------------------------------------------------
-
-			// Resonator mode: quadrature ring-modulation for phase-independent coherence
-			// (VCA is applied in read_vca_cv() based on coherence_env)
-			if (resonator_mode_active) {
-				// Compute 90-degree phase shifted oscillator sample (quadrature)
-				float read_pos_Q = read_pos + (WT_TABLELEN / 4);
-				while (read_pos_Q >= (float)WT_TABLELEN) read_pos_Q -= (float)WT_TABLELEN;
-				uint16_t rh0_Q = (uint16_t)(read_pos_Q);
+		// Pre-processing scaling/resonator
+		if (is_plaits_mode) {
+			arm_scale_f32(temp_buffer, 32768.0f, temp_buffer, MONO_BUFSZ);
+		} else if (resonator_mode_active) {
+			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+				float read_pos_Q = wt_osc.wt_head_pos[chan][0] + (WT_TABLELEN / 4);
+				if (read_pos_Q >= (float)WT_TABLELEN) read_pos_Q -= (float)WT_TABLELEN;
+				uint16_t rh0_Q = (uint16_t)read_pos_Q;
 				uint16_t rh1_Q = (rh0_Q + 1) & (WT_TABLELEN - 1);
-				float rhd_Q = read_pos_Q - (float)(rh0_Q);
-				float osc_Q = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0_Q] * (1.0f - rhd_Q)) +
-				              (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1_Q] * rhd_Q);
-
-				// Ring modulate both I (in-phase) and Q (quadrature) with input
-				float audio_norm = audio_in_buffer[i_sample];
-				float ring_mod_I = (smpl / 32768.0f) * audio_norm;
-				float ring_mod_Q = (osc_Q / 32768.0f) * audio_norm;
-
-				// Stage 1: Slow symmetric LPF extracts DC components
+				float rhd_Q = read_pos_Q - (float)rh0_Q;
+				float osc_Q = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0_Q] * (1.0f - rhd_Q)) + (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1_Q] * rhd_Q);
+				float ring_I = (temp_buffer[i_sample] / 32768.0f) * audio_in_buffer[i_sample];
+				float ring_Q = (osc_Q / 32768.0f) * audio_in_buffer[i_sample];
 				float dc_alpha = 100.0f / F_SAMPLERATE;
-				wt_osc.coherence_dc_I[chan] = dc_alpha * ring_mod_I + (1.0f - dc_alpha) * wt_osc.coherence_dc_I[chan];
-				wt_osc.coherence_dc_Q[chan] = dc_alpha * ring_mod_Q + (1.0f - dc_alpha) * wt_osc.coherence_dc_Q[chan];
-
-				// Compute phase-independent magnitude: sqrt(I² + Q²)
-				float dc_mag = sqrtf(wt_osc.coherence_dc_I[chan] * wt_osc.coherence_dc_I[chan] +
-				                     wt_osc.coherence_dc_Q[chan] * wt_osc.coherence_dc_Q[chan]);
-
-				// Stage 2: Fast attack / slow decay envelope on magnitude
-				float attack_alpha = params.resonator_attack_freq / F_SAMPLERATE;
-				float decay_alpha = params.resonator_decay_freq / F_SAMPLERATE;
-				if (dc_mag > wt_osc.coherence_env[chan]) {
-					wt_osc.coherence_env[chan] += attack_alpha * (dc_mag - wt_osc.coherence_env[chan]);
-				} else {
-					wt_osc.coherence_env[chan] += decay_alpha * (dc_mag - wt_osc.coherence_env[chan]);
-				}
+				wt_osc.coherence_dc_I[chan] = dc_alpha * ring_I + (1.0f - dc_alpha) * wt_osc.coherence_dc_I[chan];
+				wt_osc.coherence_dc_Q[chan] = dc_alpha * ring_Q + (1.0f - dc_alpha) * wt_osc.coherence_dc_Q[chan];
+				float dc_mag = sqrtf(wt_osc.coherence_dc_I[chan] * wt_osc.coherence_dc_I[chan] + wt_osc.coherence_dc_Q[chan] * wt_osc.coherence_dc_Q[chan]);
+				float env_alpha = (dc_mag > wt_osc.coherence_env[chan]) ? (params.resonator_attack_freq / F_SAMPLERATE) : (params.resonator_decay_freq / F_SAMPLERATE);
+				wt_osc.coherence_env[chan] += env_alpha * (dc_mag - wt_osc.coherence_env[chan]);
+				temp_buffer[i_sample] *= wt_osc.coherence_env[chan];
 			}
+		}
 
-			// Apply level after coherence calculation
-			smpl *= interpolated_level;
-			interpolated_level += level_inc;
+		// Optimized Mixing Loop: 4-sample blocks with vectorized math
+		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
+			float avg_level = interpolated_level + (level_inc * 1.5f); // Halfway through the 4-sample block
+			float avg_pan = interpolated_pan + (pan_inc * 1.5f);
+			
+			float32_t block[4];
+			float32_t pan_L[4];
+			float32_t pan_R[4];
 
-			output_buffer_evens[i_sample] += smpl * interpolated_pan;
-			output_buffer_odds[i_sample] += smpl * (1.f - interpolated_pan);
-			interpolated_pan += pan_inc;
+			arm_scale_f32(&temp_buffer[i_sample], avg_level, block, 4);
+			arm_scale_f32(block, avg_pan, pan_L, 4);
+			arm_scale_f32(block, 1.0f - avg_pan, pan_R, 4);
 
-			if (chan==5)
-			{
-				audio_in_sample = convert_s24_to_s32(*src++);
-				UNUSED(*src++);  // ignore right channel input (not connected in hardware)
-				
-				if (audio_in_sample<0)
-					audio_in_sum += audio_in_sample;
-			}
+			arm_add_f32(&output_buffer_evens[i_sample], pan_L, &output_buffer_evens[i_sample], 4);
+			arm_add_f32(&output_buffer_odds[i_sample], pan_R, &output_buffer_odds[i_sample], 4);
+
+			interpolated_level += level_inc * 4;
+			interpolated_pan += pan_inc * 4;
 		}
 	}
 
 	// Apply soft clipping to mixed output buffers
 	// Formula: out = tanh(x * pregain) / pregain
-	if (oscout_status) {
-		float pregain = params.soft_clip_pregain;
-		if (pregain < 0.05f) pregain = 0.05f; // Safety against div/0
+	// if (oscout_status) {
+	// 	float pregain = params.soft_clip_pregain;
+	// 	if (pregain < 0.05f) pregain = 0.05f; // Safety against div/0
 
-		// Non-linear compensation: 1.0 / sqrt(pregain)
-		// Maintains more volume when cranking saturation
-		float inv_pregain = 1.0f / sqrtf(pregain);
+	// 	// Non-linear compensation: 1.0 / sqrt(pregain)
+	// 	// Maintains more volume when cranking saturation
+	// 	float inv_pregain = 1.0f / sqrtf(pregain);
  
-		// 8388608 = 2^23 = max value for signed 24-bit audio
-		float scaler = 8388608.0f * 8.0f;
-		float inv_scaler = 1.0f / scaler;
+	// 	// 8388608 = 2^23 = max value for signed 24-bit audio
+	// 	float scaler = 8388608.0f * 8.0f;
+	// 	float inv_scaler = 1.0f / scaler;
 
-		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-			float in_even = output_buffer_evens[i_sample] * inv_scaler;
-			float in_odd = output_buffer_odds[i_sample] * inv_scaler;
+	// 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+	// 		float in_even = output_buffer_evens[i_sample] * inv_scaler;
+	// 		float in_odd = output_buffer_odds[i_sample] * inv_scaler;
 
-			output_buffer_evens[i_sample] = tanhf(in_even * pregain) * inv_pregain * scaler;
-			output_buffer_odds[i_sample] = tanhf(in_odd * pregain) * inv_pregain * scaler;
-		}
-	}
+	// 		output_buffer_evens[i_sample] = tanhf(in_even * pregain) * inv_pregain * scaler;
+	// 		output_buffer_odds[i_sample] = tanhf(in_odd * pregain) * inv_pregain * scaler;
+	// 	}
+	// }
 
 	// Apply EQ after soft clipping
-	eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
+	// eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
 	
-	// Write output samples with compression
+	// 4. FINAL OUTPUT COMPRESSION & GATE
 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
 	{
-		outL = 0;
-		outR = 0;
-		
+		outL = 0; outR = 0;
 		if (oscout_status) {
 			outL = (int32_t)(output_buffer_evens[i_sample] * system_settings.master_gain);
 			outR = (int32_t)(output_buffer_odds[i_sample] * system_settings.master_gain);
 		}
 		if (audiomon_status) {
-			// Read audio input for monitoring modes (already read in chan==5 loop but need to re-read)
-			audio_in_sample = convert_s24_to_s32(src[i_sample * 2]);
-			outL += audio_in_sample;
-			outR += audio_in_sample;
+			int32_t mon_smpl = (int32_t)(audio_in_buffer[i_sample] * 8388608.0f);
+			outL += mon_smpl;
+			outR += mon_smpl;
 		}
-
 		*dst++ = compress(outL);
 		*dst++ = compress(outR);
 	}
 
-	//Requires: Min 4V trigger, min 0.25V/ms rise time (@5V = 20ms, @8V = 32ms), 20ms off time between pulses
-	if (audio_in_sum < AUDIO_GATE_THRESHOLD)
-	{
-		if (++audio_gate_ctr >= AUDIO_GATE_DEBOUNCE_LENGTH)
-		{
-			audio_in_gate = 1;
-			audio_gate_ctr = 0;
-		}
-	}
-	else
-		audio_in_gate = 0;
-
-	// DEBUG0_OFF;
+	if (audio_in_sum < AUDIO_GATE_THRESHOLD) {
+		if (++audio_gate_ctr >= AUDIO_GATE_DEBOUNCE_LENGTH) { audio_in_gate = 1; audio_gate_ctr = 0; }
+	} else audio_in_gate = 0;
 }
 
 
@@ -380,5 +376,10 @@ void init_wt_osc(void) {
 		wt_osc.coherence_dc_I[i] = 0.0f;
 		wt_osc.coherence_dc_Q[i] = 0.0f;
 		wt_osc.coherence_env[i] = 0.0f;
+		wt_osc.plaits_last_cv_input[i] = 0.0f;
+		wt_osc.plaits_refractory_timer[i] = 0;
 	}
+
+	Plaits_Init();
+	Shim_LPG_Init();
 }

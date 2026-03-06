@@ -29,13 +29,13 @@
 #include "eq.h"
 #include "math.h"
 #include "math_util.h"
+#include "globals.h"
 
 // Global EQ state
 static EQState eq_state;
 
 // Constants
 #define PI 3.14159265358979323846f
-#define SAMPLE_RATE 44100.0f
 
 // ============================================================================
 // Biquad Coefficient Calculation Functions
@@ -52,7 +52,7 @@ static void calc_bypass(BiquadCoeffs *c) {
 
 // Calculate 2nd-order Butterworth highpass coefficients
 static void calc_highpass(BiquadCoeffs *c, float freq) {
-    float w0 = 2.0f * PI * freq / SAMPLE_RATE;
+    float w0 = 2.0f * PI * freq / SAMPLERATE;
     float cos_w0 = cosf(w0);
     float sin_w0 = sinf(w0);
     float alpha = sin_w0 / (2.0f * 0.7071067811865476f); // Q = sqrt(2)/2 for Butterworth
@@ -67,7 +67,7 @@ static void calc_highpass(BiquadCoeffs *c, float freq) {
 
 // Calculate 2nd-order Butterworth lowpass coefficients
 static void calc_lowpass(BiquadCoeffs *c, float freq) {
-    float w0 = 2.0f * PI * freq / SAMPLE_RATE;
+    float w0 = 2.0f * PI * freq / SAMPLERATE;
     float cos_w0 = cosf(w0);
     float sin_w0 = sinf(w0);
     float alpha = sin_w0 / (2.0f * 0.7071067811865476f); // Q = sqrt(2)/2 for Butterworth
@@ -89,7 +89,7 @@ static void calc_low_shelf(BiquadCoeffs *c, float freq, float gain_db) {
     }
     
     float A = powf(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * PI * freq / SAMPLE_RATE;
+    float w0 = 2.0f * PI * freq / SAMPLERATE;
     float cos_w0 = cosf(w0);
     float sin_w0 = sinf(w0);
     float alpha = sin_w0 / 2.0f * sqrtf((A + 1.0f/A) * (1.0f/0.9f - 1.0f) + 2.0f);
@@ -112,7 +112,7 @@ static void calc_high_shelf(BiquadCoeffs *c, float freq, float gain_db) {
     }
     
     float A = powf(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * PI * freq / SAMPLE_RATE;
+    float w0 = 2.0f * PI * freq / SAMPLERATE;
     float cos_w0 = cosf(w0);
     float sin_w0 = sinf(w0);
     float alpha = sin_w0 / 2.0f * sqrtf((A + 1.0f/A) * (1.0f/0.9f - 1.0f) + 2.0f);
@@ -136,7 +136,7 @@ static void calc_peaking(BiquadCoeffs *c, float freq, float gain_db, float Q) {
     }
     
     float A = powf(10.0f, gain_db / 40.0f);
-    float w0 = 2.0f * PI * freq / SAMPLE_RATE;
+    float w0 = 2.0f * PI * freq / SAMPLERATE;
     float cos_w0 = cosf(w0);
     float sin_w0 = sinf(w0);
     float alpha = sin_w0 / (2.0f * Q);

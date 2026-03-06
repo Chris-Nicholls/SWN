@@ -163,7 +163,7 @@ void update_wbrowse_step_pos(uint8_t chan)
 	float wrapped_step = _WRAP_F(params.wt_browse_step_pos_enc[chan], 0, 27);
 	float wrapped_dest = _WRAP_F(wbrowse_dest[chan], 0, 27);
 
-	if (fabs(wrapped_step - wrapped_dest)<0.0001) 
+	if (fabsf(wrapped_step - wrapped_dest)<0.0001) 
 	{
 		params.wt_browse_step_pos_enc[chan] = wbrowse_dest[chan];
 		return;

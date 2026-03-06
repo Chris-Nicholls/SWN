@@ -254,10 +254,29 @@ void update_rotary_presses(uint32_t elapsed_time){
 void update_flip_switches(void)
 {
 	uint8_t i;
+	uint16_t t;
+	static uint16_t switch_state_c_buf[NUM_SWITCHES] = {0xffff};
 
 	for (i = 0; i < NUM_SWITCHES; i++)
 	{
-		hwSwitch[i].pressed = read_switch_state(&hwSwitch[i]);
+		// Debounce logic:
+		// Shift in 0 if pressed (read_switch_state returns 1/true), 1 if released (read_switch_state returns 0/false)
+		// but using the 0xe000 mask technique from update_button_presses to check for 12 consecutive samples
+		
+		if (read_switch_state(&hwSwitch[i])) 	t = 0xe000; // Switch active -> shift in 0 (LSB of 0xe000 is 0)
+		else 									t = 0xe001; // Switch inactive -> shift in 1 (LSB of 0xe001 is 1)
+
+		switch_state_c_buf[i] = (switch_state_c_buf[i] << 1) | t;
+
+		// Default to RELEASED
+		hwSwitch[i].pressed = RELEASED;
+
+		// Check for pattern: 1110 0000 0000 0000 (0xe000)
+		// This means the last 13 samples were 0 (active)
+		if (switch_state_c_buf[i] == 0xe000)
+		{
+			hwSwitch[i].pressed = PRESSED;
+		}
 	}
 }
 

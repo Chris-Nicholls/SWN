@@ -198,8 +198,7 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 			update_preset_version(version, t_params, t_lfos);
 
 
-		if (isnan(t_params->soft_clip_pregain) || isinf(t_params->soft_clip_pregain) ||
-			t_params->soft_clip_pregain < MIN_SOFT_CLIP_PREGAIN || t_params->soft_clip_pregain > MAX_SOFT_CLIP_PREGAIN) {
+		if (t_params->soft_clip_pregain < MIN_SOFT_CLIP_PREGAIN || t_params->soft_clip_pregain > MAX_SOFT_CLIP_PREGAIN) {
 			t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 		}
 
@@ -225,7 +224,7 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 {
 	// v1.0 ('9'): Initialize enabled_spheres and pan
 	if (version < preset_signature_v1_2[2]) {
-		for (uint8_t i=0; i<MAX_TOTAL_SPHERES/8; i++)
+		for (uint8_t i=0; i<14; i++)
 			t_params->enabled_spheres[i]=0xFF;
 		for (uint8_t i=0; i<NUM_CHANNELS; i++)
 			t_params->pan[i] = default_pan(i);

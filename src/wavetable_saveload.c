@@ -48,22 +48,42 @@ extern o_calc_params calc_params;
 
 // Given a sphere index (the "nth" sphere), return the physical bank number (flash slot)
 //
+// Given a sphere index (the "nth" sphere), return the physical bank number (flash slot)
+//
+// 0..11  -> Factory 0..11
+// 12..35 -> Plaits (PLAITS_SPHERE_OFFSET) .. (PLAITS_SPHERE_OFFSET + NUM_PLAITS_SPHERES - 1)
+// 36..   -> User (NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES) .. (MAX_TOTAL_SPHERES - 1)
 uint8_t sphere_index_to_bank(uint8_t wtsel)
 {
 	uint8_t i;
-	uint8_t filled_sphere_count = 0;
+	uint8_t filled_user_count = 0;
+	uint8_t target_user_index;
 
-	for (i=0; i<MAX_TOTAL_SPHERES; i++)
+	// 1. Factory Spheres
+	if (wtsel < NUM_FACTORY_SPHERES) {
+		return wtsel;
+	}
+
+	// 2. Plaits (Virtual) Spheres
+	if (wtsel < (NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES)) {
+		return PLAITS_SPHERE_OFFSET + (wtsel - NUM_FACTORY_SPHERES);
+	}
+
+	// 3. User Spheres
+	target_user_index = wtsel - (NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES);
+
+	// Scan physical user slots (NUM_FACTORY_SPHERES to (PLAITS_SPHERE_OFFSET - 1))
+	for (i=NUM_FACTORY_SPHERES; i<PLAITS_SPHERE_OFFSET; i++)
 	{
 		if (is_sphere_filled(i) && is_sphere_enabled(i))
 		{
-			if (filled_sphere_count==wtsel)
+			if (filled_user_count == target_user_index)
 				return i;
-			else
-				filled_sphere_count++;
+			
+			filled_user_count++;
 		}
 	}
-	return 0; //error: not found, return fail-safe value
+	return 0; // Fail-safe
 }
 
 // Given a physical bank number (flash slot), return sphere index (the "nth" sphere) 
@@ -71,20 +91,29 @@ uint8_t sphere_index_to_bank(uint8_t wtsel)
 uint8_t bank_to_sphere_index(uint8_t wtbank)
 {
 	uint8_t i;
-	uint8_t filled_sphere_count = 0;
+	uint8_t filled_user_count = 0;
 
-	if (!is_sphere_filled(wtbank))
-		return 0; //error: bank is not filled, return fail-safe value
+	// 1. Factory
+	if (wtbank < NUM_FACTORY_SPHERES) {
+		return wtbank;
+	}
 
-	for (i=0; i<=wtbank; i++)
+	// 2. Plaits
+	if (wtbank >= PLAITS_SPHERE_OFFSET && wtbank < (PLAITS_SPHERE_OFFSET + NUM_PLAITS_SPHERES)) {
+		return NUM_FACTORY_SPHERES + (wtbank - PLAITS_SPHERE_OFFSET);
+	}
+
+	// 3. User
+	if (!is_sphere_filled(wtbank)) return 0; // Should not happen if called correctly
+
+	// Count how many filled user spheres are before this one
+	for (i=NUM_FACTORY_SPHERES; i<wtbank; i++)
 	{
 		if (is_sphere_filled(i))
-			filled_sphere_count++;
+			filled_user_count++;
 	}
-	if (filled_sphere_count)
-		return filled_sphere_count-1;
-	else
-		return 0;
+
+	return NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES + filled_user_count;
 }
 
 void update_number_of_user_spheres_filled(void)
@@ -92,8 +121,14 @@ void update_number_of_user_spheres_filled(void)
 	uint8_t i;
 	uint8_t num_filled=0;
 
+	// Factory (Always 12)
+	num_filled += NUM_FACTORY_SPHERES;
 
-	for (i=0; i<MAX_TOTAL_SPHERES; i++)
+	// Plaits (Always 24)
+	num_filled += NUM_PLAITS_SPHERES;
+
+	// User (Count filled)
+	for (i=NUM_FACTORY_SPHERES; i<PLAITS_SPHERE_OFFSET; i++)
 	{
 		if (is_sphere_filled(i)	&& is_sphere_enabled(i))
 			num_filled++;

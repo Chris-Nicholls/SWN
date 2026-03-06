@@ -191,7 +191,7 @@ o_params			params;
 o_calc_params		calc_params;
 
 uint32_t num_spheres_filled;
-o_waveform	waveform[NUM_CHANNELS][2][2][2];
+SRAM1DATA o_waveform	waveform[NUM_CHANNELS][2][2][2];
 
 
 //Todo: replace with init_param_object(&params), plus a few other differences
@@ -248,11 +248,20 @@ void init_params(void){
 			calc_params.armed[j][i] = 0;
 
 		params.random[i] = 1.0;
+
+		// Plaits defaults
+		params.plaits_params[i].lpg_decay = 0.5f;
+		params.plaits_params[i].lpg_color = 0.5f;
+		params.plaits_params[i].mod_timbre = 0.0f;
+		params.plaits_params[i].mod_morph = 0.0f;
+		params.plaits_params[i].mod_harmonics = 0.0f;
+		params.plaits_params[i].mod_freq = 0.0f;
+		params.plaits_params[i].output_mode = 0; // 0=Main, 1=Aux
 	}
 
 	calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 0;
 	calc_params.already_handled_button[butm_LFOMODE_BUTTON] = 0;
-	for (i=0; i<(MAX_TOTAL_SPHERES/8); i++)
+	for (i=0; i<14; i++)
 		params.enabled_spheres[i]=0xFF;
 
 	// Chord overtone weights defaults 
@@ -337,7 +346,7 @@ void init_param_object(o_params *t_params){
 
 	}
 
-	for (uint8_t i=0; i<(MAX_TOTAL_SPHERES/8); i++)
+	for (uint8_t i=0; i<14; i++)
 		t_params->enabled_spheres[i]=0xFF;
 
 	t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
@@ -358,6 +367,15 @@ void init_param_object(o_params *t_params){
 	for (chan=0; chan<NUM_CHANNELS; chan++) {
 		t_params->unison_spread_amt[chan] = 0.2f; // Slight detune by default
 		t_params->unison_voice_count[chan] = 1;
+
+		// Plaits defaults
+		t_params->plaits_params[chan].lpg_decay = 0.5f;
+		t_params->plaits_params[chan].lpg_color = 0.5f;
+		t_params->plaits_params[chan].mod_timbre = 0.0f;
+		t_params->plaits_params[chan].mod_morph = 0.0f;
+		t_params->plaits_params[chan].mod_harmonics = 0.0f;
+		t_params->plaits_params[chan].mod_freq = 0.0f;
+		t_params->plaits_params[chan].output_mode = 0;
 	}
 }
 
@@ -657,6 +675,18 @@ void read_noteon(uint8_t i)
 {
 	if (ui_mode == PLAY)
 	{
+		// Aux Selection: Wavetable Encoder Press + Channel Button
+		if (button_pressed(i) && rotary_pressed(rotm_WAVETABLE))
+		{
+			if (!calc_params.already_handled_button[i])
+			{
+				if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
+					params.plaits_params[i].output_mode = !params.plaits_params[i].output_mode;
+				
+				calc_params.already_handled_button[i] = 1;
+			}
+			return;
+		}
 		// Button mode: Mute
 		if (params.key_sw[i] == ksw_MUTE)
 		{
@@ -729,7 +759,11 @@ void read_noteon(uint8_t i)
 					if (!calc_params.already_handled_button[i])
 					{
 						if (calc_params.lock_change_staged[i]==1) {
-							toggle_lock(i);
+							if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
+								params.plaits_params[i].output_mode = !params.plaits_params[i].output_mode;
+							else
+								toggle_lock(i);
+
 							calc_params.lock_change_staged[i] = 2;
 						}
 					}
@@ -798,7 +832,7 @@ void read_level_and_pan(uint8_t chan)
 
 		case (pan_CACHED_LEVEL):
 			level = calc_params.cached_level[chan];
-			if (fabs(slider_val - calc_params.cached_level[chan]) < 10) {
+			if (fabsf(slider_val - calc_params.cached_level[chan]) < 10) {
 				calc_params.adjusting_pan_state[chan] = pan_INACTIVE;
 			}
 			break;
@@ -814,11 +848,31 @@ void read_level_and_pan(uint8_t chan)
 		calc_params.level[chan] = 0.f;
 
 	else {
-		if (lfos.to_vca[chan])	level *= lfos.out_lpf[chan];
+		uint8_t is_plaits = (params.wt_bank[chan] >= 100);
+		uint8_t jack_is_plugged = (analog[A_VOCT + chan].plug_sense_switch.pressed == PRESSED);
+		uint8_t is_vca_switch = (params.voct_switch_state[chan] == SW_VCA);
+		uint8_t in_key_mode = (params.key_sw[chan] != ksw_MUTE);
 
-		level *= read_vca_cv(chan);
+		// Dynamic Trigger Mode: Enables internal Mod Envelopes and Engine Triggers (for Drums/Strings)
+		// (Note: Internal LPG Amplitude Envelope is disabled in Voice.cc. This flag allows Plaits to react to triggers for Timbre/Morph modulation)
+		uint8_t plaits_enable_triggers = is_plaits && (in_key_mode || (is_vca_switch && jack_is_plugged));
+		params.plaits_params[chan].use_internal_lpg = plaits_enable_triggers;
+
+		// Skip LFO-VCA mapping ONLY if using new Unified LPG Mode (handled in oscillator.c)
+		// We ALWAYS apply SWN VCA envelope otherwise, because Plaits internal LPG is disabled (Raw Audio).
+		// This ensures we get amplitude decay in Keyboard/Trigger modes.
+		if (lfos.to_vca[chan] && lfos.mode[chan] != lfot_LPG)	
+			level *= lfos.out_lpf[chan];
+
+		// Skip CV-VCA mapping if Plaits Internal Triggers are active OR using new Unified LPG Mode
+		// (In these modes, CV is used as Trigger, so don't apply it as VCA level)
+		if (!plaits_enable_triggers && lfos.mode[chan] != lfot_LPG)
+			level *= read_vca_cv(chan);
 
 		calc_params.level[chan] = _CLAMP_F(level, 0.f, 4095.f);
+
+		// Dynamic Plaits Trigger calculation is handled in oscillator.c for audio-rate precision.
+		// We just need to manage the SWN VCA levels here.
 	}
 
 }
@@ -845,7 +899,8 @@ float read_vca_cv(uint8_t chan)
 {
 	// Resonator mode: use coherence as VCA instead of CV input
 	// Square to suppress weak coherences, amplify strong ones
-	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY)) {
+	// Disable for Plaits engines (bank >= 100)
+	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY) && (params.wt_bank[chan] < 100)) {
 		float coh = wt_osc.coherence_env[chan];
 		coh = _CLAMP_F(coh-0.005, 0.0f, 2.0f);
 		return coh * RESONATOR_GAIN;
@@ -963,8 +1018,8 @@ void read_lfomode(uint8_t i)
 
 			if (!button_pressed(i) && any_button_pressed && calc_params.armed[armf_LFOMODE][i]){
 				//if (!lfos.locked[i]) {
-					lfos.mode[i] ++;
-					lfos.mode[i] %= NUM_LFO_MODES;
+					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
+					params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
 				//}
 				calc_params.armed[armf_LFOMODE][i]   = 0;
 			}
@@ -983,8 +1038,9 @@ void read_lfomode(uint8_t i)
 		else if (!button_pressed(butm_LFOMODE_BUTTON)){
 			if(calc_params.armed[armf_LFOMODE][i]){
 				if (!lfos.locked[i]) {
-					lfos.mode[i] ++;
-					lfos.mode[i] %= NUM_LFO_MODES;
+					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
+					if (lfos.mode[i] == lfot_LPG)
+						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
 				}
 				calc_params.armed[armf_LFOMODE][i] = 0;
 			}
@@ -1275,6 +1331,9 @@ void update_pitch(uint8_t chan)
 	calc_params.pitch[chan] = _CLAMP_F(calc_params.qtz_freq[chan] * calc_params.tuning[chan], F_MIN_FREQ, F_MAX_FREQ);
 
 	update_wt_head_pos_inc(chan);
+
+	if (params.wt_bank[chan] >= 100)
+		params.plaits_params[chan].note = 69.0f + 12.0f * log2f(calc_params.pitch[chan] / 440.0f);
 }
 
 // Spread factors for 8 voices (centered around 0)
@@ -2140,6 +2199,49 @@ void read_nav_encoder(uint8_t dim){
 		}
 		else
 		{
+			// PLAITS MODULATION CONTROL (Speed + Nav)
+			if (rotary_pressed(rotm_LFOSPEED)) {
+				uint8_t handled = 0;
+				for (i=0; i<NUM_CHANNELS; i++) {
+					// Check if channel is Plaits mode and unlocked (or selected)
+					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
+						float *val_ptr = 0;
+						if (dim == 0) val_ptr = &params.plaits_params[i].mod_freq; // Depth -> FM
+						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre; // Lat -> Timbre
+						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph; // Long -> Morph
+						
+						if (val_ptr) {
+							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
+							handled = 1;
+						}
+					}
+				}
+				if (handled) return; 
+			}
+
+			// PLAITS SECONDARY MODULATION (Fine + Nav)
+			// Provides access to Harmonics Modulation (Depth) which is not covered by Speed+Nav.
+			// Map: Depth -> Harmonics, Lat -> Timbre, Long -> Morph.
+			if (switch_pressed(FINE_BUTTON)) {
+				uint8_t handled = 0;
+				for (i=0; i<NUM_CHANNELS; i++) {
+					// Check if channel is Plaits mode and unlocked (or selected)
+					// Approximating standard lock logic: !locked OR button_pressed
+					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
+						float *val_ptr = 0;
+						if (dim == 0) val_ptr = &params.plaits_params[i].mod_harmonics;
+						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre;
+						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph;
+						
+						if (val_ptr) {
+							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
+							handled = 1;
+						}
+					}
+				}
+				if (handled) return; 
+			}
+
 			if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
 				wt_pos_increment = enc * (switch_pressed(FINE_BUTTON) ? F_SCALING_NAVIGATE : 1);
 			else
@@ -2242,7 +2344,6 @@ enum WTFlashLoadQueueStates{
 	WT_FLASH_LOAD_5,
 	WT_FLASH_LOAD_6,
 	WT_FLASH_LOAD_7,
-	WT_FLASH_LOAD_8,
 	WT_FLASH_INTERP,
 
 };
@@ -2251,12 +2352,13 @@ void update_wt_interp(void)
 	int8_t chan;
 	uint8_t x[2],y[2],z[2];
 
-	static uint8_t loadx[2][NUM_CHANNELS]={0}, loady[2][NUM_CHANNELS]={0}, loadz[2][NUM_CHANNELS]={0};
+	static uint8_t  loadx[2][NUM_CHANNELS]={0}, loady[2][NUM_CHANNELS]={0}, loadz[2][NUM_CHANNELS]={0};
 	static int16_t	*p_waveform[NUM_CHANNELS][8]; // addresses for 8x waveforms used for interpolation
-	static uint8_t	old_x0[NUM_CHANNELS] = {0xFF};
-	static uint8_t	old_y0[NUM_CHANNELS] = {0xFF};
-	static uint8_t	old_z0[NUM_CHANNELS] = {0xFF};
-	static uint8_t	old_bank[NUM_CHANNELS] = {0xFF};
+	static uint8_t	old_x0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	old_y0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	old_z0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	old_bank[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+	static uint8_t	loading_bank[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 	static enum WTFlashLoadQueueStates state[NUM_CHANNELS] = {WT_FLASH_NO_ACTION};
 
@@ -2264,6 +2366,14 @@ void update_wt_interp(void)
 	{
 		if (wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_NONE)
 			continue;
+
+		// FIX: Do not attempt to load wavetables for Plaits engines (Virtual Spheres)
+		// Accessing flash for indices >= 100 causes access beyond the flash chip capacity (Bus Fault)
+		if (params.wt_bank[chan] >= PLAITS_SPHERE_OFFSET) {
+			wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_NONE;
+			state[chan] = WT_FLASH_NO_ACTION;
+			continue;
+		}
 
 		//Todo: If wt_osc.m0[][chan] changes while a
 
@@ -2274,10 +2384,21 @@ void update_wt_interp(void)
 				&& (params.wt_bank[chan] == old_bank[chan])
 			)
 		{
-			interp_wt(chan, p_waveform[chan]);
+			// Even when just refreshing positions, ensure we didn't just come back from Editing mode with stale cache/pointers
+			if (p_waveform[chan][0] != waveform[chan][0][0][0].wave) {
+				old_bank[chan] = 0xFF; // Force a full reload to restore pointers
+			} else {
+				interp_wt(chan, p_waveform[chan]);
+			}
 		}
 		else
 		{
+			// Reset load state if target changed OR update is FORCED (but only if not already loading)
+			if ((state[chan] == WT_FLASH_NO_ACTION) && (params.wt_bank[chan] != old_bank[chan] || wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_FORCE)) {
+				state[chan] = WT_FLASH_NO_ACTION;
+				old_bank[chan] = 0xFF; // Definitive invalidation
+			}
+
 			if (ui_mode == PLAY)
 			{
 				if (get_flash_state() != sFLASH_NOTBUSY)
@@ -2291,6 +2412,19 @@ void update_wt_interp(void)
 					loadx[1][chan] = wt_osc.m1[0][chan];
 					loady[1][chan] = wt_osc.m1[1][chan];
 					loadz[1][chan] = wt_osc.m1[2][chan];
+					loading_bank[chan] = params.wt_bank[chan];
+					
+					// Commit target coordinates now so we can detect mid-load changes
+					old_x0[chan] = loadx[0][chan];
+					old_y0[chan] = loady[0][chan];
+					old_z0[chan] = loadz[0][chan];
+				} else {
+					// Detect if target parameters changed mid-load and restart if necessary
+					if (loadx[0][chan] != wt_osc.m0[0][chan] || loady[0][chan] != wt_osc.m0[1][chan] || loadz[0][chan] != wt_osc.m0[2][chan] || loading_bank[chan] != params.wt_bank[chan]) {
+						state[chan] = WT_FLASH_NO_ACTION;
+						old_bank[chan] = 0xFF; 
+						continue;
+					}
 				}
 
 				state[chan]++;
@@ -2300,22 +2434,27 @@ void update_wt_interp(void)
 					uint8_t sb0 = s&1;
 					uint8_t sb1 = (s&2)>>1;
 					uint8_t sb2 = (s&4)>>2;
-					load_extflash_wavetable(params.wt_bank[chan], &(waveform[chan][sb2][sb1][sb0]), loadx[sb2][chan], loady[sb1][chan], loadz[sb0][chan]);
+					load_extflash_wavetable(params.wt_bank[chan], &(waveform[chan][sb2][sb1][sb0]), loadx[sb0][chan], loady[sb1][chan], loadz[sb2][chan]);
 				}
 				else {
-					old_x0[chan] = loadx[0][chan];
-					old_y0[chan] = loady[0][chan];
-					old_z0[chan] = loadz[0][chan];
 					old_bank[chan] = params.wt_bank[chan];
 
-					p_waveform[chan][0] = waveform[chan][0][0][0].wave;
-					p_waveform[chan][1] = waveform[chan][1][0][0].wave;
-					p_waveform[chan][2] = waveform[chan][0][1][0].wave;
-					p_waveform[chan][3] = waveform[chan][1][1][0].wave;
-					p_waveform[chan][4] = waveform[chan][0][0][1].wave;
-					p_waveform[chan][5] = waveform[chan][1][0][1].wave;
-					p_waveform[chan][6] = waveform[chan][0][1][1].wave;
-					p_waveform[chan][7] = waveform[chan][1][1][1].wave;
+					// Invalidate D-Cache for all 8 corners because they were loaded via DMA
+					// Without this, the D-Cache may contain stale data as loading via DMA into sram 
+					// does not automatically invalidate the D-Cache
+					#ifndef HOST_TEST
+					SCB_InvalidateDCache_by_Addr((uint32_t *)&(waveform[chan][0][0][0]), sizeof(o_waveform) * 8);
+					#endif
+
+					p_waveform[chan][0] = waveform[chan][0][0][0].wave; // 0,0,0
+					p_waveform[chan][1] = waveform[chan][0][0][1].wave; // 1,0,0 (X=1)
+					p_waveform[chan][2] = waveform[chan][0][1][0].wave; // 0,1,0 (Y=1)
+					p_waveform[chan][3] = waveform[chan][0][1][1].wave; // 1,1,0 (X=1, Y=1)
+					p_waveform[chan][4] = waveform[chan][1][0][0].wave; // 0,0,1 (Z=1)
+					p_waveform[chan][5] = waveform[chan][1][0][1].wave; // 1,0,1 (X=1, Z=1)
+					p_waveform[chan][6] = waveform[chan][1][1][0].wave; // 0,1,1 (Y=1, Z=1)
+					p_waveform[chan][7] = waveform[chan][1][1][1].wave; // 1,1,1 (X=1, Y=1, Z=1)
+					
 					state[chan] = WT_FLASH_NO_ACTION;
 					interp_wt(chan, p_waveform[chan]);
 				}
@@ -2332,6 +2471,7 @@ void update_wt_interp(void)
 				old_x0[chan] = x[0];
 				old_y0[chan] = y[0];
 				old_z0[chan] = z[0];
+				old_bank[chan] = params.wt_bank[chan];
 
 				p_waveform[chan][0] =  spherebuf.data[x[0]][y[0]][z[0]].wave;
 				p_waveform[chan][1] =  spherebuf.data[x[1]][y[0]][z[0]].wave;
@@ -2377,8 +2517,8 @@ void interp_wt(uint8_t chan, int16_t *p_waveform[8]){
 			i++;
 		}
 	}
-	wt_osc.buffer_sel[chan]		= 1 - wt_osc.buffer_sel[chan];
 	wt_osc.wt_xfade[chan]			= 1.0;
+	wt_osc.buffer_sel[chan]		= 1 - wt_osc.buffer_sel[chan];
 	wt_osc.wt_interp_request[chan]	= WT_INTERP_REQ_NONE;
 
 }
@@ -2511,6 +2651,12 @@ void update_wt_bank(void)
 
 		if ((params.wt_bank[i]!=test_bank) ) {
 			params.wt_bank[i] = test_bank;
+
+			if (test_bank >= PLAITS_SPHERE_OFFSET) {
+				int engine = test_bank - PLAITS_SPHERE_OFFSET;
+				params.plaits_params[i].engine = _CLAMP_I16(engine, 0, 23);
+			}
+
 			req_wt_interp_update(i);
 		}
 
@@ -2711,6 +2857,12 @@ void calc_wt_pos(uint8_t chan){
 
 		if (new_wt_pos != calc_params.wt_pos[wt_dim][chan]){
 			calc_params.wt_pos[wt_dim][chan] = new_wt_pos;
+
+			if (params.wt_bank[chan] >= 100) {
+				if (wt_dim == 0) params.plaits_params[chan].harmonics = new_wt_pos * 0.5f;
+				if (wt_dim == 1) params.plaits_params[chan].timbre = new_wt_pos * 0.5f;
+				if (wt_dim == 2) params.plaits_params[chan].morph = new_wt_pos * 0.5f;
+			}
 
 			req_wt_interp_update(chan);
 		}

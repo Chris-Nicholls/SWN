@@ -65,6 +65,7 @@ enum lfoModes{
 	lfot_SHAPE,
 	lfot_GATE,
 	lfot_TRIG,
+	lfot_LPG,
 
 	NUM_LFO_MODES
 };
@@ -118,8 +119,10 @@ typedef struct o_lfos
 
 } o_lfos;
 
+extern o_lfos lfos;
 
-void update_lfos(void);
+
+void update_lfos(float multiplier);
 void init_lfos(void);
 void use_internal_lfo_base(void);
 void clear_lfo_locks(void);

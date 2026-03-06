@@ -48,7 +48,7 @@ uint8_t range_check_system_settings(o_systemSettings *sys_sets)
 {
 	uint8_t range_errors=0;
 
-	if (isnan(sys_sets->master_gain) || (sys_sets->master_gain > 1.0) || (sys_sets->master_gain < (1.0/1000.0)))
+	if ((sys_sets->master_gain > 1.0) || (sys_sets->master_gain < (1.0/1000.0)))
 	{
 		sys_sets->master_gain = 1.0/48.0;
 		range_errors++;
@@ -72,7 +72,7 @@ uint8_t range_check_system_settings(o_systemSettings *sys_sets)
 		range_errors++;
 	}
 
-	if (isnan(sys_sets->global_brightness) || (sys_sets->global_brightness > 2.0) || (sys_sets->global_brightness < (1.0/1000.0)))
+	if ((sys_sets->global_brightness > 2.0) || (sys_sets->global_brightness < (1.0/1000.0)))
 	{
 		sys_sets->global_brightness = 0.8;
 		range_errors++;

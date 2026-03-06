@@ -229,6 +229,19 @@ void update_display_at_encoder_press(void)
 
 	if (!UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && rotary_pressed(rotm_WAVETABLE))
 		start_ongoing_display_sphere_sel();
+
+	static uint8_t cpu_toggle_handled = 0;
+	if (rotary_pressed(rotm_LFOSPEED) == SHORT_PRESSED) {
+		if (!cpu_toggle_handled) {
+			cpu_toggle_handled = 1;
+			if (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE)
+				led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
+			else
+				start_ongoing_display_cpu_usage();
+		}
+	} else {
+		cpu_toggle_handled = 0;
+	}
 }
 
 void update_led_flash(void)
@@ -771,6 +784,10 @@ void calculate_led_ring(void){
 
 			case ONGOING_DISPLAY_UNISON:
 				display_unison();
+				break;
+
+			case ONGOING_DISPLAY_CPU_USAGE:
+				display_cpu_usage();
 				break;
 
 			default:
@@ -1419,6 +1436,10 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_SEL)
 		tick_down = 1;
 
+	// CPU usage: no auto-timeout on release (it's a toggle now)
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE)
+		tick_down = 0;
+
 	else if ( led_cont.ongoing_display == ONGOING_DISPLAY_FX &&  macro_states.all_af_buttons_released )
 		tick_down = 1;
 
@@ -1539,4 +1560,45 @@ void stop_all_displays(void){
 
 uint16_t return_display_timer(void){
 	return led_cont.ongoing_timeout;
+}
+
+void start_ongoing_display_cpu_usage(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_CPU_USAGE;
+	led_cont.ongoing_timeout = 0;
+}
+
+void display_cpu_usage(void)
+{
+	extern uint32_t cpu_usage_cycles;
+	static uint32_t cpu_peak = 0;
+	static uint32_t peak_expiry = 0;
+	uint32_t now = HAL_GetTick();
+
+	// Update peak
+	if (cpu_usage_cycles > cpu_peak) {
+		cpu_peak = cpu_usage_cycles;
+		peak_expiry = now + 100; // Hold peak for 60ms
+	} else if (now > peak_expiry) {
+		cpu_peak = (cpu_peak * 127) >> 7; // Slow decay
+	}
+
+	// Normalization: 100% = 1ms = 216,000 cycles
+	// 18 LEDs, so 12,000 cycles per LED
+	uint16_t fill = cpu_peak / 12000;
+	if (fill > NUM_LED_OUTRING) fill = NUM_LED_OUTRING;
+
+	// Scale color from Green to Red based on load
+	uint8_t color = (fill >= 15) ? ledc_RED : ledc_LIGHT_GREEN; // >= ~83% load is red
+
+	for (uint8_t i = 0; i < NUM_LED_OUTRING; i++)
+	{
+		if (i < fill)
+			set_rgb_color(&led_cont.outring[i], color);
+		else
+			led_cont.outring[i].brightness = 0;
+	}
+
+	for (uint8_t i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color(&led_cont.inring[i], ledc_OFF);
 }

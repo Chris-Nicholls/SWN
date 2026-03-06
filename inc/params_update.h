@@ -37,7 +37,7 @@
 
 #define F_MIN_FREQ			(0.1)
 #define F_BASE_FREQ			16.35
-#define F_MAX_FREQ			(F_SAMPLERATE*3 - 36000.0) //96300.0
+#define F_MAX_FREQ			(F_SAMPLERATE / 2.0 - 100.0) // Nyquist limit with margin = 23900Hz @ 48kHz
 #define INIT_OCT			3	// C4 ~261Hz
 #define TTONE_OCT			2	// C2 ~87Hz
 #define TTONE_TRANSPOSE 	5	// F2 if oct at TTONE_OCT
@@ -71,7 +71,7 @@
 #define GLOBRIGHT_TIMER_LIMIT			100
 
 // SCALING
-#define F_SCALING_FINETUNE_WRAP			1.00057779 // 100th root of 12th root of 2
+#define F_SCALING_FINETUNE_WRAP			1.000057779 // 1000th root of 12th root of 2 (0.1 cent resolution)
 #define F_SCALING_TRANSPOSE				1.05946309436
 
 #define NUM_DIM_STEPS					50.0
@@ -87,8 +87,8 @@
 #define RANDOM_UPDATE_TIME				7
 
 #define F_SCALING_MAX_VCACV_GAIN		1.0
-#define MAX_FINETUNE_WRAP 				(2160)
-#define MIN_FINETUNE_WRAP 				(-2160)
+#define MAX_FINETUNE_WRAP 				(21600)
+#define MIN_FINETUNE_WRAP 				(-21600)
 
 #define MAX_TRANSPOSE_WRAP				125
 #define MIN_TRANSPOSE_WRAP				-126
@@ -125,7 +125,7 @@ enum MuteNoteKeyStates {
 	NUM_MUTE_NOTE_KEY_STATES
 };
 
-#define FW_V1_PADDING (NUM_CHANNELS*32 - MAX_TOTAL_SPHERES/8) //padding for future features in o_params
+#define FW_V1_PADDING (NUM_CHANNELS*128 - MAX_TOTAL_SPHERES/8) 
 #define FW_V2_ADDED_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS)
 #define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float) + sizeof(float)*2)  // pregain + resonator envelope
 #define FW_UNISON_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(uint8_t)*NUM_CHANNELS)
@@ -143,6 +143,8 @@ enum PanStates {
 	pan_PANNING,
 	pan_CACHED_LEVEL,
 };
+
+#include "plaits_shim.h"
 
 typedef struct o_calc_params{
 	uint8_t		wtsel 					[NUM_CHANNELS];
@@ -167,7 +169,7 @@ typedef struct o_calc_params{
 	uint8_t		lock_change_staged		[NUM_CHANNELS];
 	enum PanStates	adjusting_pan_state		[NUM_CHANNELS];
 
-	uint8_t		gate_in_is_sustaining	[NUM_CHANNELS]		;
+	uint8_t		gate_in_is_sustaining	[NUM_CHANNELS];
 } o_calc_params;
 
 
@@ -219,7 +221,9 @@ typedef struct o_params{
 	uint8_t		wtsel_lock				[NUM_CHANNELS];	//For v1.0 this is always the same as osc_param_lock
 
 	//v1.2:
-	uint8_t		enabled_spheres			[MAX_TOTAL_SPHERES/8];
+	uint8_t		enabled_spheres			[14]; // Fixed at 14 bytes to match 112/8 range or similar legacy size
+	// Note: NUM_WAVETABLES is 100, so 13-14 bytes is sufficient.
+	// We keep this fixed to avoid breaking preset alignment when MAX_TOTAL_SPHERES changes.
 
 	//v2.0
 	float		pan						[NUM_CHANNELS];
@@ -240,20 +244,22 @@ typedef struct o_params{
 	// Chord generation overtone weights (v2.x4)
 	float		chord_overtone_weights[7];			// Weights for fundamental + 6 overtones (0.0 to 1.0)
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE];
+	// Plaits Params (v2.x3)
+	PlaitsParams plaits_params		[NUM_CHANNELS];
+
+	#define FW_PLAITS_PARAMS_SIZE (sizeof(PlaitsParams)*NUM_CHANNELS) 
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_PLAITS_PARAMS_SIZE];
 } o_params;
 
-
-
-void 		init_params(void);
-void 		init_calc_params(void);
-void 		init_pitch_params();
-void 		init_param_object(o_params *t_params);
-
-void 		set_pitch_params_to_ttone(void);
-
 void 		check_reset_navigation(void);
+void 		read_selbus_buttons(void);
 void 		cache_uncache_pitch_params(enum CacheUncache cache_uncache);
+void 		init_pitch_params(void);
+void 		init_params(void);
+void 		init_param_object(o_params *t_params);
+void 		init_calc_params(void);
+void 		set_pitch_params_to_ttone(void);
 
 void 		read_noteon(uint8_t i);
 void 		read_ext_trigs(void);
