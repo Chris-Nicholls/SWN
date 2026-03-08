@@ -210,7 +210,9 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			float decay = params.plaits_params[chan].lpg_decay;
 			float color = params.plaits_params[chan].lpg_color;
 			
-			if (main_trigger) Shim_LPG_Trigger(chan);
+			// In chord mode, LPG is only triggered when chord changes (not from normal triggers)
+			uint8_t in_chord_mode = is_channel_in_chord_mode(chan);
+			if (main_trigger && !in_chord_mode) Shim_LPG_Trigger(chan);
 			Shim_LPG_Process(chan, temp_buffer, MONO_BUFSZ, decay, color);
 		}
 

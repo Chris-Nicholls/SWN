@@ -266,11 +266,11 @@ void init_params(void){
 
 	// Chord overtone weights defaults 
 	params.chord_overtone_weights [0] = 1.0f;
-	params.chord_overtone_weights [1] = 0.3f;
-	params.chord_overtone_weights [2] = 0.75f;
-	params.chord_overtone_weights [3] = 0.2f;
-	params.chord_overtone_weights [4] = 0.5f;
-	params.chord_overtone_weights [5] = 0.1f;
+	params.chord_overtone_weights [1] = 0.8f;
+	params.chord_overtone_weights [2] = 0.25f;
+	params.chord_overtone_weights [3] = 0.6f;
+	params.chord_overtone_weights [4] = 0.1f;
+	params.chord_overtone_weights [5] = 0.3f;
 	params.chord_overtone_weights [6] = 0.1f;
 	
 
@@ -369,6 +369,10 @@ void init_param_object(o_params *t_params){
 		t_params->unison_voice_count[chan] = 1;
 
 		// Plaits defaults
+		t_params->plaits_params[chan].harmonics = 0.5f;  // Mid-range default
+		t_params->plaits_params[chan].timbre = 0.5f;     // Mid-range default
+		t_params->plaits_params[chan].morph = 0.5f;      // Mid-range default
+		t_params->plaits_params[chan].engine = 0;        // First engine
 		t_params->plaits_params[chan].lpg_decay = 0.5f;
 		t_params->plaits_params[chan].lpg_color = 0.5f;
 		t_params->plaits_params[chan].mod_timbre = 0.0f;
@@ -414,6 +418,10 @@ static uint8_t last_chord_num_fills = 0;
 
 // 1/4 tone hysteresis = 50 cents = 2^(0.5/12) ≈ 1.029
 #define CHORD_HYSTERESIS_RATIO 1.029f
+
+uint8_t is_channel_in_chord_mode(uint8_t chan) {
+	return (chord_mode_active && chord_freqs[chan] > 0.0f);
+}
 
 void set_pitch_params_to_ttone(void) {
 	for (uint8_t chan=0; chan<NUM_CHANNELS; chan++)
@@ -1524,6 +1532,7 @@ void read_freq(void){
 	// Sliders control overtone weights (h2-h7), fundamental weight is always 1.0
 	{
 		float seed_freqs[NUM_CHANNELS];
+		uint8_t seed_channels[NUM_CHANNELS];  // Track which channels are seeds
 		uint8_t voices_to_fill[NUM_CHANNELS];
 		uint8_t num_seeds = 0;
 		uint8_t num_to_fill = 0;
@@ -1555,6 +1564,7 @@ void read_freq(void){
 					first_seed_chan = chan;
 				}
 				
+				seed_channels[num_seeds] = chan;
 				seed_freqs[num_seeds++] = F_BASE_FREQ * trans * voct_mult * oct_mult;
 			}
 			else if (!jack_plugged && !params.osc_param_lock[chan] && switch_voct) {
@@ -1688,6 +1698,22 @@ void read_freq(void){
 				chord_freqs[i] = temp_chord_freqs[i];
 			}
 			__enable_irq();
+			
+			// Trigger LPG for all channels (both seeds and fills) when chord changes
+			for (uint8_t s = 0; s < num_seeds; s++) {
+				uint8_t chan = seed_channels[s];
+				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
+				if (lpg_active) {
+					Shim_LPG_Trigger(chan);
+				}
+			}
+			for (uint8_t f = 0; f < num_to_fill; f++) {
+				uint8_t chan = voices_to_fill[f];
+				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
+				if (lpg_active) {
+					Shim_LPG_Trigger(chan);
+				}
+			}
 		}
 		else if (!temp_chord_mode_active) {
 			// Chord mode inactive - clear everything
@@ -2199,49 +2225,25 @@ void read_nav_encoder(uint8_t dim){
 		}
 		else
 		{
-			// PLAITS MODULATION CONTROL (Speed + Nav)
-			if (rotary_pressed(rotm_LFOSPEED)) {
-				uint8_t handled = 0;
-				for (i=0; i<NUM_CHANNELS; i++) {
-					// Check if channel is Plaits mode and unlocked (or selected)
-					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
-						float *val_ptr = 0;
-						if (dim == 0) val_ptr = &params.plaits_params[i].mod_freq; // Depth -> FM
-						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre; // Lat -> Timbre
-						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph; // Long -> Morph
-						
-						if (val_ptr) {
-							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
-							handled = 1;
-						}
+			// PLAITS DIRECT PARAMETER CONTROL
+			// In Plaits modes (wt_bank >= 100), nav encoders directly control harmonics/timbre/morph
+			uint8_t handled_plaits = 0;
+			for (i=0; i<NUM_CHANNELS; i++) {
+				if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
+					float *val_ptr = 0;
+					if (dim == 0) val_ptr = &params.plaits_params[i].harmonics; // Depth -> Harmonics
+					if (dim == 1) val_ptr = &params.plaits_params[i].timbre;    // Latitude -> Timbre
+					if (dim == 2) val_ptr = &params.plaits_params[i].morph;     // Longitude -> Morph
+					
+					if (val_ptr) {
+						*val_ptr = _CLAMP_F(*val_ptr + (enc / 100.0f), 0.0f, 1.0f);
+						handled_plaits = 1;
 					}
 				}
-				if (handled) return; 
 			}
+			if (handled_plaits) return;
 
-			// PLAITS SECONDARY MODULATION (Fine + Nav)
-			// Provides access to Harmonics Modulation (Depth) which is not covered by Speed+Nav.
-			// Map: Depth -> Harmonics, Lat -> Timbre, Long -> Morph.
-			if (switch_pressed(FINE_BUTTON)) {
-				uint8_t handled = 0;
-				for (i=0; i<NUM_CHANNELS; i++) {
-					// Check if channel is Plaits mode and unlocked (or selected)
-					// Approximating standard lock logic: !locked OR button_pressed
-					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
-						float *val_ptr = 0;
-						if (dim == 0) val_ptr = &params.plaits_params[i].mod_harmonics;
-						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre;
-						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph;
-						
-						if (val_ptr) {
-							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
-							handled = 1;
-						}
-					}
-				}
-				if (handled) return; 
-			}
-
+			// WAVETABLE NAVIGATION (for non-Plaits modes)
 			if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
 				wt_pos_increment = enc * (switch_pressed(FINE_BUTTON) ? F_SCALING_NAVIGATE : 1);
 			else
@@ -2858,11 +2860,8 @@ void calc_wt_pos(uint8_t chan){
 		if (new_wt_pos != calc_params.wt_pos[wt_dim][chan]){
 			calc_params.wt_pos[wt_dim][chan] = new_wt_pos;
 
-			if (params.wt_bank[chan] >= 100) {
-				if (wt_dim == 0) params.plaits_params[chan].harmonics = new_wt_pos * 0.5f;
-				if (wt_dim == 1) params.plaits_params[chan].timbre = new_wt_pos * 0.5f;
-				if (wt_dim == 2) params.plaits_params[chan].morph = new_wt_pos * 0.5f;
-			}
+			// NOTE: Plaits parameters are now independent and controlled directly by nav encoders
+			// (see read_nav_encoder)
 
 			req_wt_interp_update(chan);
 		}

@@ -791,9 +791,22 @@ void calculate_led_ring(void){
 				break;
 
 			default:
-				display_wt_pos();
+			// Check if any channel is in Plaits mode
+			{
+				uint8_t has_plaits = 0;
+				for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+					if (params.wt_bank[i] >= 100) {
+						has_plaits = 1;
+						break;
+					}
+				}
+				if (has_plaits)
+					display_plaits_params();
+				else
+					display_wt_pos();
 				flash_wt_lock();
-				break;
+			}
+			break;
 		}
 	}
 }
@@ -930,6 +943,69 @@ void display_wt_pos(void)
 
 	for ( i = 0; i < NUM_CHANNELS; i++)
 	{
+		j = rotate_origin(i, NUM_CHANNELS);
+		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
+		get_wt_color(params.wt_bank[i], &led_cont.inring[j]);
+	}
+}
+
+void display_plaits_params(void)
+{
+	uint8_t i, j;
+	
+	// Find first unlocked Plaits channel to display
+	uint8_t display_chan = 0xFF;
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		if (params.wt_bank[i] >= 100 && !params.wt_pos_lock[i]) {
+			display_chan = i;
+			break;
+		}
+	}
+	
+	// If no unlocked Plaits channel, fall back to first Plaits channel
+	if (display_chan == 0xFF) {
+		for (i = 0; i < NUM_CHANNELS; i++) {
+			if (params.wt_bank[i] >= 100) {
+				display_chan = i;
+				break;
+			}
+		}
+	}
+	
+	if (display_chan == 0xFF) {
+		// No Plaits channels, shouldn't reach here
+		display_wt_pos();
+		return;
+	}
+	
+	// Display parameters as bar graphs using RGB
+	// Harmonics = Red, Timbre = Green, Morph = Blue
+	// Each LED's color intensity shows the parameter value (0-1)
+	float harmonics = params.plaits_params[display_chan].harmonics;
+	float timbre = params.plaits_params[display_chan].timbre;
+	float morph = params.plaits_params[display_chan].morph;
+	
+	for (i = 0; i < NUM_LED_OUTRING ; i++) {
+		j = rotate_origin(i, NUM_LED_OUTRING);
+		
+		// Calculate bar graph: light up LEDs proportionally
+		float pos = (float)i / (float)NUM_LED_OUTRING;
+		
+		// Harmonics bar (Red)
+		uint16_t red = (pos < harmonics) ? 4095 : 0;
+		// Timbre bar (Green)  
+		uint16_t green = (pos < timbre) ? 4095 : 0;
+		// Morph bar (Blue)
+		uint16_t blue = (pos < morph) ? 4095 : 0;
+		
+		led_cont.outring[j].c_red = exp_1voct_10_41V[red] * 3;
+		led_cont.outring[j].c_green = exp_1voct_10_41V[green];
+		led_cont.outring[j].c_blue = exp_1voct_10_41V[blue] * 3;
+		led_cont.outring[j].brightness = F_MAX_BRIGHTNESS;
+	}
+
+	// Inner ring shows Plaits channel
+	for (i = 0; i < NUM_CHANNELS; i++) {
 		j = rotate_origin(i, NUM_CHANNELS);
 		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
 		get_wt_color(params.wt_bank[i], &led_cont.inring[j]);

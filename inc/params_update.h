@@ -285,6 +285,9 @@ void 		update_noise(uint8_t chan);
 
 void 		read_freq(void);
 
+// --------- CHORD MODE ---------
+uint8_t 	is_channel_in_chord_mode(uint8_t chan);
+
 
 // --------- LOCK ---------
 void 		update_osc_param_lock(void);

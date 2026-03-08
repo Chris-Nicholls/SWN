@@ -110,6 +110,7 @@ void 		turn_outring_off(void);
 void 		display_wtpos_inring(void);
 void 		flash_wt_lock(void);
 void 		display_wt_pos(void);
+void 		display_plaits_params(void);
 void 		display_transpose(void);
 void 		display_finetune(void);
 void 		display_octave(void);
