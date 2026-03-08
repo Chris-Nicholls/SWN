@@ -4,10 +4,10 @@
 #include "globals.h"
 
 // Algorithm constants for harmonic dissonance model
-#define CHORD_PEAK_SEMITONES_C2     0.8f
-#define CHORD_PEAK_SEMITONES_C6     0.5f
-#define CHORD_TAIL_HALFWIDTH_C2     2.35f
-#define CHORD_TAIL_HALFWIDTH_C6     1.4f
+#define CHORD_PEAK_SEMITONES_C2     0.86f
+#define CHORD_PEAK_SEMITONES_C6     0.64f
+#define CHORD_TAIL_HALFWIDTH_C2     3.25f
+#define CHORD_TAIL_HALFWIDTH_C6     1.65f
 #define CHORD_SEARCH_HARMONICS      7
 #define CHORD_NUM_OVERTONES         7    // fundamental + 6 overtones from sliders
 
@@ -26,7 +26,7 @@
 
 // Boundary penalty: dissonance added for notes above extension (dB/octave)
 // Penalty slope = 10^(dB/20) - 1, applied per octave above boundary
-#define CHORD_ABOVE_EXT_PENALTY_DB_PER_OCT 2.0f
+#define CHORD_ABOVE_EXT_PENALTY_DB_PER_OCT 3.0f
 
 // Rotate a 12-bit scale mask by semitones (positive = up from C)
 uint16_t rotate_scale_mask(uint16_t base_mask, int8_t semitones);
