@@ -416,6 +416,13 @@ static float last_chord_seed_freqs[NUM_CHANNELS] = {0};
 static uint8_t last_chord_num_seeds = 0;
 static uint8_t last_chord_num_fills = 0;
 
+// LPG trigger pending - wait for CV to stabilize before triggering
+static uint8_t lpg_trigger_pending = 0;
+static uint8_t pending_num_seeds = 0;
+static uint8_t pending_seed_channels[NUM_CHANNELS] = {0};
+static uint8_t pending_num_fills = 0;
+static uint8_t pending_fill_channels[NUM_CHANNELS] = {0};
+
 // 1/4 tone hysteresis = 50 cents = 2^(0.5/12) ≈ 1.029
 #define CHORD_HYSTERESIS_RATIO 1.029f
 
@@ -1026,8 +1033,8 @@ void read_lfomode(uint8_t i)
 
 			if (!button_pressed(i) && any_button_pressed && calc_params.armed[armf_LFOMODE][i]){
 				//if (!lfos.locked[i]) {
-					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
-					params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					// Toggle between LFO and LPG modes only
+					lfos.mode[i] = (lfos.mode[i] == lfot_LFO) ? lfot_LPG : lfot_LFO;
 				//}
 				calc_params.armed[armf_LFOMODE][i]   = 0;
 			}
@@ -1046,9 +1053,8 @@ void read_lfomode(uint8_t i)
 		else if (!button_pressed(butm_LFOMODE_BUTTON)){
 			if(calc_params.armed[armf_LFOMODE][i]){
 				if (!lfos.locked[i]) {
-					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
-					if (lfos.mode[i] == lfot_LPG)
-						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					// Toggle between LFO and LPG modes only
+					lfos.mode[i] = (lfos.mode[i] == lfot_LFO) ? lfot_LPG : lfot_LFO;
 				}
 				calc_params.armed[armf_LFOMODE][i] = 0;
 			}
@@ -1061,9 +1067,9 @@ void read_lfomode(uint8_t i)
 		}
 	}
 
-	else if (!cached[i]){ // cache lfo mode and set to shape when entering audio range
+	else if (!cached[i]){ // cache lfo mode and set to LFO when entering audio range
 		cache_uncache_lfomode(i, CACHE);
-		lfos.mode[i] = lfot_SHAPE;
+		lfos.mode[i] = lfot_LFO;
 		cached[i] = 1;
 	}
 }
@@ -1699,20 +1705,16 @@ void read_freq(void){
 			}
 			__enable_irq();
 			
-			// Trigger LPG for all channels (both seeds and fills) when chord changes
+			// Schedule LPG trigger for when CV stabilizes (two consecutive stable readings)
+			// Save channel info for later trigger
+			lpg_trigger_pending = 1;
+			pending_num_seeds = num_seeds;
+			pending_num_fills = num_to_fill;
 			for (uint8_t s = 0; s < num_seeds; s++) {
-				uint8_t chan = seed_channels[s];
-				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
-				if (lpg_active) {
-					Shim_LPG_Trigger(chan);
-				}
+				pending_seed_channels[s] = seed_channels[s];
 			}
 			for (uint8_t f = 0; f < num_to_fill; f++) {
-				uint8_t chan = voices_to_fill[f];
-				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
-				if (lpg_active) {
-					Shim_LPG_Trigger(chan);
-				}
+				pending_fill_channels[f] = voices_to_fill[f];
 			}
 		}
 		else if (!temp_chord_mode_active) {
@@ -1725,8 +1727,40 @@ void read_freq(void){
 			__enable_irq();
 			last_chord_num_seeds = 0;
 			last_chord_num_fills = 0;
+			lpg_trigger_pending = 0;
 		}
-		// else: chord mode active but hysteresis says don't recalculate - keep existing chord_freqs
+		else if (lpg_trigger_pending) {
+			// Chord mode active, no recalc needed (CV stable) - now trigger the LPGs
+			// This implements "two consecutive stable readings" before triggering
+			lpg_trigger_pending = 0;
+			
+			// Trigger all channels with strum timing based on phase spread
+			for (uint8_t s = 0; s < pending_num_seeds; s++) {
+				uint8_t chan = pending_seed_channels[s];
+				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
+				if (lpg_active) {
+					uint16_t delay = (uint16_t)(lfos.lpg_phase_id[chan] * 200);
+					if (delay == 0) {
+						Shim_LPG_Trigger(chan);
+					} else {
+						lfos.lpg_trigger_delay[chan] = delay;
+					}
+				}
+			}
+			for (uint8_t f = 0; f < pending_num_fills; f++) {
+				uint8_t chan = pending_fill_channels[f];
+				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
+				if (lpg_active) {
+					uint16_t delay = (uint16_t)(lfos.lpg_phase_id[chan] * 200);
+					if (delay == 0) {
+						Shim_LPG_Trigger(chan);
+					} else {
+						lfos.lpg_trigger_delay[chan] = delay;
+					}
+				}
+			}
+		}
+		// else: chord mode active, no recalc needed, no pending trigger - keep existing chord_freqs
 	}
 }
 

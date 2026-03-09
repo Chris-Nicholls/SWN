@@ -207,8 +207,9 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 
 		// LPG Processing
 		if (lpg_active) {
-			float decay = params.plaits_params[chan].lpg_decay;
-			float color = params.plaits_params[chan].lpg_color;
+			// Use mode-specific LPG parameters
+			float decay = lfos.lpg_decay[chan];
+			float color = lfos.lpg_color[chan];
 			
 			// In chord mode, LPG is only triggered when chord changes (not from normal triggers)
 			uint8_t in_chord_mode = is_channel_in_chord_mode(chan);
@@ -286,6 +287,12 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	// Apply EQ after soft clipping
 	// eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
 	
+	// Apply Global VCA from LFO CV jack (only when jack is plugged)
+	if (analog_jack_plugged(LFO_CV) && lfos.global_vca_level < 1.0f) {
+		arm_scale_f32(output_buffer_evens, lfos.global_vca_level, output_buffer_evens, MONO_BUFSZ);
+		arm_scale_f32(output_buffer_odds, lfos.global_vca_level, output_buffer_odds, MONO_BUFSZ);
+	}
+
 	// 4. FINAL OUTPUT COMPRESSION & GATE
 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
 	{

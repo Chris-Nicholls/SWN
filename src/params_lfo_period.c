@@ -41,7 +41,6 @@ extern o_lfos 		lfos;
 extern o_params 	params;
 extern o_calc_params 	calc_params;
 extern o_wt_osc 	wt_osc;
-extern uint16_t 	divmult_cv;
 
 const float LFO_DIVMULTS[NUM_DIVMULTS] = {
 	1.0/64.0, 1.0/48.0, 1.0/32.0, 1.0/24.0, 1.0/16.0, 1.0/8.0, 1.0/7.0, 1.0/6.0, 1.0/5.0, 1.0/4.0, 1.0/3.0, 1.0/2.0,\
@@ -160,8 +159,9 @@ void update_lfo_calcs(void)
 
 	if (recalc_flagged[GLO_CLK]) {
 		recalc_flagged[GLO_CLK] = 0;
-		lfos.divmult[GLO_CLK] = calc_divmult_amount(lfos.divmult_id[GLO_CLK] + divmult_cv);
-		lfos.period[GLO_CLK] = lfos.period[REF_CLK] / calc_divmult_amount(lfos.divmult_id[GLO_CLK] + divmult_cv);
+		// Note: divmult_cv is no longer used - LFO CV jack repurposed as Global VCA
+		lfos.divmult[GLO_CLK] = calc_divmult_amount(lfos.divmult_id[GLO_CLK]);
+		lfos.period[GLO_CLK] = lfos.period[REF_CLK] / calc_divmult_amount(lfos.divmult_id[GLO_CLK]);
 		lfos.inc[GLO_CLK] = calc_lfo_inc(lfos.period[GLO_CLK]);
 	}
 
@@ -173,7 +173,7 @@ void update_lfo_calcs(void)
 			lfos.divmult[chan] 	= calc_divmult_amount(lfos.divmult_id[chan]);
 
 			if (!lfos.locked[chan])
-				lfos.divmult_id_global_locked[chan] = lfos.divmult_id[GLO_CLK] + divmult_cv;
+				lfos.divmult_id_global_locked[chan] = lfos.divmult_id[GLO_CLK];
 
 			lfos.period[chan] = calc_lfo_period(chan, lfos.divmult_id_global_locked[chan], lfos.period[REF_CLK]);
 			lfos.inc[chan] = calc_lfo_inc(lfos.period[chan]);

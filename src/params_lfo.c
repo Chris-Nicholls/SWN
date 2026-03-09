@@ -56,7 +56,6 @@ extern o_analog analog[NUM_ANALOG_ELEMENTS];
 extern enum UI_Modes ui_mode;
 
 o_lfos   lfos;
-uint16_t divmult_cv;
 
 // const float LFO_PHASE_TABLE[LFO_PHASE_TABLELEN]	= {0, 1.0/8.0, 1.0/7.0, 1.0/6.0, 1.0/5.0, 1.0/4.0, 2.0/7.0, 1.0/3.0, 3.0/8.0, 2.0/5.0, 3.0/7.0, 1.0/2.0, 4.0/7.0, 3.0/5.0, 5.0/8.0, 2.0/3.0, 5.0/7.0, 3.0/4.0, 4.0/5.0, 5.0/6.0, 6.0/7.0, 7.0/8.0};
 
@@ -85,23 +84,15 @@ void init_lfos(void)
 {
 	uint8_t i;
 
-	// init phase (60deg)
-	// if (!lfos.locked[0]) lfos.phase_id[0] =  0;
-	// if (!lfos.locked[1]) lfos.phase_id[1] =  19;
-	// if (!lfos.locked[2]) lfos.phase_id[2] =  15;
-	// if (!lfos.locked[3]) lfos.phase_id[3] =  11;
-	// if (!lfos.locked[4]) lfos.phase_id[4] =  7;
-	// if (!lfos.locked[5]) lfos.phase_id[5] =  3;	
-
-	if (!lfos.locked[0]) lfos.phase_id[0] =  0;
-	if (!lfos.locked[1]) lfos.phase_id[1] =  20;
-	if (!lfos.locked[2]) lfos.phase_id[2] =  16;
-	if (!lfos.locked[3]) lfos.phase_id[3] =  12;
-	if (!lfos.locked[4]) lfos.phase_id[4] =  8;
-	if (!lfos.locked[5]) lfos.phase_id[5] =  4;	
-
+	// Start with unison (all phases = 0)
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		if (!lfos.locked[i]) lfos.phase_id[i] = 0;
+	}
 
 	lfos.phase_switch = 0;
+	lfos.phase_spread_amount = 0.0f;  // Start with all LFOs in phase (unison)
+	lfos.lpg_phase_spread_amount = 0.0f;  // Start with all LPGs in phase (unison)
+	lfos.global_vca_level = 1.0f;  // Full level (no attenuation)
 
 	if (!lfos.use_ext_clock)
 	{
@@ -115,6 +106,7 @@ void init_lfos(void)
 	{
 		if (!lfos.locked[i])
 		{
+			// LFO parameters
 			lfos.shape[i]			= 0;
 			lfos.gain[i]			= LFO_INIT_GAIN; 
 			lfos.cycle_pos[i]		= 0;
@@ -124,10 +116,15 @@ void init_lfos(void)
 			lfos.preload[i]			= 0;
 			lfos.trigout[i]			= 0;
 			lfos.audio_mode[i]		= 0;
-
 			lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
-
 			lfos.trig_armed[i] = 0;
+
+			// LPG parameters
+			lfos.lpg_decay[i]		= 0.5f;
+			lfos.lpg_color[i]		= 0.5f;
+			lfos.lpg_gain[i]		= 1.0f;
+			lfos.lpg_phase_id[i]	= 0.0f;
+			lfos.lpg_trigger_delay[i] = 0;
 		}
 	}
 
@@ -141,7 +138,7 @@ void init_lfos_shape(void)
 		if (!lfos.locked[i])
 		{
 			lfos.shape[i] = 0;
-			lfos.mode[i] = lfot_SHAPE;
+			lfos.mode[i] = lfot_LFO;
 		}
 	}
 }
@@ -165,13 +162,13 @@ void init_lfo_speed(void){
 void init_lfo_object(o_lfos *t_lfo){
 	uint8_t i;
 
-	// init phase (60deg)
+	// init phase with unison (spread = 0)
 	t_lfo->phase_id[0] =  0;
-	t_lfo->phase_id[1] =  20;
-	t_lfo->phase_id[2] =  16;
-	t_lfo->phase_id[3] =  12;
-	t_lfo->phase_id[4] =  8;
-	t_lfo->phase_id[5] =  4;
+	t_lfo->phase_id[1] =  0;
+	t_lfo->phase_id[2] =  0;
+	t_lfo->phase_id[3] =  0;
+	t_lfo->phase_id[4] =  0;
+	t_lfo->phase_id[5] =  0;
 
 	for (i = 0; i < NUM_CHANNELS; i++)
 	{
@@ -182,9 +179,15 @@ void init_lfo_object(o_lfos *t_lfo){
 		t_lfo->shape[i]						= 0;
 		t_lfo->gain[i]						= LFO_INIT_GAIN; 
 		t_lfo->locked[i]					= 0;
-		t_lfo->mode[i] 						= 0;
+		t_lfo->mode[i] 						= lfot_LFO;
 		t_lfo->to_vca[i] 					= 0;
 		t_lfo->muted[i] 					= 0;
+
+		// LPG-specific parameters (independent from LFO params)
+		t_lfo->lpg_decay[i]					= 0.5f;
+		t_lfo->lpg_color[i]					= 0.5f;
+		t_lfo->lpg_gain[i]					= 1.0f;
+		t_lfo->lpg_phase_id[i]				= 0.0f;
 
 		t_lfo->out_lpf[i] 					= 1;
 		t_lfo->envout_pwm[i]				= 0;
@@ -199,16 +202,20 @@ void init_lfo_object(o_lfos *t_lfo){
 
 		// flags
 		t_lfo->trig_armed[i] 				= 0;
+		t_lfo->lpg_trigger_delay[i]			= 0;
 
 		t_lfo->to_vca_buf[i] 				= t_lfo->to_vca[i];
 	}
 
 	t_lfo->phase_switch 		= 0;
+	t_lfo->phase_spread_amount	= 0.0f;		// Start in unison
+	t_lfo->lpg_phase_spread_amount = 0.0f;	// Start in unison
 
 	t_lfo->divmult_id[GLO_CLK] 	= LFO_UNITY_DIVMULT_ID;
 	t_lfo->cycle_pos[GLO_CLK] 	= 0;
 
 	t_lfo->use_ext_clock 		= 0;
+	t_lfo->global_vca_level		= 1.0f;		// Full level (no attenuation)
 
 	t_lfo->period[REF_CLK] 		= LFO_INIT_PERIOD;
 	t_lfo->divmult_id[REF_CLK] 	= LFO_UNITY_DIVMULT_ID;
@@ -424,15 +431,23 @@ void update_lfo_gain(int16_t turn)
 
 	turn_amt = turn * (switch_pressed(FINE_BUTTON) ? F_SCALING_FINE_LFO_GAIN : F_SCALING_LFO_GAIN);
 
+	// Build array of current gains based on mode
 	for (i=0; i<NUM_CHANNELS; i++)
-		gain[i] = lfos.gain[i];
+		gain[i] = (lfos.mode[i] == lfot_LPG) ? lfos.lpg_gain[i] : lfos.gain[i];
 
 	channels_changed = change_param_f(gain, turn_amt);
 
 	for (i=0; i<NUM_CHANNELS; i++)
 	{
-		if (channels_changed & (1<<i))
-			lfos.gain[i] = _CLAMP_F(gain[i] + turn_amt, F_SCALING_LFO_GAIN, 1.0);
+		if (channels_changed & (1<<i)) {
+			if (lfos.mode[i] == lfot_LPG) {
+				// LPG mode: adjust LPG peak level
+				lfos.lpg_gain[i] = _CLAMP_F(lfos.lpg_gain[i] + turn_amt, F_SCALING_LFO_GAIN, 1.0);
+			} else {
+				// LFO mode: adjust LFO gain
+				lfos.gain[i] = _CLAMP_F(lfos.gain[i] + turn_amt, F_SCALING_LFO_GAIN, 1.0);
+			}
+		}
 	}
 }
 
@@ -442,6 +457,7 @@ void read_lfo_speed(int16_t turn)
 	uint8_t i;
 	uint8_t fine_pressed;
 	float turn_amt, test_divmult_id;
+	uint8_t any_lpg_mode = 0;
 
 	if (!turn) return;
 
@@ -454,6 +470,11 @@ void read_lfo_speed(int16_t turn)
 		return;
 	}
 
+	// Check if any unlocked channel is in LPG mode (for global behavior)
+	for (i=0; i<NUM_CHANNELS; i++) {
+		if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG)
+			any_lpg_mode = 1;
+	}
 
 	// FINE
 	turn_amt = turn;
@@ -465,24 +486,27 @@ void read_lfo_speed(int16_t turn)
 	// GLOBAL
 	if (macro_states.all_af_buttons_released)
 	{
-		test_divmult_id = lfos.divmult_id[GLO_CLK] + turn_amt;
-		if (!fine_pressed) test_divmult_id = (int8_t)(test_divmult_id);
+		// LFO mode: adjust divmult_id
+		if (!any_lpg_mode) {
+			test_divmult_id = lfos.divmult_id[GLO_CLK] + turn_amt;
+			if (!fine_pressed) test_divmult_id = (int8_t)(test_divmult_id);
 
-		lfos.divmult_id[GLO_CLK] = _CLAMP_F(test_divmult_id, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
+			lfos.divmult_id[GLO_CLK] = _CLAMP_F(test_divmult_id, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
 
-		flag_all_lfos_recalc();
+			flag_all_lfos_recalc();
 
-
-		if (lfos.use_ext_clock)
-			stage_resync_lfos();
-
-		// LPG OVERRIDE: Global Decay
-		for (i=0; i<NUM_CHANNELS; i++) {
-			if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
-			}
+			if (lfos.use_ext_clock)
+				stage_resync_lfos();
 		}
 
+		// LPG mode: adjust lpg_decay for all LPG channels
+		for (i=0; i<NUM_CHANNELS; i++) {
+			if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG) {
+				lfos.lpg_decay[i] = _CLAMP_F(lfos.lpg_decay[i] + (turn_amt / 20.0f), 0.0f, 1.0f);
+				// Also update plaits params for Plaits-based modes
+				params.plaits_params[i].lpg_decay = lfos.lpg_decay[i];
+			}
+		}
 	}
 
 	// INDIVIDUAL
@@ -492,18 +516,20 @@ void read_lfo_speed(int16_t turn)
 			{
 				calc_params.already_handled_button[i] = 1; 
 
-				lfos.divmult_id[i] = _CLAMP_F(lfos.divmult_id[i] + turn_amt, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
-				
-				flag_lfo_recalc(i);
+				if (lfos.mode[i] == lfot_LPG) {
+					// LPG mode: adjust lpg_decay for this channel
+					lfos.lpg_decay[i] = _CLAMP_F(lfos.lpg_decay[i] + (turn_amt / 20.0f), 0.0f, 1.0f);
+					params.plaits_params[i].lpg_decay = lfos.lpg_decay[i];
+				} else {
+					// LFO mode: adjust divmult_id for this channel
+					lfos.divmult_id[i] = _CLAMP_F(lfos.divmult_id[i] + turn_amt, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
+					
+					flag_lfo_recalc(i);
 
-				if (lfos.use_ext_clock) {
-					stage_resync(i);
+					if (lfos.use_ext_clock) {
+						stage_resync(i);
+					}
 				}
-			}
-			
-			// LPG OVERRIDE: Individual Decay
-			if (button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
 			}
 		}
 	}
@@ -540,82 +566,121 @@ void read_LFO_phase(void)
 	float			enc_amount;
 	static uint8_t 	stage_phase_sync=0;
 	static uint8_t 	disable_phase_sync=0;
+	uint8_t			any_lpg_mode = 0;
 
 	enc_turn  = pop_encoder_q(sec_LFOPHASE);
 	enc_pressed = rotary_pressed(rotm_LFOSHAPE);
 	fine = switch_pressed(FINE_BUTTON);
 
-	if (enc_turn && rotary_pressed(rotm_LFOSPEED))
-	{
-		// LPG COLOR CONTROL (Speed + Phase)
-		// GLOBAL
-		if (macro_states.all_af_buttons_released){
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
-				}
-			}
-		} 
-		// INDIVIDUAL
-		else {
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if(button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
-					calc_params.already_handled_button[i] = 1;
-				}
-			}
-		}
-		return; // Don't process phase change
+	// Check if any unlocked channel is in LPG mode
+	for (i=0; i<NUM_CHANNELS; i++) {
+		if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG)
+			any_lpg_mode = 1;
 	}
 
+	// PHASE SPREAD CONTROL (when knob is pressed)
 	if (enc_pressed)
 	{
-		if (!disable_phase_sync)
-			stage_phase_sync=1;
-	} else
-	{
-		if (!enc_turn && stage_phase_sync)
-			sync_LFO_phase();
-		stage_phase_sync = 0;
-		disable_phase_sync = 0;
-	}
-
-	if (enc_turn)
-	{
-		disable_phase_sync = 1;
-		stage_phase_sync = 0;
-		if (fine)
-			enc_amount = -enc_turn * F_SCALING_FINE_LFO_PHASE;
-		else
-			enc_amount = -enc_turn;
-
-		// GLOBAL
-		if (macro_states.all_af_buttons_released){
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if (!lfos.locked[i])
-				{
-					if (!fine)
-						lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-					else
-						lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-
-					lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+		if (enc_turn) {
+			// Adjust phase spread amount
+			if (fine)
+				enc_amount = -enc_turn * F_SCALING_FINE_LFO_PHASE;
+			else
+				enc_amount = -enc_turn;
+			
+			// Adjust spread amount based on current mode (0 to 96 = 0 to 4 full clock cycles)
+			if (any_lpg_mode) {
+				lfos.lpg_phase_spread_amount = _CLAMP_F(lfos.lpg_phase_spread_amount + enc_amount, 0.0f, 96.0f);
+				
+				// Apply phase spread to all LPG channels
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG) {
+						lfos.lpg_phase_id[i] = (i * lfos.lpg_phase_spread_amount) / (float)NUM_CHANNELS;
+					}
+				}
+			} else {
+				lfos.phase_spread_amount = _CLAMP_F(lfos.phase_spread_amount + enc_amount, 0.0f, 96.0f);
+				
+				// Apply phase spread to all LFO channels
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					if (!lfos.locked[i] && lfos.mode[i] == lfot_LFO) {
+						lfos.phase_id[i] = (i * lfos.phase_spread_amount) / (float)NUM_CHANNELS;
+						lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+					}
 				}
 			}
+			
+			disable_phase_sync = 1;
+		} else {
+			// Knob pressed but not turned - stage for sync
+			if (!disable_phase_sync)
+				stage_phase_sync=1;
 		}
+	} 
+	else  // Knob not pressed
+	{
+		// If knob was just released and sync was staged, sync all LFOs
+		if (!enc_turn && stage_phase_sync) {
+			sync_LFO_phase();
+		}
+		stage_phase_sync = 0;
+		disable_phase_sync = 0;
+		
+		// INDIVIDUAL PHASE ADJUSTMENT (when knob not pressed but turned)
+		if (enc_turn)
+		{
+			if (fine)
+				enc_amount = -enc_turn * F_SCALING_FINE_LFO_PHASE;
+			else
+				enc_amount = -enc_turn;
 
-		// INDIVIDUAL
-		else{
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if(button_pressed(i))
-				{
-					if (!fine)
-						lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-					else
-						lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+			// GLOBAL
+			if (macro_states.all_af_buttons_released){
+				for (i = 0; i < NUM_CHANNELS; i++){
+					if (!lfos.locked[i])
+					{
+						if (lfos.mode[i] == lfot_LPG) {
+							// LPG mode: adjust lpg_phase_id
+							if (!fine)
+								lfos.lpg_phase_id[i] = _WRAP_I16(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+							else
+								lfos.lpg_phase_id[i] = _WRAP_F(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						} else {
+							// LFO mode: adjust phase_id
+							if (!fine)
+								lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+							else
+								lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
 
-					calc_params.already_handled_button[i] = 1;
-					lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+							lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+						}
+					}
+				}
+			}
+
+			// INDIVIDUAL
+			else{
+				for (i = 0; i < NUM_CHANNELS; i++){
+					if(button_pressed(i))
+					{
+						if (lfos.mode[i] == lfot_LPG) {
+							// LPG mode: adjust lpg_phase_id
+							if (!fine)
+								lfos.lpg_phase_id[i] = _WRAP_I16(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+							else
+								lfos.lpg_phase_id[i] = _WRAP_F(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						} else {
+							// LFO mode: adjust phase_id
+							if (!fine)
+								lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+							else
+								lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+
+							lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+						}
+
+						calc_params.already_handled_button[i] = 1;
+					}
 				}
 			}
 		}
@@ -646,9 +711,14 @@ void read_LFO_shape(void)
 			for (i = 0; i < NUM_CHANNELS; i++){
 				if (!lfos.locked[i])
 				{
-					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
-					if (lfos.mode[i] == lfot_LPG)
-						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					if (lfos.mode[i] == lfot_LPG) {
+						// LPG mode: adjust lpg_color (resonance)
+						lfos.lpg_color[i] = _CLAMP_F(lfos.lpg_color[i] + (enc / 20.0f), 0.0f, 1.0f);
+						params.plaits_params[i].lpg_color = lfos.lpg_color[i];
+					} else {
+						// LFO mode: adjust shape
+						lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					}
 
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;								
@@ -661,9 +731,14 @@ void read_LFO_shape(void)
 			for (i=0; i < NUM_CHANNELS; i++){ 
 				if(button_pressed(i))
 				{
-					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
-					if (lfos.mode[i] == lfot_LPG)
-						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					if (lfos.mode[i] == lfot_LPG) {
+						// LPG mode: adjust lpg_color (resonance)
+						lfos.lpg_color[i] = _CLAMP_F(lfos.lpg_color[i] + (enc / 20.0f), 0.0f, 1.0f);
+						params.plaits_params[i].lpg_color = lfos.lpg_color[i];
+					} else {
+						// LFO mode: adjust shape
+						lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					}
 
 					calc_params.already_handled_button[i] = 1; 
 
@@ -710,22 +785,14 @@ float calc_lfo_phase(float phase_id)
 
 void read_lfo_cv(void)
 {
-	static uint16_t last_divmult_cv=0;
-
-	if (system_settings.lfo_cv_mode == LFOCV_SPEED)
-		divmult_cv = (analog[LFO_CV].bracketed_val * NUM_DIVMULTS)>>12;
-	else
-		divmult_cv = 0;
-
-	if (divmult_cv != last_divmult_cv) {
-		// flag_lfo_recalc(GLO_CLK);
-		flag_all_lfos_recalc();
-		last_divmult_cv = divmult_cv;
+	// LFO CV jack repurposed as Global VCA
+	// When unplugged, default to full volume (1.0)
+	// When plugged, read CV value and convert to 0.0-1.0 range
+	if (analog_jack_plugged(LFO_CV)) {
+		lfos.global_vca_level = (float)analog[LFO_CV].bracketed_val / 4095.0f;
+	} else {
+		lfos.global_vca_level = 1.0f;  // Full volume when unplugged
 	}
-
-	// else if (system_settings.lfo_cv_mode 	== LFOCV_SHAPE){new_cv  = (analog[LFO_CV].bracketed_val * NUM_LFO_SHAPES   / 4095);}
-	// else if (system_settings.lfo_cv_mode 	== LFOCV_GROOVE){new_cv = (analog[LFO_CV].bracketed_val * 100   / 4095);}
-
 }
 
 

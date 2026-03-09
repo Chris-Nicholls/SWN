@@ -333,15 +333,12 @@ void update_button_leds(void){
 							tri_period = LFO_MODE_FLASH_PERIOD;
 							tri_phase = (now + animation_phase + ((tri_period*2*(NUM_CHANNELS-i))/NUM_CHANNELS)) % (tri_period*2);
 
-							if (lfos.mode[i]==lfot_TRIG){
-								brightness = (tri_phase < (tri_period/NUM_CHANNELS)) ? 1.0 : 0.05;
-								color = ledc_AQUA;
+							if (lfos.mode[i]==lfot_LPG){
+								// LPG mode: show envelope state - bright flash on trigger, decay
+								brightness = lfos.out_lpf[i];
+								color = ledc_FUSHIA;
 							}
-							else if (lfos.mode[i]==lfot_GATE){
-								brightness = (tri_phase > tri_period) ? 1.0 : 0.0;
-								color = ledc_LIGHT_BLUE;
-							}
-							else{ //lfot_SHAPE
+							else{ //lfot_LFO (standard LFO mode)
 								tri_wave = _FOLD_F(tri_phase, tri_period);
 								brightness = (float)(tri_wave/tri_period);
 								color = ledc_BLUE;
@@ -350,7 +347,7 @@ void update_button_leds(void){
 
 						} else {
 							brightness = 0.2;
-							color = ledc_BLUE;
+							color = (lfos.mode[i]==lfot_LPG) ? ledc_FUSHIA : ledc_BLUE;
 						}
 						set_rgb_color_brightness(&led_cont.button[i], color, brightness);
 					}

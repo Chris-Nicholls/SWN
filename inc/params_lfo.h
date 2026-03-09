@@ -62,13 +62,14 @@
 
 enum lfoModes{ 
 
-	lfot_SHAPE,
-	lfot_GATE,
-	lfot_TRIG,
-	lfot_LPG,
+	lfot_LFO,		// Standard LFO mode
+	lfot_LPG,		// Low Pass Gate mode
 
 	NUM_LFO_MODES
 };
+
+// Keep old name for compatibility during transition
+#define lfot_SHAPE lfot_LFO
 
 
 typedef struct o_lfos
@@ -85,6 +86,17 @@ typedef struct o_lfos
 
 	uint8_t			use_ext_clock;
 	uint8_t			phase_switch;
+	float			phase_spread_amount;	// Amount of phase spreading across voices (0 = unison, higher = more spread)
+
+	// LPG-specific parameters (independent from LFO params)
+	float			lpg_decay			[NUM_CHANNELS];		// LPG decay time (0-1), mapped to Speed encoder in LPG mode
+	float			lpg_color			[NUM_CHANNELS];		// LPG color/resonance (0-1), mapped to Shape encoder in LPG mode
+	float			lpg_gain			[NUM_CHANNELS];		// LPG peak level (0-1), mapped to Gain encoder in LPG mode
+	float			lpg_phase_id		[NUM_CHANNELS];		// Individual phase offsets in LPG mode
+	float			lpg_phase_spread_amount;				// Phase spread for LPG triggers (0 = unison)
+
+	// Global VCA from LFO CV jack
+	float			global_vca_level;						// 0.0-1.0, applied to all outputs
 
 	//Resultants
 	float			divmult				[NUM_CHANNELS + 2];
@@ -116,6 +128,9 @@ typedef struct o_lfos
 	//Probably can be made into statics
 	uint8_t 		trig_armed 			[NUM_CHANNELS];
 	uint8_t  		trigout 			[NUM_CHANNELS];
+	
+	// LPG trigger delays for phase-spread timing
+	uint16_t		lpg_trigger_delay	[NUM_CHANNELS];		// Countdown in timer ticks (decremented each envout_pwm update)
 
 } o_lfos;
 

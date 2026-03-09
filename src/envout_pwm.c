@@ -169,11 +169,21 @@ void update_envout_pwm(void){
 
 	uint8_t j;
 	uint32_t envout_buf;
-	static float vca_trig[NUM_CHANNELS] = {1.0};
-	const uint8_t GATE_THRESHOLD = 127;
 
 	extern float lfo_phase_multiplier;
 	update_lfos(lfo_phase_multiplier);
+
+	// Process pending LPG trigger delays (for phase-spread triggering)
+	for (j=0; j<NUM_CHANNELS; j++) {
+		if (lfos.lpg_trigger_delay[j] > 0) {
+			lfos.lpg_trigger_delay[j]--;
+			if (lfos.lpg_trigger_delay[j] == 0) {
+				// Time to trigger this channel's LPG
+				extern void Shim_LPG_Trigger(uint8_t chan);
+				Shim_LPG_Trigger(j);
+			}
+		}
+	}
 
 	for (j=0;j<NUM_CHANNELS;j++)
 	{		
@@ -187,8 +197,6 @@ void update_envout_pwm(void){
 		else if ((envout_buf > PWM_MAX/2) && lfos.trig_armed[j])
 		{
 			lfos.trigout[j] = 1;
-			// vca_trig is used for TRIG mode's envelope generation
-			vca_trig[j] = F_TRIGVCADUR;
 			
 			lfos.trig_armed[j]++;
 			if (lfos.trig_armed[j] == TRIG_DURATION)
@@ -204,38 +212,16 @@ void update_envout_pwm(void){
 			lfos.envout_pwm[j] = envout_buf; 													
 			lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
 		}
-		else if (lfos.mode[j] == lfot_GATE)
-		{
-			lfos.envout_pwm[j] = envout_buf > GATE_THRESHOLD ? PWM_MAX : 0;	
-
-			lfos.out_lpf[j] = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-			lfos.envout_pwm[j] *= lfos.gain[j];
-		}
-				
-		else if (lfos.mode[j] == lfot_TRIG)
-		{
-			// Trigger logic handled globally above.
-			// Just handle the VCA envelope generation for the specific TRIG mode output behavior.
-									
-			if(vca_trig[j]>0) 	vca_trig[j]--;
-			else				vca_trig[j]=0;
-						
-			lfos.out_lpf[j] *= (1-LFO_TRIG_LPF);
-			lfos.out_lpf[j] += LFO_TRIG_LPF * vca_trig[j] / F_TRIGVCADUR;			
-							
-			lfos.envout_pwm[j] = lfos.trigout[j] * PWM_MAX * lfos.gain[j];
-		} 
-
 		else if (lfos.mode[j] == lfot_LPG)
 		{
 			float env_val = Shim_LPG_GetEnvelope(j);
 			
-			// Apply LFO Gain scaling if desired (usually 1.0 in LPG mode, but lfos.gain handles level)
-			lfos.envout_pwm[j] = (uint32_t)(env_val * PWM_MAX * lfos.gain[j]);
-			lfos.out_lpf[j] = env_val * lfos.gain[j];
+			// Use LPG-specific gain for peak level
+			lfos.envout_pwm[j] = (uint32_t)(env_val * PWM_MAX * lfos.lpg_gain[j]);
+			lfos.out_lpf[j] = env_val * lfos.lpg_gain[j];
 		} 
 
-		else //lfos.mode[j] == lfot_SHAPE
+		else //lfos.mode[j] == lfot_LFO (standard LFO shape mode)
 		{
 			lfos.envout_pwm[j] = envout_buf;
 			lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
