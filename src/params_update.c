@@ -416,6 +416,15 @@ static float last_chord_seed_freqs[NUM_CHANNELS] = {0};
 static uint8_t last_chord_num_seeds = 0;
 static uint8_t last_chord_num_fills = 0;
 
+// CV settling: recalculate only once seed CVs have been stable for N consecutive cycles
+// This ensures we snapshot the settled voltage, not a transient mid-slew reading.
+#define CHORD_SETTLE_CYCLES				12		// update cycles CV must hold still before recalc fires
+#define CHORD_SETTLE_STABLE_RATIO		1.002f	
+static uint8_t  chord_recalc_pending = 0;
+static uint8_t  chord_settle_ctr = 0;
+static float    chord_settle_ref_freqs[NUM_CHANNELS] = {0};
+static uint8_t  chord_settle_num_seeds = 0;
+
 // LPG trigger pending - wait for CV to stabilize before triggering
 static uint8_t lpg_trigger_pending = 0;
 static uint8_t pending_num_seeds = 0;
@@ -1587,35 +1596,96 @@ void read_freq(void){
 		// Chord mode is active if we have at least one seed AND at least one voice to fill
 		uint8_t temp_chord_mode_active = (num_seeds > 0 && num_to_fill > 0);
 		
-		// Hysteresis: check if we need to recalculate the chord
+		// Hysteresis + settling: recalculate only after seed CVs have been stable.
+		// When movement is detected we start a countdown; each call we check whether
+		// the CV is still slewing (relative to what we saw last call).  If it moves
+		// again the countdown resets.  Only when it holds still for CHORD_SETTLE_CYCLES
+		// consecutive calls do we snapshot and rebuild the chord.
 		uint8_t needs_recalc = 0;
-		
+
 		if (temp_chord_mode_active) {
-			// Always recalculate if chord mode just became active
-			if (!chord_mode_active) {
-				needs_recalc = 1;
+			// Topology changes (mode just activated, or patch changed) fire immediately –
+			// there is no "old" chord to protect, so no settling needed.
+			if (!chord_mode_active ||
+				num_seeds   != last_chord_num_seeds ||
+				num_to_fill != last_chord_num_fills)
+			{
+				needs_recalc        = 1;
+				chord_recalc_pending = 0;
+				chord_settle_ctr     = 0;
 			}
-			// Recalculate if number of seeds or fills changed
-			else if (num_seeds != last_chord_num_seeds || num_to_fill != last_chord_num_fills) {
-				needs_recalc = 1;
-			}
-			// Check if any seed frequency changed by more than 1/4 tone
 			else {
+				// Has any seed moved more than 1/4 tone from the last stable snapshot?
+				uint8_t moved = 0;
 				for (uint8_t i = 0; i < num_seeds; i++) {
 					float ratio = seed_freqs[i] / last_chord_seed_freqs[i];
 					if (ratio > CHORD_HYSTERESIS_RATIO || ratio < (1.0f / CHORD_HYSTERESIS_RATIO)) {
-						needs_recalc = 1;
+						moved = 1;
 						break;
+					}
+				}
+
+				if (!moved) {
+					// Back within the stable window – cancel any in-progress settle.
+					chord_recalc_pending = 0;
+					chord_settle_ctr     = 0;
+				} else {
+					// CV has moved past the 1/4-tone gate.  Check whether it is still
+					// slewing by comparing against the reference we saved last cycle.
+					uint8_t still_moving = 0;
+					if (chord_recalc_pending && chord_settle_num_seeds == num_seeds) {
+						for (uint8_t i = 0; i < num_seeds; i++) {
+							float ratio = seed_freqs[i] / chord_settle_ref_freqs[i];
+							if (ratio > CHORD_SETTLE_STABLE_RATIO || ratio < (1.0f / CHORD_SETTLE_STABLE_RATIO)) {
+								still_moving = 1;
+								break;
+							}
+						}
+					} else {
+						// First time we detect movement – treat as still moving to arm the counter.
+						still_moving = 1;
+					}
+
+					if (still_moving) {
+						// CV is actively changing: (re)start the settle countdown and
+						// save current readings as the new reference.
+						chord_recalc_pending   = 1;
+						chord_settle_ctr       = CHORD_SETTLE_CYCLES;
+						chord_settle_num_seeds = num_seeds;
+						for (uint8_t i = 0; i < num_seeds; i++)
+							chord_settle_ref_freqs[i] = seed_freqs[i];
+					} else {
+						// CV is holding still – count down toward recalc.
+						if (chord_settle_ctr > 0)
+							chord_settle_ctr--;
+						if (chord_settle_ctr == 0) {
+							needs_recalc        = 1;
+							chord_recalc_pending = 0;
+						}
 					}
 				}
 			}
 		}
 		
 		if (temp_chord_mode_active && needs_recalc) {
+			// Quantize settled seed frequencies to the nearest semitone.
+			// The CV has already been stable for CHORD_SETTLE_CYCLES, so any
+			// remaining deviation from a true semitone is ADC noise / uncalibrated
+			// tracking.  Snapping here gives a clean pitch to the chord engine and
+			// means hysteresis in future cycles is measured against the quantized
+			// note, so re-triggers fire on clean semitone boundaries.
+			if (!microtonal) {
+				for (uint8_t i = 0; i < num_seeds; i++) {
+					// semitones from A4 (440 Hz), rounded to nearest integer
+					float st = roundf(12.0f * log2f(seed_freqs[i] / 440.0f));
+					seed_freqs[i] = 440.0f * powf(2.0f, st / 12.0f);
+				}
+			}
+
 			// Use stored overtone weights (edited via OCT+slider combo)
 			// params.chord_overtone_weights[0] is fundamental (always 1.0)
 			// params.chord_overtone_weights[1-6] are harmonics 2-7
-			
+
 			// Calculate dynamic frequency bounds from seeds
 			// min = 2 octaves below lowest seed, max = 1 octave above highest seed
 			// This 3-octave span guarantees at least 3 candidates per existing note
@@ -1667,7 +1737,7 @@ void read_freq(void){
 			}
 			
 			// Assign frequencies to temp array:
-			// - Seeds get their EXACT CV-derived frequency (no change)
+			// - Seeds get the semitone-quantized frequency (after settling)
 			// - Fills get the sorted fill frequencies, assigned to fill channels in order
 			uint8_t seed_idx = 0;
 			uint8_t fill_idx = 0;
@@ -1676,7 +1746,7 @@ void read_freq(void){
 				uint8_t switch_voct = (params.voct_switch_state[chan] == SW_VOCT);
 				
 				if (jack_plugged && switch_voct) {
-					// Seed voice: use exact CV frequency
+					// Seed voice: use quantized (semitone-snapped) frequency
 					temp_chord_freqs[chan] = seed_freqs[seed_idx++];
 				}
 				else {
@@ -1728,6 +1798,8 @@ void read_freq(void){
 			last_chord_num_seeds = 0;
 			last_chord_num_fills = 0;
 			lpg_trigger_pending = 0;
+			chord_recalc_pending = 0;
+			chord_settle_ctr     = 0;
 		}
 		else if (lpg_trigger_pending) {
 			// Chord mode active, no recalc needed (CV stable) - now trigger the LPGs
