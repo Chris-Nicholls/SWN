@@ -588,9 +588,11 @@ void read_LFO_phase(void)
 			else
 				enc_amount = -enc_turn;
 			
-			// Adjust spread amount based on current mode (0 to 96 = 0 to 4 full clock cycles)
+			// Adjust spread amount based on current mode.
+			// Range -96..+96: positive = low channels lead, negative = high channels lead.
+			// At ±96 the spread between ch0 and ch5 is ±(5/6 * 96/24) ≈ ±3.3 clock cycles.
 			if (any_lpg_mode) {
-				lfos.lpg_phase_spread_amount = _CLAMP_F(lfos.lpg_phase_spread_amount + enc_amount, 0.0f, 96.0f);
+				lfos.lpg_phase_spread_amount = _CLAMP_F(lfos.lpg_phase_spread_amount + enc_amount, -96.0f, 96.0f);
 				
 				// Apply phase spread to all LPG channels
 				for (i = 0; i < NUM_CHANNELS; i++) {
@@ -599,7 +601,7 @@ void read_LFO_phase(void)
 					}
 				}
 			} else {
-				lfos.phase_spread_amount = _CLAMP_F(lfos.phase_spread_amount + enc_amount, 0.0f, 96.0f);
+				lfos.phase_spread_amount = _CLAMP_F(lfos.phase_spread_amount + enc_amount, -96.0f, 96.0f);
 				
 				// Apply phase spread to all LFO channels
 				for (i = 0; i < NUM_CHANNELS; i++) {
