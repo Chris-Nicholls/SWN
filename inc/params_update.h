@@ -131,6 +131,7 @@ enum MuteNoteKeyStates {
 #define FW_UNISON_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(uint8_t)*NUM_CHANNELS)
 #define FW_V2X2_EQ_PARAMS_SIZE (sizeof(uint16_t) * 6)  // 6 EQ slider values
 #define FW_CHORD_WEIGHTS_SIZE (sizeof(float) * 7)  // 7 overtone weights for chord generation
+#define FW_REVERB_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(float)*5)  // reverb_send[6] + time + diffusion + lp + input_gain + output_level
 
 // Soft clip pregain constants
 #define DEFAULT_SOFT_CLIP_PREGAIN 0.05f
@@ -249,7 +250,15 @@ typedef struct o_params{
 
 	#define FW_PLAITS_PARAMS_SIZE (sizeof(PlaitsParams)*NUM_CHANNELS) 
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_PLAITS_PARAMS_SIZE];
+	// Reverb params (vF)
+	float		reverb_send			[NUM_CHANNELS];	// Per-channel send to reverb (0=dry, 1=wet)
+	float		reverb_time;						// Decay time [0,1]
+	float		reverb_diffusion;					// Allpass smearing [0,1]
+	float		reverb_lp;							// HF damping [0,1] (lower = darker)
+	float		reverb_input_gain;					// Pre-tanh drive [0,4] (1=unity, >1=saturate)
+	float		reverb_output_level;				// Output gain [0,2] (multiplied by fixed 6x boost)
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_PLAITS_PARAMS_SIZE - FW_REVERB_PARAMS_SIZE];
 } o_params;
 
 void 		check_reset_navigation(void);

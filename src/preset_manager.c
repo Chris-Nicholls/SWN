@@ -54,7 +54,9 @@ char	preset_signature_v1_2[4] = {'P', 'R', 'A', '\0'};
 char	preset_signature_v2_0[4] = {'P', 'R', 'B', '\0'};
 char	preset_signature_v2_x[4] = {'P', 'R', 'C', '\0'};  // v2.x with phase modulation
 char	preset_signature_v2_x2[4] = {'P', 'R', 'D', '\0'}; // v2.x with resonator envelope
-char	preset_signature_vLatest[4] = {'P', 'R', 'E', '\0'};  // v2.x2 with EQ
+char	preset_signature_vE[4]     = {'P', 'R', 'E', '\0'}; // v2.x2 with EQ
+char	preset_signature_vF[4]     = {'P', 'R', 'F', '\0'}; // reverb params (send/time/diff/lp/input_gain)
+char	preset_signature_vLatest[4] = {'P', 'R', 'G', '\0'}; // + reverb output_level
 
 static uint8_t cached_preset[sizeof(preset_signature_vLatest) + sizeof(o_params) + sizeof(o_lfos)];
 static uint8_t animation_enabled = 1;
@@ -241,9 +243,23 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 		t_params->resonator_decay_freq = 8.0f;
 	}
 	// Any version before 'E': Initialize EQ to flat
-	if (version < preset_signature_vLatest[2]) {
+	if (version < preset_signature_vE[2]) {
 		for (uint8_t i = 0; i < 6; i++)
 			t_params->eq_slider_values[i] = 2048;  // Flat EQ (center position)
+	}
+	// Any version before 'F': Initialize reverb params to off/defaults
+	if (version < preset_signature_vF[2]) {
+		for (uint8_t i = 0; i < NUM_CHANNELS; i++)
+			t_params->reverb_send[i] = 0.0f;  // All channels fully dry
+		t_params->reverb_time        = 0.6f;
+		t_params->reverb_diffusion   = 0.625f;
+		t_params->reverb_lp          = 0.7f;
+		t_params->reverb_input_gain  = 2.0f;
+		t_params->reverb_output_level = 1.0f;
+	}
+	// Version 'F': has reverb params but not output_level
+	if (version == preset_signature_vF[2]) {
+		t_params->reverb_output_level = 1.0f;
 	}
 }
 
@@ -327,6 +343,8 @@ uint8_t check_preset_filled(uint32_t preset_num, char *version)
 	if (   read_data[0] == preset_signature_vLatest[0]
 		&& read_data[1] == preset_signature_vLatest[1]
 		&& (read_data[2] == preset_signature_vLatest[2] \
+			|| read_data[2] == preset_signature_vF[2] \
+			|| read_data[2] == preset_signature_vE[2] \
 			|| read_data[2] == preset_signature_v1_0[2] \
 			|| read_data[2] == preset_signature_v1_2[2] \
 			|| read_data[2] == preset_signature_v2_x[2] \

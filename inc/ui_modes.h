@@ -57,6 +57,8 @@ enum UI_Modes {
 
 	FACTORY_RESET,
 
+	REVERB_EDIT,
+
 	NUM_UI_MODES
 };
 

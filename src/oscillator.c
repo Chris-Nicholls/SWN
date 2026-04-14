@@ -52,6 +52,8 @@
 #include "eq.h"
 #include "UI_conditioning.h"
 #include "hardware_controls.h"
+#include "reverb.h"
+#include "reverb_ui.h"
 
 extern enum UI_Modes 	ui_mode;
 extern o_rotary 		rotary[NUM_ROTARIES];
@@ -99,6 +101,10 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	// Plaits/Wavetable accumulation buffer
 	float			temp_buffer[MONO_BUFSZ];
 	uint8_t			is_plaits_mode;
+
+	// Reverb send accumulation (wavetable channels only; cleared each block)
+	float			reverb_send_L[MONO_BUFSZ] = {0.f};
+	float			reverb_send_R[MONO_BUFSZ] = {0.f};
 
 	oscout_status = 	((ui_mode != WTRECORDING) && (ui_mode != WTMONITORING) && (ui_mode != WTREC_WAIT));
 	audiomon_status = 	((ui_mode == WTRECORDING) || (ui_mode == WTMONITORING) || (ui_mode == WTREC_WAIT) || (ui_mode == WTTTONE));
@@ -240,6 +246,14 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			}
 		}
 
+		// Reverb send for this channel (Plaits channels never feed the reverb)
+		float chan_send = is_plaits_mode ? 0.0f : params.reverb_send[chan];
+		if (chan_send < 0.0f) chan_send = 0.0f;
+		if (chan_send > 1.0f) chan_send = 1.0f;
+		// Equal-power crossfade: dry^2 + wet^2 = 1 → constant power
+		float chan_dry = sqrtf(1.0f - chan_send);
+		float chan_wet = sqrtf(chan_send);
+
 		// Optimized Mixing Loop: 4-sample blocks with vectorized math
 		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
 			float avg_level = interpolated_level + (level_inc * 1.5f); // Halfway through the 4-sample block
@@ -250,11 +264,20 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			float32_t pan_R[4];
 
 			arm_scale_f32(&temp_buffer[i_sample], avg_level, block, 4);
-			arm_scale_f32(block, avg_pan, pan_L, 4);
-			arm_scale_f32(block, 1.0f - avg_pan, pan_R, 4);
+			arm_scale_f32(block, avg_pan * chan_dry, pan_L, 4);
+			arm_scale_f32(block, (1.0f - avg_pan) * chan_dry, pan_R, 4);
 
 			arm_add_f32(&output_buffer_evens[i_sample], pan_L, &output_buffer_evens[i_sample], 4);
 			arm_add_f32(&output_buffer_odds[i_sample], pan_R, &output_buffer_odds[i_sample], 4);
+
+			if (chan_wet > 0.001f) {
+				float32_t snd_L[4];
+				float32_t snd_R[4];
+				arm_scale_f32(block, avg_pan * chan_wet, snd_L, 4);
+				arm_scale_f32(block, (1.0f - avg_pan) * chan_wet, snd_R, 4);
+				arm_add_f32(&reverb_send_L[i_sample], snd_L, &reverb_send_L[i_sample], 4);
+				arm_add_f32(&reverb_send_R[i_sample], snd_R, &reverb_send_R[i_sample], 4);
+			}
 
 			interpolated_level += level_inc * 4;
 			interpolated_pan += pan_inc * 4;
@@ -286,7 +309,43 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 
 	// Apply EQ after soft clipping
 	// eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
-	
+
+	// Apply Reverb (wavetable channels only; send levels per channel; Plaits channels excluded)
+	// The send bus accumulates temp_buffer × avg_level × avg_pan × chan_wet,
+	// so its range is ±32768 × 4095 per channel. We normalise to ±1.0 by
+	// dividing by that product. The user pregain slider then drives the
+	// signal into the tanh soft-clipper before the reverb tank.
+	if (oscout_status) {
+		Reverb_SetParams(params.reverb_time, params.reverb_diffusion, params.reverb_lp);
+		const float send_norm = 1.0f / (32768.0f * 4095.0f);
+		arm_scale_f32(reverb_send_L, send_norm, reverb_send_L, MONO_BUFSZ);
+		arm_scale_f32(reverb_send_R, send_norm, reverb_send_R, MONO_BUFSZ);
+
+		// Apply user-controlled input drive, then soft-clip with tanh.
+		// input_gain > 1 overdrives into tanh for saturation character.
+		// After tanh the signal is bounded to ±1.0; the fixed tank
+		// input_gain (2.0) keeps the tank within ±8.0 FORMAT_12_BIT headroom.
+		{
+			float ig = params.reverb_input_gain;
+			if (ig < 0.0f) ig = 0.0f;
+			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+				reverb_send_L[i_sample] = tanhf(reverb_send_L[i_sample] * ig);
+				reverb_send_R[i_sample] = tanhf(reverb_send_R[i_sample] * ig);
+			}
+		}
+
+		Reverb_Process(reverb_send_L, reverb_send_R, MONO_BUFSZ);
+		// Output scaling: undo the input normalization, then apply the
+		// user-controlled output level [0, 2].
+		float out_level = params.reverb_output_level;
+		if (out_level < 0.0f) out_level = 0.0f;
+		const float send_denorm = 32768.0f * 4095.0f * out_level;
+		arm_scale_f32(reverb_send_L, send_denorm, reverb_send_L, MONO_BUFSZ);
+		arm_scale_f32(reverb_send_R, send_denorm, reverb_send_R, MONO_BUFSZ);
+		arm_add_f32(output_buffer_evens, reverb_send_L, output_buffer_evens, MONO_BUFSZ);
+		arm_add_f32(output_buffer_odds, reverb_send_R, output_buffer_odds, MONO_BUFSZ);
+	}
+
 	// Apply Global VCA from LFO CV jack (only when jack is plugged)
 	if (analog_jack_plugged(LFO_CV) && lfos.global_vca_level < 1.0f) {
 		arm_scale_f32(output_buffer_evens, lfos.global_vca_level, output_buffer_evens, MONO_BUFSZ);
@@ -329,6 +388,8 @@ void update_oscillators(void){
 
 	read_ext_trigs();
 
+	check_reverb_edit_entry_exit();
+
 	for (chan = 0; chan < NUM_CHANNELS; chan++){
 
 		if ((ui_mode != SELECT_PARAMS) && (ui_mode != RGB_COLOR_ADJUST)) {
@@ -346,6 +407,9 @@ void update_oscillators(void){
 		if (ui_mode == PLAY)
 			update_noise(chan);
 	}
+
+	if (ui_mode == REVERB_EDIT)
+		update_reverb_edit_sliders();
 
 }
 
@@ -391,4 +455,5 @@ void init_wt_osc(void) {
 
 	Plaits_Init();
 	Shim_LPG_Init();
+	Reverb_Init();
 }

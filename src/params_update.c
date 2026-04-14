@@ -69,6 +69,7 @@
 #include "wavetable_play_export.h"
 #include "preset_manager_selbus.h"
 #include "eq.h"
+#include "reverb_ui.h"
 
 extern o_wt_osc wt_osc;
 extern enum UI_Modes ui_mode;
@@ -381,6 +382,15 @@ void init_param_object(o_params *t_params){
 		t_params->plaits_params[chan].mod_freq = 0.0f;
 		t_params->plaits_params[chan].output_mode = 0;
 	}
+
+	// Reverb defaults (vF)
+	for (chan = 0; chan < NUM_CHANNELS; chan++)
+		t_params->reverb_send[chan] = 0.0f;
+	t_params->reverb_time         = 0.6f;
+	t_params->reverb_diffusion    = 0.625f;
+	t_params->reverb_lp           = 0.7f;
+	t_params->reverb_input_gain   = 2.0f;
+	t_params->reverb_output_level = 1.0f;
 }
 
 void init_calc_params(void)
@@ -818,54 +828,62 @@ void read_level_and_pan(uint8_t chan)
 	float slider_motion = fabs(analog[A_SLIDER + chan].lpf_val - last_slider_val[chan]);
 	float level = 0.f;
 
-	if (slider_motion > 20)
-	{
-		last_slider_val[chan] = analog[A_SLIDER + chan].lpf_val;
-		
-		// Fine+slider: update EQ for this band (pick-up style)
-		if (switch_pressed(FINE_BUTTON))
-		{
-			params.eq_slider_values[chan] = (uint16_t)slider_val;
-			eq_update_from_sliders(params.eq_slider_values);
-			return;  // Don't process as level
-		}
-		
-		// Oct+slider: update chord overtone weight for this harmonic
-		if (rotary_pressed(rotm_OCT))
-		{
-			// Slider chan maps to overtone_weight[chan+1] (harmonics 2-7)
-			params.chord_overtone_weights[chan + 1] = slider_val / 4095.0f;
-			return;  // Don't process as level
-		}
-		
-		if (button_pressed(chan))
-		{
-			calc_params.already_handled_button[chan] = 1;
-			calc_params.adjusting_pan_state[chan] = pan_PANNING;
-			params.pan[chan] = slider_val / 4095.f;
-		}
-	}
+	// In REVERB_EDIT mode sliders control reverb parameters, not volume/pan.
+	// Skip slider reading but still compute level from cached values so
+	// note_on / LFO-to-VCA / VCA CV modulation keeps working.
+	if (ui_mode == REVERB_EDIT) {
+		level = calc_params.cached_level[chan];
+	} else {
 
-	switch (calc_params.adjusting_pan_state[chan]) {
-		case (pan_PANNING):
-			level = calc_params.cached_level[chan];
-			if (!button_pressed(chan)) {
-				calc_params.adjusting_pan_state[chan] = pan_CACHED_LEVEL;
+		if (slider_motion > 20)
+		{
+			last_slider_val[chan] = analog[A_SLIDER + chan].lpf_val;
+			
+			// Fine+slider: update EQ for this band (pick-up style)
+			if (switch_pressed(FINE_BUTTON))
+			{
+				params.eq_slider_values[chan] = (uint16_t)slider_val;
+				eq_update_from_sliders(params.eq_slider_values);
+				return;  // Don't process as level
 			}
-			break;
-
-		case (pan_CACHED_LEVEL):
-			level = calc_params.cached_level[chan];
-			if (fabsf(slider_val - calc_params.cached_level[chan]) < 10) {
-				calc_params.adjusting_pan_state[chan] = pan_INACTIVE;
+			
+			// Oct+slider: update chord overtone weight for this harmonic
+			if (rotary_pressed(rotm_OCT))
+			{
+				// Slider chan maps to overtone_weight[chan+1] (harmonics 2-7)
+				params.chord_overtone_weights[chan + 1] = slider_val / 4095.0f;
+				return;  // Don't process as level
 			}
-			break;
+			
+			if (button_pressed(chan))
+			{
+				calc_params.already_handled_button[chan] = 1;
+				calc_params.adjusting_pan_state[chan] = pan_PANNING;
+				params.pan[chan] = slider_val / 4095.f;
+			}
+		}
 
-		case (pan_INACTIVE):
-			level = slider_val - 20.f;
-			calc_params.cached_level[chan] = level;
-			break;
-	}
+		switch (calc_params.adjusting_pan_state[chan]) {
+			case (pan_PANNING):
+				level = calc_params.cached_level[chan];
+				if (!button_pressed(chan)) {
+					calc_params.adjusting_pan_state[chan] = pan_CACHED_LEVEL;
+				}
+				break;
+
+			case (pan_CACHED_LEVEL):
+				level = calc_params.cached_level[chan];
+				if (fabsf(slider_val - calc_params.cached_level[chan]) < 10) {
+					calc_params.adjusting_pan_state[chan] = pan_INACTIVE;
+				}
+				break;
+
+			case (pan_INACTIVE):
+				level = slider_val - 20.f;
+				calc_params.cached_level[chan] = level;
+				break;
+		}
+	} // end REVERB_EDIT guard
 
 	//Adjust level by CV and Mute button
 	if (!params.note_on[chan])
@@ -1802,33 +1820,66 @@ void read_freq(void){
 			chord_settle_ctr     = 0;
 		}
 		else if (lpg_trigger_pending) {
-			// Chord mode active, no recalc needed (CV stable) - now trigger the LPGs
-			// This implements "two consecutive stable readings" before triggering
+			// Chord mode active, no recalc needed (CV stable) - now trigger the LPGs.
+			// Strum timing: delays are proportional to one global clock period so the
+			// spread is always musically in time.  The channel with the smallest
+			// lpg_phase_id fires immediately (delay=0); all others fire later by
+			// (their_phase - min_phase) / LFO_PHASE_TABLELEN * ticks_per_period ticks.
+			// Negative spread reverses the order: highest-index channel fires first.
 			lpg_trigger_pending = 0;
-			
-			// Trigger all channels with strum timing based on phase spread
+
+			// --- Pass 1: find the minimum phase_id among all LPG-active channels ---
+			float strum_min_phase = 0.0f;
+			uint8_t strum_found_first = 0;
 			for (uint8_t s = 0; s < pending_num_seeds; s++) {
 				uint8_t chan = pending_seed_channels[s];
-				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
-				if (lpg_active) {
-					uint16_t delay = (uint16_t)(lfos.lpg_phase_id[chan] * 200);
-					if (delay == 0) {
-						Shim_LPG_Trigger(chan);
-					} else {
-						lfos.lpg_trigger_delay[chan] = delay;
+				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
+					if (!strum_found_first || lfos.lpg_phase_id[chan] < strum_min_phase) {
+						strum_min_phase = lfos.lpg_phase_id[chan];
+						strum_found_first = 1;
 					}
 				}
 			}
 			for (uint8_t f = 0; f < pending_num_fills; f++) {
 				uint8_t chan = pending_fill_channels[f];
-				uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
-				if (lpg_active) {
-					uint16_t delay = (uint16_t)(lfos.lpg_phase_id[chan] * 200);
-					if (delay == 0) {
-						Shim_LPG_Trigger(chan);
-					} else {
-						lfos.lpg_trigger_delay[chan] = delay;
+				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
+					if (!strum_found_first || lfos.lpg_phase_id[chan] < strum_min_phase) {
+						strum_min_phase = lfos.lpg_phase_id[chan];
+						strum_found_first = 1;
 					}
+				}
+			}
+
+			// ticks_per_period: one global-clock cycle expressed in envout update ticks.
+			// lfos.inc[GLO_CLK] = F_LFO_UPDATE_RATIO / period_ms, so 1/inc = period in ticks.
+			// Fall back to 500 ticks (~70 ms) when clock is stopped/uninitialised.
+			float strum_ticks_per_period = (lfos.inc[GLO_CLK] > 1e-6f)
+				? (1.0f / lfos.inc[GLO_CLK])
+				: 500.0f;
+
+			// --- Pass 2: fire each channel with its relative delay ---
+			for (uint8_t s = 0; s < pending_num_seeds; s++) {
+				uint8_t chan = pending_seed_channels[s];
+				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
+					float rel = (lfos.lpg_phase_id[chan] - strum_min_phase)
+					          / (float)LFO_PHASE_TABLELEN;
+					uint16_t delay = (uint16_t)(rel * strum_ticks_per_period);
+					if (delay == 0)
+						Shim_LPG_Trigger(chan);
+					else
+						lfos.lpg_trigger_delay[chan] = delay;
+				}
+			}
+			for (uint8_t f = 0; f < pending_num_fills; f++) {
+				uint8_t chan = pending_fill_channels[f];
+				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
+					float rel = (lfos.lpg_phase_id[chan] - strum_min_phase)
+					          / (float)LFO_PHASE_TABLELEN;
+					uint16_t delay = (uint16_t)(rel * strum_ticks_per_period);
+					if (delay == 0)
+						Shim_LPG_Trigger(chan);
+					else
+						lfos.lpg_trigger_delay[chan] = delay;
 				}
 			}
 		}

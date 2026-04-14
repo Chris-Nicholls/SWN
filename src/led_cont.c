@@ -465,6 +465,25 @@ void update_button_leds(void){
 			}
 			set_rgb_color(&led_cont.button[i], color);
 		}
+
+		else if (ui_mode == REVERB_EDIT)
+		{
+			if (i < NUM_CHANNELS) {
+				// Channel buttons: AQUA, brightness reflects per-channel reverb send.
+				// Minimum glow (0.05) so all buttons remain visible at send=0.
+				float send_brightness = 0.05f + params.reverb_send[i] * 0.95f;
+				set_rgb_color_brightness(&led_cont.button[i], ledc_AQUA, send_brightness);
+			}
+			else if (i == butm_LFOVCA_BUTTON) {
+				// LFOVCA button: solid bright AQUA — indicates active reverb edit mode
+				set_rgb_color_brightness(&led_cont.button[i], ledc_AQUA, F_MAX_BRIGHTNESS);
+			}
+			else {
+				// LFOMODE button: off
+				set_rgb_color(&led_cont.button[i], ledc_OFF);
+			}
+		}
+
 		set_pwm_led(led_button_map[i], &led_cont.button[i]);
 	}
 }
@@ -484,6 +503,9 @@ void update_encoder_leds(void){
 
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_FINETUNE)
 		color = ledc_MED_BLUE;
+
+	else if (ui_mode == REVERB_EDIT)
+		color = ledc_AQUA;  // DEPTH/LATITUDE/LONGITUDE rings show reverb params
 
 	else
 		color = ledc_PURPLE;
@@ -752,6 +774,38 @@ void calculate_led_ring(void){
 
 		for (i = 0; i < NUM_LED_INRING; i++){
 			set_rgb_color(&led_cont.inring[i], ledc_OFF);
+		}
+	}
+	else if (ui_mode == REVERB_EDIT) {
+		// Reverb edit mode: show three reverb parameters as bar graphs on the outring,
+		// same visual language as display_plaits_params() but in AQUA tones.
+		// Red = reverb_time, Green = diffusion, Blue = lp (brightness)
+		float rv_time = params.reverb_time;
+		float rv_diff = params.reverb_diffusion;
+		float rv_lp   = params.reverb_lp;
+
+		for (i = 0; i < NUM_LED_OUTRING; i++) {
+			uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+			float pos = (float)i / (float)NUM_LED_OUTRING;
+
+			uint16_t red   = (pos < rv_time) ? 4095 : 0;
+			uint16_t green = (pos < rv_diff) ? 4095 : 0;
+			uint16_t blue  = (pos < rv_lp)   ? 4095 : 0;
+
+			led_cont.outring[j].c_red   = exp_1voct_10_41V[red] * 3;
+			led_cont.outring[j].c_green = exp_1voct_10_41V[green];
+			led_cont.outring[j].c_blue  = exp_1voct_10_41V[blue] * 3;
+			led_cont.outring[j].brightness = F_MAX_BRIGHTNESS;
+		}
+
+		// Inner ring: show per-channel send levels as AQUA brightness
+		for (i = 0; i < NUM_CHANNELS; i++) {
+			uint8_t j = rotate_origin(i, NUM_CHANNELS);
+			float send = params.reverb_send[i];
+			if (send < 0.0f) send = 0.0f;
+			if (send > 1.0f) send = 1.0f;
+			float bri = 0.05f + send * 0.95f;
+			set_rgb_color_brightness(&led_cont.inring[j], ledc_AQUA, bri);
 		}
 	}
 	else {
