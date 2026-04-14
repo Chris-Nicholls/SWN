@@ -33,9 +33,20 @@ SOURCES  += $(wildcard $(CORE)/src/*.s)
 
 # Plaits & Stmlib
 # Note: Excluding plaits/plaits.cc (main) and stmlib/system (hardware specific)
+
+# Set INCLUDE_PLAITS_ENGINES=0 to exclude Plaits synthesis engines from the binary.
+# The LPG (low-pass gate) is always included. Browsing Plaits "spheres" still works
+# but rendering will output silence.
+INCLUDE_PLAITS_ENGINES ?= 0
+
+ifeq ($(INCLUDE_PLAITS_ENGINES),1)
 SOURCES  += $(wildcard src/plaits/dsp/*.cc)
 SOURCES  += $(wildcard src/plaits/dsp/*/*.cc)
 SOURCES  += src/plaits/resources.cc
+ARCH_CFLAGS += -DINCLUDE_PLAITS_ENGINES
+endif
+
+# stmlib is always needed (LPG uses stmlib DSP utilities)
 SOURCES  += $(wildcard src/stmlib/dsp/*.cc)
 SOURCES  += $(wildcard src/stmlib/utils/*.cc)
 
@@ -288,3 +299,11 @@ release: wav
 dev: OPTFLAG = -Os -flto
 dev: DEBUG_FLAG = -g1
 dev: all
+
+# Size-optimised build + wav for audio flashing (~124KB instead of ~227KB)
+.PHONY: small small-wav
+small: OPTFLAG = -Os -flto -fuse-linker-plugin -fwhole-program
+small: all
+
+small-wav: OPTFLAG = -Os -flto -fuse-linker-plugin -fwhole-program
+small-wav: wav

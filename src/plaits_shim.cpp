@@ -7,11 +7,6 @@
 #include "plaits_shim.h"
 #include <string.h>
 
-// Plaits Includes
-#include "plaits/dsp/voice.h"
-#include "plaits/dsp/dsp.h"
-#include "stmlib/utils/buffer_allocator.h"
-
 namespace {
 inline float Clamp(float value, float min, float max) {
   if (value < min) return min;
@@ -19,6 +14,15 @@ inline float Clamp(float value, float min, float max) {
   return value;
 }
 }
+
+// ---------------------------------------------------------------------------
+// Plaits Engine Section (optional — controlled by INCLUDE_PLAITS_ENGINES)
+// ---------------------------------------------------------------------------
+#ifdef INCLUDE_PLAITS_ENGINES
+
+#include "plaits/dsp/voice.h"
+#include "plaits/dsp/dsp.h"
+#include "stmlib/utils/buffer_allocator.h"
 
 // SRAM1 Placement
 #ifndef SRAM1_DATA
@@ -108,6 +112,25 @@ void Plaits_SetParams(uint8_t channel, PlaitsParams* params) {
 }
 
 }
+
+#else // !INCLUDE_PLAITS_ENGINES — stub implementations (output silence)
+
+extern "C" {
+
+void Plaits_Init(void) {}
+
+void Plaits_Render(uint8_t channel, PlaitsParams* params, float* out_buffer, int32_t size) {
+    (void)channel; (void)params;
+    for (int32_t i = 0; i < size; i++) out_buffer[i] = 0.0f;
+}
+
+void Plaits_SetParams(uint8_t channel, PlaitsParams* params) {
+    (void)channel; (void)params;
+}
+
+}
+
+#endif // INCLUDE_PLAITS_ENGINES
 
 // LPG Wrapper
 #include "plaits/dsp/fx/low_pass_gate.h"
