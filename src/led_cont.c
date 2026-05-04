@@ -841,8 +841,30 @@ void calculate_led_ring(void){
 				display_cpu_usage();
 				break;
 
+			case ONGOING_DISPLAY_HALO_DAMPING:
+				display_halo_damping();
+				break;
+
+			case ONGOING_DISPLAY_HALO_NOISELEVEL:
+				display_halo_noise_level();
+				break;
+
+			case ONGOING_DISPLAY_HALO_NOISECOLOR:
+				display_halo_noise_color();
+				break;
+
+			case ONGOING_DISPLAY_HALO_WTATTACK:
+				display_halo_wt_attack();
+				break;
+
+			case ONGOING_DISPLAY_HALO_LPF:
+				display_halo_lpf();
+				break;
+
 			default:
-			// Check if any channel is in Plaits mode
+			// Engine selection: Plaits if any channel is in Plaits mode,
+			// otherwise show the Halo parameter view (Halo
+			// is the active engine for every non-Plaits channel).
 			{
 				uint8_t has_plaits = 0;
 				for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
@@ -854,7 +876,7 @@ void calculate_led_ring(void){
 				if (has_plaits)
 					display_plaits_params();
 				else
-					display_wt_pos();
+					display_halo_params();
 				flash_wt_lock();
 			}
 			break;
@@ -1061,6 +1083,231 @@ void display_plaits_params(void)
 		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
 		get_wt_color(params.wt_bank[i], &led_cont.inring[j]);
 	}
+}
+
+/* Halo default LED ring view: where in the wavetable are we?
+ *   Outer ring (18 LEDs):
+ *     - One cursor LED *per channel*, placed at the channel's
+ *       pending_seed_pos (0..NUM_WAVEFORMS_IN_SPHERE-1) mapped onto
+ *       the 18-LED ring.  The cursor is lit in that channel's sphere
+ *       color (via get_wt_color()), so different banks across channels
+ *       are immediately distinguishable, and chord-spread reads as a
+ *       cluster of cursors that fans out as spread increases.
+ *     - LEDs with no cursor on them are dark.  If two channels happen
+ *       to land on the same LED their colors are summed (saturating).
+ *   Inner ring (6 LEDs): one LED per channel in the channel's sphere
+ *     color, identifying which bank each channel is in regardless of
+ *     pending_seed_pos.
+ *
+ * The previous default (R/G/B bar graphs of damping/noiseLevel/
+ * noiseColor + white lpfCutoff cursor) is now an ongoing-display
+ * overlay shown briefly when one of those encoders moves — see
+ * display_halo_damping / display_halo_noise_level / display_halo_noise_color
+ * below and the start_ongoing_display_halo_* hooks in params_update.c.
+ */
+void display_halo_params(void)
+{
+	display_wt_seed_pos();
+}
+
+void display_wt_seed_pos(void)
+{
+	uint8_t i, j;
+
+	/* Start with all outring LEDs dark, then accumulate per-channel
+	 * split cursors.  Saturate at 4095 to avoid wrap on overlap. */
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		led_cont.outring[i].c_red   = 0;
+		led_cont.outring[i].c_green = 0;
+		led_cont.outring[i].c_blue  = 0;
+		led_cont.outring[i].brightness = F_MAX_BRIGHTNESS;
+	}
+
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		/* Read the live glided position (updated every OSC_TIM tick
+		 * by the morph bed) rather than wt_osc.pending_seed_pos[]
+		 * (only refreshed once per ~16-tick dispatcher pass) — gives
+		 * continuous visual tracking as the encoder turns. */
+		float pos = params.wt_browse_step_pos_enc[i];
+		/* Wrap into [0, NUM_WAVEFORMS_IN_SPHERE) defensively.  The
+		 * PLAY-mode browse handler wraps on encoder turn, but a CV
+		 * offset or a mode transition could briefly push pos outside
+		 * the range. */
+		while (pos < 0.0f)
+			pos += (float)NUM_WAVEFORMS_IN_SPHERE;
+		while (pos >= (float)NUM_WAVEFORMS_IN_SPHERE)
+			pos -= (float)NUM_WAVEFORMS_IN_SPHERE;
+
+		/* Map 0..NUM_WAVEFORMS_IN_SPHERE → 0..NUM_LED_OUTRING with a
+		 * float index.  Using the un-decremented counts on both sides
+		 * (27 and 18) means 1.5 wavetable positions per LED and
+		 * wrap closes cleanly: pos=27 ≡ pos=0 → LED 18 ≡ LED 0. */
+		float led_f = pos * (float)NUM_LED_OUTRING
+		              / (float)NUM_WAVEFORMS_IN_SPHERE;
+		if (led_f < 0.0f) led_f = 0.0f;
+		if (led_f >= (float)NUM_LED_OUTRING)
+			led_f -= (float)NUM_LED_OUTRING;
+
+		uint8_t led_a = (uint8_t)led_f;
+		if (led_a >= NUM_LED_OUTRING) led_a = 0;
+		uint8_t led_b = (uint8_t)(led_a + 1);
+		if (led_b >= NUM_LED_OUTRING) led_b = 0;
+		float fled = led_f - (float)led_a;
+
+		o_rgb_led ch_color;
+		get_wt_color(params.wt_bank[i], &ch_color);
+
+		/* Distribute the cursor colour between the two adjacent LEDs
+		 * in proportion to (1-fled) and fled.  At integer positions
+		 * (fled=0) led_a gets the full colour and led_b gets nothing,
+		 * matching the old discrete-cursor look.  Mid-glide the
+		 * cursor visibly slides between LEDs. */
+		float wa = 1.0f - fled;
+		float wb = fled;
+
+		uint8_t ja = rotate_origin(led_a, NUM_LED_OUTRING);
+		uint8_t jb = rotate_origin(led_b, NUM_LED_OUTRING);
+
+		uint32_t ra = (uint32_t)led_cont.outring[ja].c_red
+		              + (uint32_t)((float)ch_color.c_red   * wa);
+		uint32_t ga = (uint32_t)led_cont.outring[ja].c_green
+		              + (uint32_t)((float)ch_color.c_green * wa);
+		uint32_t ba = (uint32_t)led_cont.outring[ja].c_blue
+		              + (uint32_t)((float)ch_color.c_blue  * wa);
+		if (ra > 4095) ra = 4095;
+		if (ga > 4095) ga = 4095;
+		if (ba > 4095) ba = 4095;
+		led_cont.outring[ja].c_red   = (uint16_t)ra;
+		led_cont.outring[ja].c_green = (uint16_t)ga;
+		led_cont.outring[ja].c_blue  = (uint16_t)ba;
+
+		uint32_t rb = (uint32_t)led_cont.outring[jb].c_red
+		              + (uint32_t)((float)ch_color.c_red   * wb);
+		uint32_t gb = (uint32_t)led_cont.outring[jb].c_green
+		              + (uint32_t)((float)ch_color.c_green * wb);
+		uint32_t bb = (uint32_t)led_cont.outring[jb].c_blue
+		              + (uint32_t)((float)ch_color.c_blue  * wb);
+		if (rb > 4095) rb = 4095;
+		if (gb > 4095) gb = 4095;
+		if (bb > 4095) bb = 4095;
+		led_cont.outring[jb].c_red   = (uint16_t)rb;
+		led_cont.outring[jb].c_green = (uint16_t)gb;
+		led_cont.outring[jb].c_blue  = (uint16_t)bb;
+	}
+
+	/* Inner ring: per-channel sphere color so each channel's bank is
+	 * legible at a glance independent of seed-position cursors. */
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		j = rotate_origin(i, NUM_CHANNELS);
+		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
+		get_wt_color(params.wt_bank[i], &led_cont.inring[j]);
+	}
+}
+
+/* Single-parameter bar-graph helper used by the RS param overlays.
+ *   value: 0..1 fill ratio for the outring bar (channel 0 representative).
+ *   per_channel: NUM_CHANNELS-long array of per-channel values for the
+ *     inring tint (captures CV-offset divergence across channels).
+ *   r_w/g_w/b_w: per-channel weights (0..255) for the bar color.
+ */
+static void display_halo_param_bar(float value, const float *per_channel,
+                                 uint8_t r_w, uint8_t g_w, uint8_t b_w)
+{
+	uint8_t i, j;
+
+	if (value < 0.0f) value = 0.0f;
+	if (value > 1.0f) value = 1.0f;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		j = rotate_origin(i, NUM_LED_OUTRING);
+		float pos = (float)i / (float)NUM_LED_OUTRING;
+		uint16_t lit = (pos < value) ? 4095 : 0;
+
+		/* Match the R/G/B intensity scaling that the previous combined
+		 * bar-graph used: red and blue picked up a ×3 boost while green
+		 * was unscaled.  Honouring this keeps colour balance consistent
+		 * between the overlays so users learn one visual language. */
+		uint16_t base = exp_1voct_10_41V[lit];
+		uint16_t red   = (uint16_t)(((uint32_t)base * (uint32_t)r_w * 3u) / 255u);
+		uint16_t green = (uint16_t)(((uint32_t)base * (uint32_t)g_w)      / 255u);
+		uint16_t blue  = (uint16_t)(((uint32_t)base * (uint32_t)b_w * 3u) / 255u);
+
+		led_cont.outring[j].c_red   = red;
+		led_cont.outring[j].c_green = green;
+		led_cont.outring[j].c_blue  = blue;
+		led_cont.outring[j].brightness = F_MAX_BRIGHTNESS;
+	}
+
+	/* Inner ring: per-channel value of the *same* parameter, scaled
+	 * into the chosen colour.  Makes per-channel CV-offset
+	 * divergence visible while the overlay is up. */
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		j = rotate_origin(i, NUM_CHANNELS);
+
+		float v = per_channel[i];
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+
+		uint16_t mag = (uint16_t)(v * 4095.0f);
+		led_cont.inring[j].c_red   = (uint16_t)(((uint32_t)mag * (uint32_t)r_w) / 255u);
+		led_cont.inring[j].c_green = (uint16_t)(((uint32_t)mag * (uint32_t)g_w) / 255u);
+		led_cont.inring[j].c_blue  = (uint16_t)(((uint32_t)mag * (uint32_t)b_w) / 255u);
+		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
+	}
+}
+
+void display_halo_damping(void)
+{
+	float vals[NUM_CHANNELS];
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].damping;
+	display_halo_param_bar(wt_osc.halo_state[0].damping, vals, 255, 0, 0);
+}
+
+void display_halo_noise_level(void)
+{
+	float vals[NUM_CHANNELS];
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].noiseLevel;
+	display_halo_param_bar(wt_osc.halo_state[0].noiseLevel, vals, 0, 255, 0);
+}
+
+void display_halo_noise_color(void)
+{
+	float vals[NUM_CHANNELS];
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].noiseColor;
+	display_halo_param_bar(wt_osc.halo_state[0].noiseColor, vals, 0, 0, 255);
+}
+
+void display_halo_wt_attack(void)
+{
+	/* Yellow (red+green) bar for wtAttack — distinct from the R/G/B
+	 * damping/noise-level/noise-color overlays so the parameter in
+	 * focus is immediately identifiable. */
+	float vals[NUM_CHANNELS];
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].wtAttack;
+	display_halo_param_bar(wt_osc.halo_state[0].wtAttack, vals, 255, 255, 0);
+}
+
+void display_halo_lpf(void)
+{
+	/* Cyan (green+blue) bar for the lpfCutoff (dispersion) overlay,
+	 * giving each of the five Halo parameters a distinct hue.
+	 * lpfCutoff is an integer harmonic-number in the range 1..42 (see
+	 * src/halo_voice.cpp).  Normalise to 0..1 for the bar
+	 * graph using the same range so 1 → empty and 42 → full. */
+	const float kLpfMin = 1.0f;
+	const float kLpfMax = 42.0f;
+	const float span    = kLpfMax - kLpfMin;
+	float vals[NUM_CHANNELS];
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		float v = ((float)wt_osc.halo_state[c].lpfCutoff - kLpfMin) / span;
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+		vals[c] = v;
+	}
+	float ref = ((float)wt_osc.halo_state[0].lpfCutoff - kLpfMin) / span;
+	if (ref < 0.0f) ref = 0.0f;
+	if (ref > 1.0f) ref = 1.0f;
+	display_halo_param_bar(ref, vals, 0, 255, 255);
 }
 
 void display_firmware_version(void)
@@ -1585,6 +1832,25 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_UNISON && !rotary_pressed(rotm_TRANSPOSE))
 		tick_down = 1;
 
+	/* Halo param overlays are short-lived and tick down whenever
+	 * the matching encoder isn't being held down (so we don't blow the
+	 * timer away while the user is mid-adjust).  pec_DEPTH/LATITUDE/
+	 * LONGITUDE map to rotm_DEPTH/LATITUDE/LONGITUDE. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_DAMPING)
+		tick_down = 1;
+
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_NOISELEVEL)
+		tick_down = 1;
+
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_NOISECOLOR)
+		tick_down = 1;
+
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_WTATTACK)
+		tick_down = 1;
+
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_LPF)
+		tick_down = 1;
+
 	if (!tick_down)
 		return;
 
@@ -1680,6 +1946,35 @@ void start_ongoing_display_unison(void) {
 	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 
+/* Halo parameter overlays.  Triggered by depth/lat/long encoder
+ * movement in update_wt() (params_update.c, cases 6/9/12).  Each
+ * overlay shows a single-parameter bar graph for ~FINETUNE_TIMER_LIMIT,
+ * after which the default seed-position view returns automatically. */
+void start_ongoing_display_halo_damping(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_DAMPING;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
+}
+
+void start_ongoing_display_halo_noise_level(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_NOISELEVEL;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
+}
+
+void start_ongoing_display_halo_noise_color(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_NOISECOLOR;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
+}
+
+void start_ongoing_display_halo_lpf(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_LPF;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
+}
+
+void start_ongoing_display_halo_wt_attack(void) {
+	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_WTATTACK;
+	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
+}
+
 void stop_all_displays(void){
 	led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
 	led_cont.ongoing_timeout = 0;
@@ -1689,43 +1984,200 @@ uint16_t return_display_timer(void){
 	return led_cont.ongoing_timeout;
 }
 
+/* Calibration sweep state: on entry to CPU-usage mode, light the inner
+ * ring LEDs one at a time in index order so the user can map their
+ * clock-position observations to inring[0..5] unambiguously.  Set by
+ * start_ongoing_display_cpu_usage(), consumed by display_cpu_usage(). */
+static uint32_t cpu_usage_entry_tick = 0;
+static uint8_t  cpu_usage_calibration_active = 0;
+/* Step time in *real* milliseconds.  HAL_GetTick() returns values at
+ * TICKS_PER_MS (8×) the rate of wall-clock ms, so the arithmetic below
+ * multiplies by TICKS_PER_MS when comparing elapsed ticks. */
+#define CPU_USAGE_CAL_STEP_MS 700u
+#define CPU_USAGE_CAL_STEPS   NUM_LED_INRING
+
 void start_ongoing_display_cpu_usage(void)
 {
 	led_cont.ongoing_display = ONGOING_DISPLAY_CPU_USAGE;
 	led_cont.ongoing_timeout = 0;
+	cpu_usage_entry_tick = HAL_GetTick();
+	cpu_usage_calibration_active = 1;
 }
 
 void display_cpu_usage(void)
 {
-	extern uint32_t cpu_usage_cycles;
-	static uint32_t cpu_peak = 0;
-	static uint32_t peak_expiry = 0;
+	/* Temporary diagnostic layout, refined second pass.
+	 *
+	 *   OUTER RING (18 LEDs) — main-loop iteration peak period.
+	 *       Each LED = 10 ms. 0–4 = green, 5–9 = yellow, 10+ = red.
+	 *
+	 *   INNER RING (6 LEDs) — identified by calibration sweep as
+	 *   starting at 1 o'clock (inring[0]) and running clockwise:
+	 *     inring[0] ( 1 o'clock) : read_freq() peak (coarse).
+	 *     inring[1] ( 3 o'clock) : OSC_TIM TOTAL peak — FINE thresholds
+	 *                               (budget = 555 µs @ 1.8 kHz).
+	 *     inring[2] ( 5 o'clock) : process_audio_block_codec() peak —
+	 *                               FINE thresholds (budget = 1 ms).
+	 *     inring[3] ( 7 o'clock) : halo_advance_cycle() peak —
+	 *                               FINE thresholds.  Physics-only cost
+	 *                               for a single channel (no trigger
+	 *                               path).  Primary suspect for OSC_TIM
+	 *                               overrun after refresh_ring_seed_caches
+	 *                               was cleared.
+	 *     inring[4] ( 9 o'clock) : OSC_TIM per-channel loop peak —
+	 *                               FINE thresholds.  Covers the 6×
+	 *                               update_pitch+halo_tick pass.
+	 *     inring[5] (11 o'clock) : single halo_tick() peak —
+	 *                               FINE thresholds.  Worst case one
+	 *                               channel's physics + seed-lerp.
+	 *                               Should track inring[3] closely in
+	 *                               steady state; diverges on note change
+	 *                               if the seed_lerp path is slow.
+	 *
+	 *   Main-loop peak (outer ring) and retrigger/recalc counts are
+	 *   still tracked in globals for debugger inspection.
+	 *
+	 *   Coarse peak units (LED 0): off <1 ms / dim <5 ms / green
+	 *   <20 ms / yellow <50 ms / red ≥50 ms.
+	 *   Fine peak units  (LEDs 1–5): off <200 µs / dim <500 µs /
+	 *   green <1 ms / yellow <2 ms / red ≥2 ms. */
+	extern volatile uint32_t diag_main_loop_peak_cycles;
+	extern volatile uint32_t diag_osc_tim_peak_cycles;
+	extern volatile uint32_t diag_read_freq_peak_cycles;
+	extern volatile uint32_t diag_audio_isr_peak_cycles;
+	extern volatile uint32_t diag_reverb_peak_cycles;
+	extern volatile uint32_t diag_osc_refresh_peak_cycles;
+	extern volatile uint32_t diag_osc_chanloop_peak_cycles;
+	extern volatile uint32_t diag_osc_ringtick_peak_cycles;
+	extern volatile uint32_t diag_advance_cycle_peak_cycles;
+	extern volatile uint32_t diag_seed_lerp_peak_cycles;
+	/* The main-loop iteration count and chord-recalc count live in
+	 * globals for debugger inspection; they are no longer displayed
+	 * on any LED, so no extern declaration is needed here. */
+
+	/* ── Calibration sweep ──────────────────────────────────────────────
+	 * For the first NUM_LED_INRING × 300 ms after entering CPU-usage
+	 * mode, light ONE inner LED at a time in index order with a
+	 * distinctive per-index colour.  Mapping key:
+	 *   inring[0] → WHITE   (read_freq peak)
+	 *   inring[1] → RED     (OSC_TIM peak)
+	 *   inring[2] → GREEN   (audio ISR peak)
+	 *   inring[3] → BLUE    (Reverb peak)
+	 *   inring[4] → YELLOW  (starvation)
+	 *   inring[5] → PURPLE  (chord recalc count)
+	 * After the sweep, the normal diagnostic display takes over. */
+	if (cpu_usage_calibration_active) {
+		/* HAL_GetTick() counts at TICKS_PER_MS (8×) real ms, so
+		 * scale the per-step duration accordingly. */
+		uint32_t elapsed = HAL_GetTick() - cpu_usage_entry_tick;
+		uint32_t step = elapsed / (CPU_USAGE_CAL_STEP_MS * TICKS_PER_MS);
+		if (step >= CPU_USAGE_CAL_STEPS) {
+			cpu_usage_calibration_active = 0;
+			/* Reset all peak counters so the first real window
+			 * isn't polluted by spikes during the sweep. */
+			diag_main_loop_peak_cycles      = 0;
+			diag_osc_tim_peak_cycles        = 0;
+			diag_read_freq_peak_cycles      = 0;
+			diag_audio_isr_peak_cycles      = 0;
+			diag_reverb_peak_cycles         = 0;
+			diag_osc_refresh_peak_cycles    = 0;
+			diag_osc_chanloop_peak_cycles   = 0;
+			diag_osc_ringtick_peak_cycles   = 0;
+			diag_advance_cycle_peak_cycles  = 0;
+			diag_seed_lerp_peak_cycles      = 0;
+			/* fall through to normal display below */
+		} else {
+			static const uint8_t cal_colors[CPU_USAGE_CAL_STEPS] = {
+				ledc_WHITE,   /* inring[0] → read_freq */
+				ledc_RED,     /* inring[1] → OSC_TIM total */
+				ledc_GREEN,   /* inring[2] → audio ISR */
+				ledc_BLUE,    /* inring[3] → advance_cycle */
+				ledc_YELLOW,  /* inring[4] → OSC_TIM chan-loop */
+				ledc_PURPLE,  /* inring[5] → halo_tick single */
+			};
+			for (uint8_t c = 0; c < NUM_LED_INRING; c++) {
+				if (c == step)
+					set_rgb_color(&led_cont.inring[c], cal_colors[c]);
+				else
+					led_cont.inring[c].brightness = 0;
+			}
+			for (uint8_t i = 0; i < NUM_LED_OUTRING; i++)
+				led_cont.outring[i].brightness = 0;
+			return;
+		}
+	}
+
+	/* Slow decay so a single spike lingers ≈1 s, but trends fade.
+	 * Called at the LED refresh rate (≈500 Hz from timekeeper); decay
+	 * only every 50 real ms (= 400 HAL ticks at TICKS_PER_MS=8) to make
+	 * the decay rate independent of caller. */
+	static uint32_t last_decay_tick = 0;
 	uint32_t now = HAL_GetTick();
-
-	// Update peak
-	if (cpu_usage_cycles > cpu_peak) {
-		cpu_peak = cpu_usage_cycles;
-		peak_expiry = now + 100; // Hold peak for 60ms
-	} else if (now > peak_expiry) {
-		cpu_peak = (cpu_peak * 127) >> 7; // Slow decay
+	if (now - last_decay_tick >= (50u * TICKS_PER_MS)) {
+		last_decay_tick = now;
+		diag_main_loop_peak_cycles      = (diag_main_loop_peak_cycles      * 63) >> 6;
+		diag_osc_tim_peak_cycles        = (diag_osc_tim_peak_cycles        * 63) >> 6;
+		diag_read_freq_peak_cycles      = (diag_read_freq_peak_cycles      * 63) >> 6;
+		diag_audio_isr_peak_cycles      = (diag_audio_isr_peak_cycles      * 63) >> 6;
+		diag_reverb_peak_cycles         = (diag_reverb_peak_cycles         * 63) >> 6;
+		diag_osc_refresh_peak_cycles    = (diag_osc_refresh_peak_cycles    * 63) >> 6;
+		diag_osc_chanloop_peak_cycles   = (diag_osc_chanloop_peak_cycles   * 63) >> 6;
+		diag_osc_ringtick_peak_cycles   = (diag_osc_ringtick_peak_cycles   * 63) >> 6;
+		diag_advance_cycle_peak_cycles  = (diag_advance_cycle_peak_cycles  * 63) >> 6;
+		diag_seed_lerp_peak_cycles      = (diag_seed_lerp_peak_cycles      * 63) >> 6;
 	}
 
-	// Normalization: 100% = 1ms = 216,000 cycles
-	// 18 LEDs, so 12,000 cycles per LED
-	uint16_t fill = cpu_peak / 12000;
-	if (fill > NUM_LED_OUTRING) fill = NUM_LED_OUTRING;
+	/* 1 ms at 216 MHz = 216 000 cycles. */
+	const uint32_t CYCLES_PER_MS   = 216000u;
+	const uint32_t CYCLES_PER_10MS = 2160000u;
 
-	// Scale color from Green to Red based on load
-	uint8_t color = (fill >= 15) ? ledc_RED : ledc_LIGHT_GREEN; // >= ~83% load is red
-
-	for (uint8_t i = 0; i < NUM_LED_OUTRING; i++)
-	{
-		if (i < fill)
+	/* OUTER RING — main-loop peak period (1 LED per 10 ms). */
+	uint16_t ml_fill = diag_main_loop_peak_cycles / CYCLES_PER_10MS;
+	if (ml_fill > NUM_LED_OUTRING) ml_fill = NUM_LED_OUTRING;
+	for (uint8_t i = 0; i < NUM_LED_OUTRING; i++) {
+		if (i < ml_fill) {
+			uint8_t color;
+			if (i >= 10)      color = ledc_RED;
+			else if (i >= 5)  color = ledc_YELLOW;
+			else              color = ledc_LIGHT_GREEN;
 			set_rgb_color(&led_cont.outring[i], color);
-		else
+		} else {
 			led_cont.outring[i].brightness = 0;
+		}
 	}
 
-	for (uint8_t i = 0; i < NUM_LED_INRING; i++)
-		set_rgb_color(&led_cont.inring[i], ledc_OFF);
+	/* INNER RING. LED 0 coarse; LEDs 1–5 fine sub-ms thresholds so
+	 * we can tell "at budget" from "4x over budget". */
+	uint32_t inring_vals[6];
+	inring_vals[0] = diag_read_freq_peak_cycles;
+	inring_vals[1] = diag_osc_tim_peak_cycles;
+	inring_vals[2] = diag_audio_isr_peak_cycles;
+	inring_vals[3] = diag_advance_cycle_peak_cycles;
+	inring_vals[4] = diag_osc_chanloop_peak_cycles;
+	inring_vals[5] = diag_osc_ringtick_peak_cycles;
+
+	for (uint8_t c = 0; c < NUM_LED_INRING && c < 6; c++) {
+		uint32_t v = inring_vals[c];
+		uint8_t color;
+		if (c == 0) {
+			/* Coarse thresholds for read_freq (this call can
+			 * legitimately take 1–50 ms on a chord recalc). */
+			if      (v <  1u * CYCLES_PER_MS) color = ledc_OFF;
+			else if (v <  5u * CYCLES_PER_MS) color = ledc_DIM_GREEN;
+			else if (v < 20u * CYCLES_PER_MS) color = ledc_LIGHT_GREEN;
+			else if (v < 50u * CYCLES_PER_MS) color = ledc_YELLOW;
+			else                               color = ledc_RED;
+		} else {
+			/* Fine thresholds for all OSC_TIM/ISR sub-items. */
+			if      (v < (CYCLES_PER_MS / 5))   color = ledc_OFF;        /* <200 µs */
+			else if (v < (CYCLES_PER_MS / 2))   color = ledc_DIM_GREEN;  /* <500 µs */
+			else if (v < (1u * CYCLES_PER_MS))  color = ledc_LIGHT_GREEN;/* <1 ms   */
+			else if (v < (2u * CYCLES_PER_MS))  color = ledc_YELLOW;     /* <2 ms   */
+			else                                color = ledc_RED;        /* ≥2 ms   */
+		}
+		if (color == ledc_OFF)
+			led_cont.inring[c].brightness = 0;
+		else
+			set_rgb_color(&led_cont.inring[c], color);
+	}
 }

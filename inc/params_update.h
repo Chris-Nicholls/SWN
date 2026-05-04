@@ -132,6 +132,9 @@ enum MuteNoteKeyStates {
 #define FW_V2X2_EQ_PARAMS_SIZE (sizeof(uint16_t) * 6)  // 6 EQ slider values
 #define FW_CHORD_WEIGHTS_SIZE (sizeof(float) * 7)  // 7 overtone weights for chord generation
 #define FW_REVERB_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(float)*5)  // reverb_send[6] + time + diffusion + lp + input_gain + output_level
+/* Halo per-channel encoder bases: 4 floats (damping, noise_level,
+ * noise_color, wt_attack) + 1 int8_t (lpf_cutoff harmonic index). */
+#define FW_HALO_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS*4 + sizeof(int8_t)*NUM_CHANNELS)
 
 // Soft clip pregain constants
 #define DEFAULT_SOFT_CLIP_PREGAIN 0.05f
@@ -258,7 +261,17 @@ typedef struct o_params{
 	float		reverb_input_gain;					// Pre-tanh drive [0,4] (1=unity, >1=saturate)
 	float		reverb_output_level;				// Output gain [0,2] (multiplied by fixed 6x boost)
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_PLAITS_PARAMS_SIZE - FW_REVERB_PARAMS_SIZE];
+	/* Halo encoder bases (vH).  These are the per-channel "knob"
+	 * positions; the live physics value is base + CV-jack offset and is
+	 * recomputed every poll cycle in update_wt() (see params_update.c).
+	 * Saving the base keeps the encoder/CV split intact across recall. */
+	float		halo_damping			[NUM_CHANNELS];
+	float		halo_noise_level		[NUM_CHANNELS];
+	float		halo_noise_color		[NUM_CHANNELS];
+	float		halo_wt_attack		[NUM_CHANNELS];
+	int8_t		halo_lpf_cutoff		[NUM_CHANNELS];	// Harmonic index 1..42
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_PLAITS_PARAMS_SIZE - FW_REVERB_PARAMS_SIZE - FW_HALO_PARAMS_SIZE];
 } o_params;
 
 void 		check_reset_navigation(void);

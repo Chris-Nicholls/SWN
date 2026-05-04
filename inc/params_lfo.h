@@ -46,6 +46,21 @@
 #define SCALING_LFO_PHASE				32
 #define F_SCALING_FINE_LFO_PHASE		(1.0/12.0) //0.0078125 // 128th note
 
+/* Unified phase-spread (clock-period units).  See lfos.phase_spread.
+ *
+ * The encoder selects a discrete musical subdivision: each voice is
+ * offset by 1/N of a clock period (or N clock periods, for indices
+ * past the rhythmic threshold).  This gives 21 stops total — index 0
+ * is unison, positive walks fast→strum→beat→sparse, negative mirrors. */
+#define PHASE_SPREAD_NUM_STOPS_PER_SIDE  10
+#define PHASE_SPREAD_IDX_MIN  (-PHASE_SPREAD_NUM_STOPS_PER_SIDE)
+#define PHASE_SPREAD_IDX_MAX  ( PHASE_SPREAD_NUM_STOPS_PER_SIDE)
+#define PHASE_SPREAD_LADDER_LEN  (2 * PHASE_SPREAD_NUM_STOPS_PER_SIDE + 1)
+
+/* Per-step delay in clock-period units, indexed [-10..+10] mapped to
+ * [0..20].  Defined in src/params_lfo.c. */
+extern const float phase_spread_ladder[PHASE_SPREAD_LADDER_LEN];
+
 // DISPLAY
 #define LFO_TOVCA_TIMER_LIMIT			1200
 #define LFO_TOVCA_FLASH_PERIOD			200
@@ -86,14 +101,30 @@ typedef struct o_lfos
 
 	uint8_t			use_ext_clock;
 	uint8_t			phase_switch;
-	float			phase_spread_amount;	// Amount of phase spreading across voices (0 = unison, higher = more spread)
+
+	/* Unified phase-spread, shared between LFO-VCA mode and LPG-mode chord
+	 * strums.  The encoder selects an integer index in
+	 * [PHASE_SPREAD_IDX_MIN .. PHASE_SPREAD_IDX_MAX] which is mapped via
+	 * phase_spread_ladder[] to a per-channel offset in clock-period units.
+	 * The cached `phase_spread` float is the resolved offset (kept in
+	 * sync with `phase_spread_idx` by apply_phase_spread()).
+	 *
+	 *   idx = 0  -> unison
+	 *   idx = ±1..±5  -> tight strum  (1/96, 1/48, 1/24, 1/12, 1/6 of a beat)
+	 *   idx = ±6..±7  -> wide strum   (1/3, 1/2 of a beat)
+	 *   idx = ±8     -> rhythmic     (each voice on the next beat)
+	 *   idx = ±9..±10 -> sparse rhythmic (2, 3 beats per voice)
+	 *
+	 * Sign controls direction: positive => low-channel-first, negative =>
+	 * high-channel-first.
+	 */
+	int8_t			phase_spread_idx;
+	float			phase_spread;       /* derived: phase_spread_ladder[idx] */
 
 	// LPG-specific parameters (independent from LFO params)
 	float			lpg_decay			[NUM_CHANNELS];		// LPG decay time (0-1), mapped to Speed encoder in LPG mode
 	float			lpg_color			[NUM_CHANNELS];		// LPG color/resonance (0-1), mapped to Shape encoder in LPG mode
 	float			lpg_gain			[NUM_CHANNELS];		// LPG peak level (0-1), mapped to Gain encoder in LPG mode
-	float			lpg_phase_id		[NUM_CHANNELS];		// Individual phase offsets in LPG mode
-	float			lpg_phase_spread_amount;				// Phase spread for LPG triggers (0 = unison)
 
 	// Global VCA from LFO CV jack
 	float			global_vca_level;						// 0.0-1.0, applied to all outputs
@@ -132,6 +163,18 @@ typedef struct o_lfos
 	// LPG trigger delays for phase-spread timing
 	uint16_t		lpg_trigger_delay	[NUM_CHANNELS];		// Countdown in timer ticks (decremented each envout_pwm update)
 
+	/* Deferred LFO phase reset.  Set by main loop (chord retrigger) and
+	 * audio ISR (new_key / jack-trig in LFO-VCA mode).  Consumed by
+	 * update_oscillators() inside the per-channel trigger atomic block,
+	 * so the LFO phase reset becomes synchronous with the Halo
+	 * reseed/buffer flip.  Without this, PWM_OUTS_TIM (7.2 kHz) would
+	 * recompute out_lpf from the new phase ~140 µs after the main-loop
+	 * reset, while the pitch reseed waits for OSC_TIM (1.8 kHz, up to
+	 * 555 µs) — the audio ISR perceives the envelope re-attacking
+	 * before the pitch updates, producing an audible artifact at
+	 * chord retriggers. */
+	volatile uint8_t lfo_reset_pending	[NUM_CHANNELS];
+
 } o_lfos;
 
 extern o_lfos lfos;
@@ -154,6 +197,18 @@ void read_LFO_phase(void);
 void read_LFO_shape(void);
 void wrap_lfo_fine_phase(uint8_t chan, float fine_inc);
 float calc_lfo_phase(float phase_id);
+
+/* Recompute every unlocked LFO-mode channel's phase_id / phase from the
+ * current lfos.phase_spread and that channel's divmult.  LPG-mode strums
+ * read lfos.phase_spread directly, so this helper only touches LFO-mode
+ * channels. */
+void apply_phase_spread(void);
+
+/* Per-channel phase_id (LFO_PHASE_TABLELEN units, wrapped to [0, 24))
+ * derived from the unified phase_spread for `chan`.  Matches the bulk
+ * apply_phase_spread() math but exposed for the audio-ISR trigger reset
+ * path which needs a single channel's value without iterating. */
+float phase_id_from_spread(uint8_t chan);
 void read_lfo_cv(void);
 void init_lfo_to_vc_mode(void);
 void cache_uncache_all_lfo_to_vca(enum CacheUncache cache_uncache);

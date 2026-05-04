@@ -57,6 +57,48 @@ extern enum UI_Modes ui_mode;
 
 o_lfos   lfos;
 
+/* Discrete musical-subdivision ladder for the unified phase-spread.
+ * Indexed [PHASE_SPREAD_IDX_MIN..PHASE_SPREAD_IDX_MAX] mapped to
+ * [0..PHASE_SPREAD_LADDER_LEN-1] (= idx + PHASE_SPREAD_NUM_STOPS_PER_SIDE).
+ * Values are per-channel offsets in clock-period units.
+ *
+ *   idx     0    ±1     ±2     ±3     ±4     ±5     ±6    ±7    ±8   ±9   ±10
+ *   offset  0  1/96   1/48   1/24   1/12   1/6   1/3   1/2   1    2    3
+ *
+ * Reading the table at idx=+8 (or -8) gives ±1.0 — each voice on the
+ * next clock beat (the rhythmic transition).  ±9 / ±10 are sparse
+ * rhythmic patterns (2/3 beats per voice).  Tighter values (±1..±5)
+ * are pure strum territory. */
+const float phase_spread_ladder[PHASE_SPREAD_LADDER_LEN] = {
+	-3.0f,             /* idx -10 */
+	-2.0f,             /* idx -9  */
+	-1.0f,             /* idx -8  rhythmic, reverse */
+	-(1.0f / 2.0f),    /* idx -7  */
+	-(1.0f / 3.0f),    /* idx -6  */
+	-(1.0f / 6.0f),    /* idx -5  */
+	-(1.0f / 12.0f),   /* idx -4  */
+	-(1.0f / 24.0f),   /* idx -3  */
+	-(1.0f / 48.0f),   /* idx -2  */
+	-(1.0f / 96.0f),   /* idx -1  tightest reverse strum */
+	 0.0f,             /* idx  0  unison */
+	 (1.0f / 96.0f),   /* idx +1  tightest strum */
+	 (1.0f / 48.0f),
+	 (1.0f / 24.0f),
+	 (1.0f / 12.0f),
+	 (1.0f / 6.0f),
+	 (1.0f / 3.0f),
+	 (1.0f / 2.0f),
+	 1.0f,             /* idx +8  rhythmic */
+	 2.0f,
+	 3.0f,             /* idx +10 sparse rhythmic */
+};
+
+static inline float phase_spread_for_idx(int8_t idx) {
+	if (idx < PHASE_SPREAD_IDX_MIN) idx = PHASE_SPREAD_IDX_MIN;
+	if (idx > PHASE_SPREAD_IDX_MAX) idx = PHASE_SPREAD_IDX_MAX;
+	return phase_spread_ladder[(int)idx + PHASE_SPREAD_NUM_STOPS_PER_SIDE];
+}
+
 // const float LFO_PHASE_TABLE[LFO_PHASE_TABLELEN]	= {0, 1.0/8.0, 1.0/7.0, 1.0/6.0, 1.0/5.0, 1.0/4.0, 2.0/7.0, 1.0/3.0, 3.0/8.0, 2.0/5.0, 3.0/7.0, 1.0/2.0, 4.0/7.0, 3.0/5.0, 5.0/8.0, 2.0/3.0, 5.0/7.0, 3.0/4.0, 4.0/5.0, 5.0/6.0, 6.0/7.0, 7.0/8.0};
 
 void update_lfos(float multiplier)
@@ -90,8 +132,8 @@ void init_lfos(void)
 	}
 
 	lfos.phase_switch = 0;
-	lfos.phase_spread_amount = 0.0f;  // Start with all LFOs in phase (unison)
-	lfos.lpg_phase_spread_amount = 0.0f;  // Start with all LPGs in phase (unison)
+	lfos.phase_spread_idx = 0;
+	lfos.phase_spread     = phase_spread_for_idx(0);  // unison
 	lfos.global_vca_level = 1.0f;  // Full level (no attenuation)
 
 	if (!lfos.use_ext_clock)
@@ -118,12 +160,12 @@ void init_lfos(void)
 			lfos.audio_mode[i]		= 0;
 			lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
 			lfos.trig_armed[i] = 0;
+			lfos.lfo_reset_pending[i] = 0;
 
 			// LPG parameters
 			lfos.lpg_decay[i]		= 0.5f;
 			lfos.lpg_color[i]		= 0.5f;
 			lfos.lpg_gain[i]		= 1.0f;
-			lfos.lpg_phase_id[i]	= 0.0f;
 			lfos.lpg_trigger_delay[i] = 0;
 		}
 	}
@@ -187,7 +229,6 @@ void init_lfo_object(o_lfos *t_lfo){
 		t_lfo->lpg_decay[i]					= 0.5f;
 		t_lfo->lpg_color[i]					= 0.5f;
 		t_lfo->lpg_gain[i]					= 1.0f;
-		t_lfo->lpg_phase_id[i]				= 0.0f;
 
 		t_lfo->out_lpf[i] 					= 1;
 		t_lfo->envout_pwm[i]				= 0;
@@ -208,8 +249,8 @@ void init_lfo_object(o_lfos *t_lfo){
 	}
 
 	t_lfo->phase_switch 		= 0;
-	t_lfo->phase_spread_amount	= 0.0f;		// Start in unison
-	t_lfo->lpg_phase_spread_amount = 0.0f;	// Start in unison
+	t_lfo->phase_spread_idx		= 0;
+	t_lfo->phase_spread			= phase_spread_for_idx(0);		// Start in unison
 
 	t_lfo->divmult_id[GLO_CLK] 	= LFO_UNITY_DIVMULT_ID;
 	t_lfo->cycle_pos[GLO_CLK] 	= 0;
@@ -566,59 +607,44 @@ void read_LFO_phase(void)
 	float			enc_amount;
 	static uint8_t 	stage_phase_sync=0;
 	static uint8_t 	disable_phase_sync=0;
-	uint8_t			any_lpg_mode = 0;
 
 	enc_turn  = pop_encoder_q(sec_LFOPHASE);
 	enc_pressed = rotary_pressed(rotm_LFOSHAPE);
 	fine = switch_pressed(FINE_BUTTON);
 
-	// Check if any unlocked channel is in LPG mode
-	for (i=0; i<NUM_CHANNELS; i++) {
-		if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG)
-			any_lpg_mode = 1;
-	}
-
-	// PHASE SPREAD CONTROL (when knob is pressed)
+	/* PHASE SPREAD CONTROL (knob pressed + turned)
+	 *
+	 * The encoder steps a discrete musical ladder (phase_spread_ladder
+	 * in this file): each click moves the index by ±1.  Index 0 is
+	 * unison; positive walks 1/96-of-a-beat → 1/6 → on-the-beat → 3
+	 * beats apart; negative mirrors the same ladder with reversed
+	 * voice order.  The cached float `lfos.phase_spread` is the
+	 * resolved per-voice offset in clock periods, used directly by
+	 * the LPG strum scheduler and indirectly (via apply_phase_spread)
+	 * by the LFO mode channels. */
 	if (enc_pressed)
 	{
 		if (enc_turn) {
-			// Adjust phase spread amount
-			if (fine)
-				enc_amount = -enc_turn * F_SCALING_FINE_LFO_PHASE;
-			else
-				enc_amount = -enc_turn;
-			
-			// Adjust spread amount based on current mode.
-			// Range -96..+96: positive = low channels lead, negative = high channels lead.
-			// At ±96 the spread between ch0 and ch5 is ±(5/6 * 96/24) ≈ ±3.3 clock cycles.
-			if (any_lpg_mode) {
-				lfos.lpg_phase_spread_amount = _CLAMP_F(lfos.lpg_phase_spread_amount + enc_amount, -96.0f, 96.0f);
-				
-				// Apply phase spread to all LPG channels
-				for (i = 0; i < NUM_CHANNELS; i++) {
-					if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG) {
-						lfos.lpg_phase_id[i] = (i * lfos.lpg_phase_spread_amount) / (float)NUM_CHANNELS;
-					}
-				}
-			} else {
-				lfos.phase_spread_amount = _CLAMP_F(lfos.phase_spread_amount + enc_amount, -96.0f, 96.0f);
-				
-				// Apply phase spread to all LFO channels
-				for (i = 0; i < NUM_CHANNELS; i++) {
-					if (!lfos.locked[i] && lfos.mode[i] == lfot_LFO) {
-						lfos.phase_id[i] = (i * lfos.phase_spread_amount) / (float)NUM_CHANNELS;
-						lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
-					}
-				}
-			}
-			
+			/* Each encoder click moves the ladder index by ±1; FINE has
+			 * no effect because the ladder stops are already musical. */
+			int new_idx = (int)lfos.phase_spread_idx + (int)(-enc_turn);
+			if (new_idx < PHASE_SPREAD_IDX_MIN) new_idx = PHASE_SPREAD_IDX_MIN;
+			if (new_idx > PHASE_SPREAD_IDX_MAX) new_idx = PHASE_SPREAD_IDX_MAX;
+			lfos.phase_spread_idx = (int8_t)new_idx;
+			lfos.phase_spread     = phase_spread_for_idx(lfos.phase_spread_idx);
+
+			/* Bulk-apply to LFO-mode channels.  LPG-mode channels read
+			 * lfos.phase_spread directly inside the chord-strum
+			 * scheduler, so they need no per-channel state here. */
+			apply_phase_spread();
+
 			disable_phase_sync = 1;
 		} else {
 			// Knob pressed but not turned - stage for sync
 			if (!disable_phase_sync)
 				stage_phase_sync=1;
 		}
-	} 
+	}
 	else  // Knob not pressed
 	{
 		// If knob was just released and sync was staged, sync all LFOs
@@ -627,8 +653,12 @@ void read_LFO_phase(void)
 		}
 		stage_phase_sync = 0;
 		disable_phase_sync = 0;
-		
-		// INDIVIDUAL PHASE ADJUSTMENT (when knob not pressed but turned)
+
+		/* INDIVIDUAL PHASE NUDGE (knob not pressed + turned).
+		 * Only meaningful for LFO-mode channels: lets the user offset
+		 * one voice's free-running phase relative to the spread baseline.
+		 * LPG-mode channels are timed entirely by phase_spread + the
+		 * clock, so an "individual nudge" no longer applies. */
 		if (enc_turn)
 		{
 			if (fine)
@@ -636,50 +666,29 @@ void read_LFO_phase(void)
 			else
 				enc_amount = -enc_turn;
 
-			// GLOBAL
+			// GLOBAL (no channel buttons held)
 			if (macro_states.all_af_buttons_released){
 				for (i = 0; i < NUM_CHANNELS; i++){
-					if (!lfos.locked[i])
+					if (!lfos.locked[i] && lfos.mode[i] != lfot_LPG)
 					{
-						if (lfos.mode[i] == lfot_LPG) {
-							// LPG mode: adjust lpg_phase_id
-							if (!fine)
-								lfos.lpg_phase_id[i] = _WRAP_I16(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-							else
-								lfos.lpg_phase_id[i] = _WRAP_F(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-						} else {
-							// LFO mode: adjust phase_id
-							if (!fine)
-								lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-							else
-								lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-
-							lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
-						}
+						if (!fine)
+							lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						else
+							lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
 					}
 				}
 			}
-
-			// INDIVIDUAL
+			// INDIVIDUAL (channel button held)
 			else{
 				for (i = 0; i < NUM_CHANNELS; i++){
-					if(button_pressed(i))
+					if(button_pressed(i) && lfos.mode[i] != lfot_LPG)
 					{
-						if (lfos.mode[i] == lfot_LPG) {
-							// LPG mode: adjust lpg_phase_id
-							if (!fine)
-								lfos.lpg_phase_id[i] = _WRAP_I16(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-							else
-								lfos.lpg_phase_id[i] = _WRAP_F(lfos.lpg_phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-						} else {
-							// LFO mode: adjust phase_id
-							if (!fine)
-								lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-							else
-								lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-
-							lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
-						}
+						if (!fine)
+							lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						else
+							lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
 
 						calc_params.already_handled_button[i] = 1;
 					}
@@ -785,13 +794,67 @@ float calc_lfo_phase(float phase_id)
 }
 
 
+/* ─────────────────────────────────────────────────────────────────────
+ *  Unified phase-spread → per-channel phase_id derivation
+ *
+ *  phase_spread is in clock-period units between adjacent channels.
+ *  For an LFO running at divmult[chan] × GLO_CLK, one clock period
+ *  corresponds to divmult[chan] LFO cycles, so:
+ *
+ *      target_delay_seconds = chan * phase_spread * clock_period
+ *      target_delay_in_lfo_cycles = chan * phase_spread * divmult[chan]
+ *
+ *  The LFO output samples wt_pos = cycle_pos + phase, so positive
+ *  `phase` _advances_ the output (peak arrives sooner).  To delay the
+ *  voice we set phase to a negative offset, then wrap to [0, 1).
+ *  Multiplied by LFO_PHASE_TABLELEN to land in phase_id units.
+ * ───────────────────────────────────────────────────────────────────── */
+float phase_id_from_spread(uint8_t chan)
+{
+	if (chan >= NUM_CHANNELS) return 0.0f;
+	float dm = lfos.divmult[chan];
+	if (dm <= 0.0f || !isfinite(dm)) dm = 1.0f;
+
+	float p = -((float)chan) * lfos.phase_spread * dm * (float)LFO_PHASE_TABLELEN;
+
+	/* Wrap to [0, LFO_PHASE_TABLELEN). */
+	p -= (float)LFO_PHASE_TABLELEN
+	   * floorf(p / (float)LFO_PHASE_TABLELEN);
+	if (p < 0.0f) p = 0.0f;                       /* floor() rounding edge */
+	if (p >= (float)LFO_PHASE_TABLELEN) p = 0.0f; /* same */
+	return p;
+}
+
+void apply_phase_spread(void)
+{
+	for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+		if (lfos.locked[i]) continue;
+		if (lfos.mode[i] == lfot_LPG) continue;   /* LPG reads spread directly */
+		lfos.phase_id[i] = phase_id_from_spread(i);
+		lfos.phase[i]    = calc_lfo_phase(lfos.phase_id[i]);
+	}
+}
+
+
 void read_lfo_cv(void)
 {
-	// LFO CV jack repurposed as Global VCA
-	// When unplugged, default to full volume (1.0)
-	// When plugged, read CV value and convert to 0.0-1.0 range
+	/* LFO CV jack repurposed as Global VCA, INVERTED.
+	 *   0 V (or unplugged)  → full volume  (level = 1.0)
+	 *   5 V                 → silent       (level = 0.0)
+	 *
+	 * The inversion lets the user patch a falling envelope (e.g.
+	 * a decaying LFO/EG output sitting at 0 V at rest, briefly
+	 * rising to 5 V) and have it duck the synth volume rather than
+	 * gate it open — which matches how a "ducker" or sidechain
+	 * input is normally wired in modular setups.
+	 *
+	 * The conditioning chain treats LFO_CV as AP_UNIPOLAR so
+	 * bracketed_val is always 0..4095. */
 	if (analog_jack_plugged(LFO_CV)) {
-		lfos.global_vca_level = (float)analog[LFO_CV].bracketed_val / 4095.0f;
+		float v = (float)analog[LFO_CV].bracketed_val / 4095.0f;
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+		lfos.global_vca_level = 1.0f - v;
 	} else {
 		lfos.global_vca_level = 1.0f;  // Full volume when unplugged
 	}

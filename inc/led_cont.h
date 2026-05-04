@@ -56,6 +56,11 @@ enum ongoingDisplays{
 	ONGOING_DISPLAY_UNISON,
 	ONGOING_DISPLAY_SOFT_CLIP,
 	ONGOING_DISPLAY_CPU_USAGE,
+	ONGOING_DISPLAY_HALO_DAMPING,
+	ONGOING_DISPLAY_HALO_NOISELEVEL,
+	ONGOING_DISPLAY_HALO_NOISECOLOR,
+	ONGOING_DISPLAY_HALO_WTATTACK,
+	ONGOING_DISPLAY_HALO_LPF,
 
 	NUM_ONGOING_DISPLAYS
 };
@@ -111,6 +116,13 @@ void 		display_wtpos_inring(void);
 void 		flash_wt_lock(void);
 void 		display_wt_pos(void);
 void 		display_plaits_params(void);
+void 		display_halo_params(void);
+void 		display_halo_damping(void);
+void 		display_halo_noise_level(void);
+void 		display_halo_noise_color(void);
+void 		display_halo_wt_attack(void);
+void 		display_halo_lpf(void);
+void 		display_wt_seed_pos(void);
 void 		display_transpose(void);
 void 		display_finetune(void);
 void 		display_octave(void);
@@ -144,6 +156,11 @@ void		start_ongoing_display_soft_clip(void);
 void 		start_ongoing_display_unison(void);
 void 		start_ongoing_display_cpu_usage(void);
 void 		display_cpu_usage(void);
+void 		start_ongoing_display_halo_damping(void);
+void 		start_ongoing_display_halo_noise_level(void);
+void 		start_ongoing_display_halo_noise_color(void);
+void 		start_ongoing_display_halo_wt_attack(void);
+void 		start_ongoing_display_halo_lpf(void);
 void 		stop_all_displays(void);
 
 

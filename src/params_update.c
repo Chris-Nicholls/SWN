@@ -29,6 +29,7 @@
 
 #include "params_update.h"
 #include "params_changes.h"
+#include "halo_voice.hpp"   /* extern "C" facade for engine setters */
 #include "led_cont.h"
 #include "gpio_pins.h"
 #include "exp_1voct_10_41V.h"
@@ -70,6 +71,7 @@
 #include "preset_manager_selbus.h"
 #include "eq.h"
 #include "reverb_ui.h"
+#include "note_filter.h"
 
 extern o_wt_osc wt_osc;
 extern enum UI_Modes ui_mode;
@@ -273,7 +275,7 @@ void init_params(void){
 	params.chord_overtone_weights [4] = 0.1f;
 	params.chord_overtone_weights [5] = 0.3f;
 	params.chord_overtone_weights [6] = 0.1f;
-	
+
 
 }
 
@@ -391,6 +393,16 @@ void init_param_object(o_params *t_params){
 	t_params->reverb_lp           = 0.7f;
 	t_params->reverb_input_gain   = 2.0f;
 	t_params->reverb_output_level = 1.0f;
+
+	/* Halo defaults (vH) — kept in sync with the historical
+	 * static initializers used by the rs_*_base macros in this file. */
+	for (chan = 0; chan < NUM_CHANNELS; chan++) {
+		t_params->halo_damping[chan]     = 0.2f;
+		t_params->halo_noise_level[chan] = 0.1f;
+		t_params->halo_noise_color[chan] = 0.4f;
+		t_params->halo_wt_attack[chan]   = 0.0f;
+		t_params->halo_lpf_cutoff[chan]  = 24;
+	}
 }
 
 void init_calc_params(void)
@@ -421,19 +433,59 @@ void init_calc_params(void)
 static volatile uint8_t chord_mode_active = 0;
 static volatile float chord_freqs[NUM_CHANNELS] = {0};
 
-// Hysteresis for chord recalculation to prevent jitter
-static float last_chord_seed_freqs[NUM_CHANNELS] = {0};
+// Adaptive pitch filter per channel (ported from MI Rings' NoteFilter).
+// Replaces the old hysteresis + settle-timer approach with median +
+// adaptive-lag filtering: snaps to real CV changes in ~1 ms, rejects ADC
+// noise once settled.  The chord-change detector compares the quantised
+// filtered note against last_chord_notes[].  A small ±0.05 ST hysteresis
+// is layered on top of the quantiser (sticky roundf — see main loop) to
+// suppress boundary bouncing when the filtered value sits near X.5.
+static NoteFilter chord_nf[NUM_CHANNELS];
+static uint8_t    chord_nf_ready = 0;
+/* Quantised filtered seed note used at the last chord calc — the change
+ * detector looks for any integer-semitone move relative to this. */
+static float last_chord_notes[NUM_CHANNELS] = {0};
+/* Snapshot of the seed notes at the last *envelope* retrigger.  In
+ * microtonal mode we want chord_freqs[] to follow CV smoothly (small
+ * pitch_threshold) but envelopes to only re-attack on a "real" note
+ * change (large trigger_threshold).  Comparing against last_chord_notes
+ * for triggering is wrong because last_chord_notes is updated on every
+ * tiny pitch rebuild — accumulated drift never crosses the trigger
+ * threshold even when the user actually moves a full semitone.  Hence
+ * a separate snapshot that only updates when an envelope fires. */
+static float last_triggered_notes[NUM_CHANNELS] = {0};
 static uint8_t last_chord_num_seeds = 0;
 static uint8_t last_chord_num_fills = 0;
 
-// CV settling: recalculate only once seed CVs have been stable for N consecutive cycles
-// This ensures we snapshot the settled voltage, not a transient mid-slew reading.
-#define CHORD_SETTLE_CYCLES				12		// update cycles CV must hold still before recalc fires
-#define CHORD_SETTLE_STABLE_RATIO		1.002f	
-static uint8_t  chord_recalc_pending = 0;
-static uint8_t  chord_settle_ctr = 0;
-static float    chord_settle_ref_freqs[NUM_CHANNELS] = {0};
-static uint8_t  chord_settle_num_seeds = 0;
+/* ── Trigger stability gate ────────────────────────────────────────
+ * Two-seed chord mode used to fire two consecutive retriggers when
+ * the seeds settled a few ms apart (each seed's NoteFilter snapped
+ * independently → two observed quantised-value changes → two
+ * triggers).  Gating the trigger fire on "all seed quantised values
+ * stable for ≥CHORD_TRIGGER_STABILITY_MS" eliminates this without
+ * the value-loss risk of a fixed refractory period: if the user
+ * changes a seed *during* the wait, the timer resets and we trigger
+ * later with the FINAL value.
+ *
+ * 5 ms is below perceptual threshold for note-on latency (~20 ms is
+ * the usual "instant" bound), and longer than the few-ms inter-seed
+ * settling we're trying to coalesce. */
+#define CHORD_TRIGGER_STABILITY_MS  5
+
+/* Per-channel last quantised note observed in the chord detector,
+ * with sentinel value indicating "never seen".  Updated every
+ * read_freq() pass; used solely to time the stability window
+ * relative to seed_last_change_ms[]. */
+static float    seed_prev_q             [NUM_CHANNELS];
+static uint8_t  seed_prev_q_init        [NUM_CHANNELS] = {0};
+static uint32_t seed_last_change_ms     [NUM_CHANNELS] = {0};
+
+static void chord_nf_init_once(void) {
+	if (chord_nf_ready) return;
+	for (int i = 0; i < NUM_CHANNELS; i++)
+		note_filter_init(&chord_nf[i], 1000.0f);
+	chord_nf_ready = 1;
+}
 
 // LPG trigger pending - wait for CV to stabilize before triggering
 static uint8_t lpg_trigger_pending = 0;
@@ -441,9 +493,6 @@ static uint8_t pending_num_seeds = 0;
 static uint8_t pending_seed_channels[NUM_CHANNELS] = {0};
 static uint8_t pending_num_fills = 0;
 static uint8_t pending_fill_channels[NUM_CHANNELS] = {0};
-
-// 1/4 tone hysteresis = 50 cents = 2^(0.5/12) ≈ 1.029
-#define CHORD_HYSTERESIS_RATIO 1.029f
 
 uint8_t is_channel_in_chord_mode(uint8_t chan) {
 	return (chord_mode_active && chord_freqs[chan] > 0.0f);
@@ -1388,6 +1437,15 @@ void update_wt_head_pos_inc(uint8_t chan){
 
 	base_pitch = calc_params.pitch[chan];
 
+	/* The audio ISR plays back the first phys_N samples of the wavetable
+	 * (a pitch-adapted slice — see halo.h).  Scaling the phase
+	 * increment by phys_N keeps the audible frequency identical regardless
+	 * of M.  Falls back to F_WT_TABLELEN (=512) before the first trigger. */
+	int32_t phys_N = wt_osc.halo_state[chan].phys_N;
+	if (phys_N < RS_M_MIN || phys_N > (int32_t)WT_TABLELEN)
+		phys_N = (int32_t)WT_TABLELEN;
+	const float fN = (float)phys_N;
+
 	for (v = 0; v < MAX_UNISON_VOICES; v++) {
 		if (v < params.unison_voice_count[chan]) {
 			// Apply detuning based on voice index and spread amount
@@ -1398,7 +1456,7 @@ void update_wt_head_pos_inc(uint8_t chan){
 			float ratio = 1.0f + (spread_amt * osc_detune_factors[v] * detune_scaler);
 			
 			detune_pitch = base_pitch * ratio;
-			wt_osc.wt_head_pos_inc[chan][v] = (detune_pitch * F_WT_TABLELEN) / F_SAMPLERATE;
+			wt_osc.wt_head_pos_inc[chan][v] = (detune_pitch * fN) / F_SAMPLERATE;
 		} else {
 			wt_osc.wt_head_pos_inc[chan][v] = 0.0f;
 		}
@@ -1436,6 +1494,11 @@ void update_noise(uint8_t chan)
 
 
 void read_freq(void){
+	/* Temporary: measure entire read_freq() period so we know whether
+	 * the chord pass (rather than the chord solver alone) accounts for
+	 * the reported ~100 ms retrigger latency. */
+	extern volatile uint32_t diag_read_freq_peak_cycles;
+	uint32_t read_freq_start_cycles = DWT->CYCCNT;
 
 	set_master_gain();
 
@@ -1563,6 +1626,7 @@ void read_freq(void){
 	// Harmonic Chord Mode: active when ANY voice 1V/oct jack is plugged with switch in 1V/oct mode
 	// Plugged voices become "seed" notes, unplugged + unlocked voices are filled harmonically
 	// Sliders control overtone weights (h2-h7), fundamental weight is always 1.0
+	chord_nf_init_once();
 	{
 		float seed_freqs[NUM_CHANNELS];
 		uint8_t seed_channels[NUM_CHANNELS];  // Track which channels are seeds
@@ -1614,91 +1678,192 @@ void read_freq(void){
 		// Chord mode is active if we have at least one seed AND at least one voice to fill
 		uint8_t temp_chord_mode_active = (num_seeds > 0 && num_to_fill > 0);
 		
-		// Hysteresis + settling: recalculate only after seed CVs have been stable.
-		// When movement is detected we start a countdown; each call we check whether
-		// the CV is still slewing (relative to what we saw last call).  If it moves
-		// again the countdown resets.  Only when it holds still for CHORD_SETTLE_CYCLES
-		// consecutive calls do we snapshot and rebuild the chord.
+		/* ── Adaptive note filtering (MI Rings NoteFilter port) ──────────
+		 * Per-seed NoteFilter smooths the raw CV:
+		 *   • snaps to genuine note changes in ~1 ms (edge detect)
+		 *   • rejects ADC noise / analog ripple via median + one-pole lag
+		 * The filter IS the stability mechanism — we feed the *quantised
+		 * filtered* note into BOTH the change detector and the chord
+		 * builder so they can never disagree.  Using the raw note for
+		 * detection while building from the filtered value caused an
+		 * asymmetric "stuck high" bug (the filter lags above the raw CV
+		 * on a downward sweep, both values quantise to different
+		 * semitones, and the detector fails to notice).  Using
+		 * quantised filtered notes for both sides makes detection
+		 * symmetric.
+		 *
+		 * Sticky quantisation (on top of the filter): plain roundf() on
+		 * a filtered value near X.5 bounces between X and X+1 as
+		 * sub-LSB ADC noise nudges it across the boundary.  Each bounce
+		 * was firing a spurious recalc and retrigger (ghost notes).
+		 * Once we have latched a seed at an integer N, we require a
+		 * filtered value ≥ N+0.55 (or ≤ N-0.55) before moving to the
+		 * next integer.  The 0.05 ST hysteresis band eliminates
+		 * boundary chatter without adding perceptible delay to real
+		 * semitone-sized CV moves.
+		 * ──────────────────────────────────────────────────────────────── */
+		uint8_t topology_change =
+			(!chord_mode_active ||
+			 num_seeds   != last_chord_num_seeds ||
+			 num_to_fill != last_chord_num_fills);
+
+		float seed_notes_q[NUM_CHANNELS];   /* quantised filtered semitones */
+		for (uint8_t i = 0; i < num_seeds; i++) {
+			float raw = nf_freq_to_note(seed_freqs[i]);
+			float filtered = note_filter_process(
+				&chord_nf[seed_channels[i]], raw, 0);
+			if (!microtonal) {
+				if (topology_change) {
+					/* Stale last_chord_notes[i] may refer to a
+					 * different channel; fall back to direct
+					 * rounding.  needs_recalc will fire anyway. */
+					seed_notes_q[i] = roundf(filtered);
+				} else {
+					float last = last_chord_notes[i];
+					if (fabsf(filtered - last) > 0.55f)
+						seed_notes_q[i] = roundf(filtered);
+					else
+						seed_notes_q[i] = last;
+				}
+			} else {
+				seed_notes_q[i] = filtered;
+			}
+			/* Replace raw freq with quantised filtered version so
+			 * the chord builder and downstream code use identical
+			 * values to the change detector. */
+			seed_freqs[i] = nf_note_to_freq(seed_notes_q[i]);
+		}
+
 		uint8_t needs_recalc = 0;
+		uint8_t needs_trigger = 0;
+
+		/* ── Stability tracking for the trigger gate ────────────────
+		 * Tag each seed channel with the millisecond at which its
+		 * nearest-semitone value last changed.  The gate below
+		 * waits until ALL participating seeds have been quiet for
+		 * ≥CHORD_TRIGGER_STABILITY_MS before firing, coalescing
+		 * two seeds that settle a few ms apart into a single
+		 * retrigger.
+		 *
+		 * Tracking is done against roundf(seed_notes_q[i]) rather
+		 * than the raw value so microtonal-mode CV drift (where
+		 * seed_notes_q is continuous and changes every iteration)
+		 * doesn't permanently mark the channel as non-quiet — the
+		 * timer only resets when the filtered value crosses an
+		 * integer-semitone boundary, which is also where the
+		 * 0.5 ST trigger threshold actually engages. */
+		uint32_t now_ms = HAL_GetTick();
+		for (uint8_t i = 0; i < num_seeds; i++) {
+			uint8_t sc = seed_channels[i];
+			if (sc >= NUM_CHANNELS) continue;
+			float q_int = roundf(seed_notes_q[i]);
+			if (!seed_prev_q_init[sc] || seed_prev_q[sc] != q_int) {
+				seed_prev_q[sc]         = q_int;
+				seed_prev_q_init[sc]    = 1;
+				seed_last_change_ms[sc] = now_ms;
+			}
+		}
 
 		if (temp_chord_mode_active) {
-			// Topology changes (mode just activated, or patch changed) fire immediately –
-			// there is no "old" chord to protect, so no settling needed.
-			if (!chord_mode_active ||
-				num_seeds   != last_chord_num_seeds ||
-				num_to_fill != last_chord_num_fills)
-			{
-				needs_recalc        = 1;
-				chord_recalc_pending = 0;
-				chord_settle_ctr     = 0;
+			/* Topology change (mode just activated, seed/fill count changed)
+			 * — recalculate immediately; there is no old chord to protect. */
+			if (topology_change) {
+				needs_recalc = 1;
+				needs_trigger = 1;
 			}
 			else {
-				// Has any seed moved more than 1/4 tone from the last stable snapshot?
-				uint8_t moved = 0;
+				/* Two thresholds, decoupled:
+				 *
+				 *   pitch_threshold  → rebuild chord_freqs[] (smooth tracking).
+				 *   trigger_threshold → re-attack envelopes (real note change).
+				 *
+				 * In semitone-quantised mode `seed_notes_q[i]` is an
+				 * integer (sticky-rounded), so any diff ≥ 1 is a real
+				 * note change and both thresholds collapse to 0.5.
+				 *
+				 * In microtonal mode the filtered note is continuous
+				 * and adjacent main-loop calls sample independent
+				 * filter noise (the analog A_VOCT path has no LPF —
+				 * see analog_conditioning.c).  Using a single 0.1 ST
+				 * threshold for both rebuild AND trigger caused 10–20
+				 * Hz spurious envelope retriggers on held notes; the
+				 * trigger threshold is now 0.5 ST relative to the
+				 * *last triggered* snapshot, while pitch still tracks
+				 * at 0.1 ST so microtonal sweeps sound smooth. */
+				float pitch_threshold   = microtonal ? 0.1f : 0.5f;
+				float trigger_threshold = microtonal ? 0.5f : 0.5f;
 				for (uint8_t i = 0; i < num_seeds; i++) {
-					float ratio = seed_freqs[i] / last_chord_seed_freqs[i];
-					if (ratio > CHORD_HYSTERESIS_RATIO || ratio < (1.0f / CHORD_HYSTERESIS_RATIO)) {
-						moved = 1;
+					if (fabsf(seed_notes_q[i] - last_chord_notes[i]) > pitch_threshold) {
+						needs_recalc = 1;
 						break;
 					}
 				}
-
-				if (!moved) {
-					// Back within the stable window – cancel any in-progress settle.
-					chord_recalc_pending = 0;
-					chord_settle_ctr     = 0;
-				} else {
-					// CV has moved past the 1/4-tone gate.  Check whether it is still
-					// slewing by comparing against the reference we saved last cycle.
-					uint8_t still_moving = 0;
-					if (chord_recalc_pending && chord_settle_num_seeds == num_seeds) {
-						for (uint8_t i = 0; i < num_seeds; i++) {
-							float ratio = seed_freqs[i] / chord_settle_ref_freqs[i];
-							if (ratio > CHORD_SETTLE_STABLE_RATIO || ratio < (1.0f / CHORD_SETTLE_STABLE_RATIO)) {
-								still_moving = 1;
-								break;
-							}
-						}
-					} else {
-						// First time we detect movement – treat as still moving to arm the counter.
-						still_moving = 1;
-					}
-
-					if (still_moving) {
-						// CV is actively changing: (re)start the settle countdown and
-						// save current readings as the new reference.
-						chord_recalc_pending   = 1;
-						chord_settle_ctr       = CHORD_SETTLE_CYCLES;
-						chord_settle_num_seeds = num_seeds;
-						for (uint8_t i = 0; i < num_seeds; i++)
-							chord_settle_ref_freqs[i] = seed_freqs[i];
-					} else {
-						// CV is holding still – count down toward recalc.
-						if (chord_settle_ctr > 0)
-							chord_settle_ctr--;
-						if (chord_settle_ctr == 0) {
-							needs_recalc        = 1;
-							chord_recalc_pending = 0;
-						}
+				for (uint8_t i = 0; i < num_seeds; i++) {
+					if (fabsf(seed_notes_q[i] - last_triggered_notes[i]) > trigger_threshold) {
+						needs_trigger = 1;
+						break;
 					}
 				}
+				/* needs_trigger MUST imply needs_recalc.  Otherwise, with
+				 * last_chord_notes tracking small drift but last_triggered_notes
+				 * staying pinned, a real semitone step that crosses the
+				 * trigger threshold can fall *below* pitch_threshold against
+				 * last_chord_notes (which already followed the drift) — the
+				 * outer recalc gate would be skipped, swallowing the trigger
+				 * entirely.  Force a rebuild whenever a trigger is needed so
+				 * chord_freqs[] and last_chord_notes also re-sync. */
+				if (needs_trigger) needs_recalc = 1;
 			}
 		}
-		
-		if (temp_chord_mode_active && needs_recalc) {
-			// Quantize settled seed frequencies to the nearest semitone.
-			// The CV has already been stable for CHORD_SETTLE_CYCLES, so any
-			// remaining deviation from a true semitone is ADC noise / uncalibrated
-			// tracking.  Snapping here gives a clean pitch to the chord engine and
-			// means hysteresis in future cycles is measured against the quantized
-			// note, so re-triggers fire on clean semitone boundaries.
-			if (!microtonal) {
-				for (uint8_t i = 0; i < num_seeds; i++) {
-					// semitones from A4 (440 Hz), rounded to nearest integer
-					float st = roundf(12.0f * log2f(seed_freqs[i] / 440.0f));
-					seed_freqs[i] = 440.0f * powf(2.0f, st / 12.0f);
+
+		/* ── Stability gate ─────────────────────────────────────────
+		 * Defer BOTH the chord rebuild AND the trigger fire until
+		 * every participating seed has been quiescent for
+		 * ≥CHORD_TRIGGER_STABILITY_MS.  Pitch and trigger MUST
+		 * stay in sync — a chord rebuild without a trigger leaves
+		 * the voices playing the new pitch with the old envelope
+		 * tail (audible as "pitch shifts before the note retriggers"),
+		 * so we hold both back until the seeds settle.
+		 *
+		 * The gate only engages when needs_trigger is set, so
+		 * microtonal-mode smooth pitch tracking (needs_recalc==1
+		 * with needs_trigger==0 below the 0.5 ST step threshold)
+		 * still runs continuously — that's the case where pitch
+		 * is supposed to drift without any envelope re-attack.
+		 *
+		 * If a seed changes again mid-window its
+		 * seed_last_change_ms[] update above resets the timer; the
+		 * next iteration re-evaluates needs_trigger from scratch,
+		 * so a CV bounce that lands back on the previous triggered
+		 * note correctly suppresses the (now-unwarranted) trigger. */
+		if (temp_chord_mode_active && needs_trigger && !topology_change) {
+			uint8_t all_quiet = 1;
+			for (uint8_t i = 0; i < num_seeds; i++) {
+				uint8_t sc = seed_channels[i];
+				if (sc >= NUM_CHANNELS) continue;
+				if ((now_ms - seed_last_change_ms[sc])
+				        < CHORD_TRIGGER_STABILITY_MS) {
+					all_quiet = 0;
+					break;
 				}
 			}
+			if (!all_quiet) {
+				needs_trigger = 0;
+				needs_recalc  = 0;
+			}
+		}
+
+		if (temp_chord_mode_active && needs_recalc) {
+			/* Temporary diagnostic: count how often read_freq() takes
+			 * the chord-recalc branch.  A sustained non-zero rate in
+			 * steady-state chord mode means ADC ripple / filter
+			 * chatter is driving spurious recalcs. */
+			{
+				extern volatile uint32_t diag_chord_recalc_count;
+				diag_chord_recalc_count++;
+			}
+			/* seed_freqs[] is already quantised (if appropriate) above;
+			 * no further semitone snapping needed here. */
 
 			// Use stored overtone weights (edited via OCT+slider combo)
 			// params.chord_overtone_weights[0] is fundamental (always 1.0)
@@ -1731,10 +1896,20 @@ void read_freq(void){
 			for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
 				fill_freqs[i] = seed_freqs[0] * (float)(1 << (i % 3));  // seed, oct+1, oct+2
 			}
+			/* Temporary: measure just the chord solver so we can
+			 * separate "chord selection is slow" from "other part of
+			 * read_freq is slow". */
+			extern volatile uint32_t diag_chord_build_peak_cycles;
+			uint32_t chord_build_start = DWT->CYCCNT;
 			build_harmonic_chord(seed_freqs, num_seeds, voices_to_fill, num_to_fill, 
 			                      params.chord_overtone_weights, microtonal, min_freq, max_freq,
 			                      max_seed, CHORD_ABOVE_EXT_PENALTY_DB_PER_OCT,
 			                      scale_mask, CHORD_SCALE_PENALTY_DEFAULT, fill_freqs);
+			{
+				uint32_t dur = DWT->CYCCNT - chord_build_start;
+				if (dur > diag_chord_build_peak_cycles)
+					diag_chord_build_peak_cycles = dur;
+			}
 			
 			// Safety: ensure all fill frequencies are valid (non-zero positive)
 			for (uint8_t i = 0; i < num_to_fill; i++) {
@@ -1778,9 +1953,11 @@ void read_freq(void){
 				}
 			}
 			
-			// Update hysteresis tracking
+			// Track the quantised filtered note we just built the chord
+			// from — the detector compares the next pass's quantised
+			// filtered notes against this, so direction is symmetric.
 			for (uint8_t i = 0; i < num_seeds; i++) {
-				last_chord_seed_freqs[i] = seed_freqs[i];
+				last_chord_notes[i] = seed_notes_q[i];
 			}
 			last_chord_num_seeds = num_seeds;
 			last_chord_num_fills = num_to_fill;
@@ -1792,17 +1969,30 @@ void read_freq(void){
 				chord_freqs[i] = temp_chord_freqs[i];
 			}
 			__enable_irq();
-			
-			// Schedule LPG trigger for when CV stabilizes (two consecutive stable readings)
-			// Save channel info for later trigger
-			lpg_trigger_pending = 1;
-			pending_num_seeds = num_seeds;
-			pending_num_fills = num_to_fill;
-			for (uint8_t s = 0; s < num_seeds; s++) {
-				pending_seed_channels[s] = seed_channels[s];
-			}
-			for (uint8_t f = 0; f < num_to_fill; f++) {
-				pending_fill_channels[f] = voices_to_fill[f];
+
+			/* Only fire envelopes when the *trigger* threshold has been
+			 * crossed.  In microtonal mode the chord rebuilds for every
+			 * sub-semitone drift (smooth pitch tracking), but envelopes
+			 * must NOT re-attack on each tiny rebuild — that produced the
+			 * 10–20 Hz spurious retrigger on held notes. */
+			if (needs_trigger) {
+				lpg_trigger_pending = 1;
+				pending_num_seeds = num_seeds;
+				pending_num_fills = num_to_fill;
+				for (uint8_t s = 0; s < num_seeds; s++) {
+					pending_seed_channels[s] = seed_channels[s];
+				}
+				for (uint8_t f = 0; f < num_to_fill; f++) {
+					pending_fill_channels[f] = voices_to_fill[f];
+				}
+				/* Snapshot the seeds we just triggered on; the trigger
+				 * detector compares the next pass's seeds against this,
+				 * so accumulated sub-threshold drift between triggers
+				 * stays measured against the *last fired* note rather
+				 * than the last rebuild. */
+				for (uint8_t i = 0; i < num_seeds; i++) {
+					last_triggered_notes[i] = seed_notes_q[i];
+				}
 			}
 		}
 		else if (!temp_chord_mode_active) {
@@ -1816,74 +2006,210 @@ void read_freq(void){
 			last_chord_num_seeds = 0;
 			last_chord_num_fills = 0;
 			lpg_trigger_pending = 0;
-			chord_recalc_pending = 0;
-			chord_settle_ctr     = 0;
 		}
-		else if (lpg_trigger_pending) {
-			// Chord mode active, no recalc needed (CV stable) - now trigger the LPGs.
-			// Strum timing: delays are proportional to one global clock period so the
-			// spread is always musically in time.  The channel with the smallest
-			// lpg_phase_id fires immediately (delay=0); all others fire later by
-			// (their_phase - min_phase) / LFO_PHASE_TABLELEN * ticks_per_period ticks.
-			// Negative spread reverses the order: highest-index channel fires first.
+		/* Trigger pass.  The recalc branch above already arms
+		 * lpg_trigger_pending in the same iteration, so the trigger fires
+		 * in the same pass that computed the chord — no extra loop-iteration
+		 * latency.  Still gated by temp_chord_mode_active so the cleanup
+		 * branch above doesn't accidentally double-fire. */
+		if (temp_chord_mode_active && lpg_trigger_pending) {
+			// Chord triggers: run strum delay scheduling and fire/schedule
+			// LPG + Halo per channel.
+			//
+			// Strum timing is derived directly from the unified
+			// lfos.phase_spread (clock-period units between adjacent
+			// channels):
+			//
+			//     signed_delay[chan] = chan * phase_spread * ticks_per_clock_period
+			//
+			// We then subtract the smallest signed_delay among the
+			// participating channels so the earliest voice fires
+			// immediately and the rest fall in line behind it.  This
+			// preserves the relative spacing for both positive spread
+			// (low-channels-first) and negative spread (high-channels-
+			// first), and crucially does NOT wrap modulo one clock
+			// period — so phase_spread > 1.0 produces real
+			// multi-clock-period rhythmic offsets rather than collapsing
+			// into a fractional strum.
 			lpg_trigger_pending = 0;
 
-			// --- Pass 1: find the minimum phase_id among all LPG-active channels ---
-			float strum_min_phase = 0.0f;
-			uint8_t strum_found_first = 0;
-			for (uint8_t s = 0; s < pending_num_seeds; s++) {
-				uint8_t chan = pending_seed_channels[s];
-				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
-					if (!strum_found_first || lfos.lpg_phase_id[chan] < strum_min_phase) {
-						strum_min_phase = lfos.lpg_phase_id[chan];
-						strum_found_first = 1;
-					}
-				}
-			}
-			for (uint8_t f = 0; f < pending_num_fills; f++) {
-				uint8_t chan = pending_fill_channels[f];
-				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
-					if (!strum_found_first || lfos.lpg_phase_id[chan] < strum_min_phase) {
-						strum_min_phase = lfos.lpg_phase_id[chan];
-						strum_found_first = 1;
-					}
-				}
-			}
+			/* Clear any in-flight strum delays from a previous chord
+			 * change, otherwise they'd still fire a stale trigger a
+			 * fraction of a period after the new chord lands.  Done
+			 * unprotected here is fine — a stale delay decrementing
+			 * to zero in the gap between this clear and the schedule
+			 * commit below is a no-op once we re-arm the array under
+			 * the __disable_irq() block (the delay is overwritten
+			 * before PWM can decrement it again). */
+			for (uint8_t c = 0; c < NUM_CHANNELS; c++)
+				lfos.lpg_trigger_delay[c] = 0;
 
-			// ticks_per_period: one global-clock cycle expressed in envout update ticks.
-			// lfos.inc[GLO_CLK] = F_LFO_UPDATE_RATIO / period_ms, so 1/inc = period in ticks.
-			// Fall back to 500 ticks (~70 ms) when clock is stopped/uninitialised.
-			float strum_ticks_per_period = (lfos.inc[GLO_CLK] > 1e-6f)
+			// One global-clock cycle expressed in envout update ticks
+			// (PWM_OUTS_TIM @ 7.2 kHz).  lfos.inc[GLO_CLK] =
+			// F_LFO_UPDATE_RATIO / period_ms, so 1/inc = period in ticks.
+			// Fall back to 500 ticks (~70 ms) when clock is stopped/
+			// uninitialised.  Cap one period at 1 s so individual delays
+			// stay sane on very slow clocks.
+			float ticks_per_clock = (lfos.inc[GLO_CLK] > 1e-6f)
 				? (1.0f / lfos.inc[GLO_CLK])
 				: 500.0f;
+			if (ticks_per_clock > 7200.0f)
+				ticks_per_clock = 7200.0f;
 
-			// --- Pass 2: fire each channel with its relative delay ---
+			const float spread = lfos.phase_spread;
+
+			/* --- Quantise inter-voice spacing to one OSC_TIM period ---
+			 *
+			 * The strum scheduler decrements lfos.lpg_trigger_delay[]
+			 * on PWM_OUTS_TIM (7.2 kHz, 138.9 µs/tick).  When a delay
+			 * hits zero PWM ISR calls halo_request_trigger(),
+			 * which only sets a pending flag — the actual halo_
+			 * trigger() commit happens on the next OSC_TIM tick
+			 * (1.8 kHz, 555 µs/tick = 4 PWM ticks).
+			 *
+			 * If the raw spacing is NOT a multiple of 4 PWM ticks the
+			 * adjacent voices land on different OSC_TIM phases, so
+			 * each voice picks up a different 0…555 µs commit-side
+			 * delay.  The relative spacing then jitters by up to
+			 * ±555 µs and — crucially — the jitter pattern depends
+			 * on where the chord change happened to fall within the
+			 * OSC_TIM cycle, so it varies bar-to-bar.  Audibly the
+			 * strum "speeds up and slows down" between bars even
+			 * with a perfectly stable clock.
+			 *
+			 * Snap the raw per-voice spacing to the nearest multiple
+			 * of 4 PWM ticks (≥ 4 for any nonzero spread, 0 for
+			 * unison).  Now every voice's PWM target is at the same
+			 * (tick mod 4) phase, every voice picks up the SAME
+			 * commit-side delay, and the inter-voice spacing is an
+			 * exact multiple of 555 µs regardless of chord-change
+			 * timing.  Quantisation error per spread step is at most
+			 * ±2 PWM ticks ≈ ±278 µs — well below the perceptual
+			 * threshold for strum-timing changes (~5 ms). */
+			float raw_spacing = spread * ticks_per_clock;
+			float spacing;
+			if (spread == 0.0f) {
+				spacing = 0.0f; /* true unison: all voices on same tick */
+			} else {
+				float abs_spacing = (raw_spacing < 0.0f) ? -raw_spacing : raw_spacing;
+				int   q4          = (int)(abs_spacing * 0.25f + 0.5f) * 4;
+				if (q4 < 4) q4 = 4;
+				spacing = (raw_spacing < 0.0f) ? -(float)q4 : (float)q4;
+			}
+
+			// --- Pass 1: compute signed per-channel delay and find min. ---
+			float signed_delay[NUM_CHANNELS];
+			for (uint8_t c = 0; c < NUM_CHANNELS; c++)
+				signed_delay[c] = (float)c * spacing;
+
+			float min_signed = 0.0f;
+			uint8_t found_first = 0;
 			for (uint8_t s = 0; s < pending_num_seeds; s++) {
 				uint8_t chan = pending_seed_channels[s];
 				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
-					float rel = (lfos.lpg_phase_id[chan] - strum_min_phase)
-					          / (float)LFO_PHASE_TABLELEN;
-					uint16_t delay = (uint16_t)(rel * strum_ticks_per_period);
-					if (delay == 0)
-						Shim_LPG_Trigger(chan);
-					else
-						lfos.lpg_trigger_delay[chan] = delay;
+					if (!found_first || signed_delay[chan] < min_signed) {
+						min_signed = signed_delay[chan];
+						found_first = 1;
+					}
 				}
 			}
 			for (uint8_t f = 0; f < pending_num_fills; f++) {
 				uint8_t chan = pending_fill_channels[f];
 				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
-					float rel = (lfos.lpg_phase_id[chan] - strum_min_phase)
-					          / (float)LFO_PHASE_TABLELEN;
-					uint16_t delay = (uint16_t)(rel * strum_ticks_per_period);
-					if (delay == 0)
-						Shim_LPG_Trigger(chan);
-					else
-						lfos.lpg_trigger_delay[chan] = delay;
+					if (!found_first || signed_delay[chan] < min_signed) {
+						min_signed = signed_delay[chan];
+						found_first = 1;
+					}
+				}
+			}
+
+			/* --- Pass 2: fire each channel with its relative delay ---
+			 *
+			 * LPG channels schedule a delayed Shim_LPG_Trigger via
+			 * lfos.lpg_trigger_delay; envout_pwm.c fires the
+			 * Halo env alongside the LPG at the delay boundary
+			 * so the strum timing is preserved.  Non-LPG channels
+			 * trigger the Halo immediately (there is no
+			 * per-channel delay mechanism to hang it off of).
+			 *
+			 * Every LPG channel goes through the lpg_trigger_delay
+			 * scheduler, even the "first" voice with d == 0 — see the
+			 * quantisation comment above for why uniform PWM alignment
+			 * matters.  signed_delay[] is already an exact multiple of
+			 * 4 PWM ticks (= 1 OSC_TIM tick), so the cast below is
+			 * effectively integer; the +1 absorbs the half-tick that
+			 * the leading voice would otherwise lose to the immediate
+			 * PWM decrement on the same tick the delay was written.
+			 *
+			 * CRITICAL SECTION: PWM_OUTS_TIM (7.2 kHz, priority 0,3)
+			 * runs higher than the main loop and decrements every
+			 * lfos.lpg_trigger_delay[] entry on each tick.  If it
+			 * preempts mid-loop after voice 0's delay has been written
+			 * but before voice 1's, voice 0 gets decremented (or even
+			 * fires) while voice 1 is still un-armed, stretching the
+			 * inter-voice spacing by one PWM tick (≈140 µs).  Whether
+			 * that preemption falls in the gap depends on the phase of
+			 * PWM relative to wherever the main loop was when read_freq
+			 * landed — bar-to-bar dependent — so the strum visibly
+			 * "speeds up and slows down" between bars even with a
+			 * perfectly stable Pam's clock.  Disable IRQs across the
+			 * whole schedule commit so all six voices get armed in the
+			 * same PWM tick window.  Worst-case critical section is
+			 * ~6 voices × a few µs each ≈ 30 µs (well under the audio
+			 * block budget at priority 0,0). */
+			__disable_irq();
+			for (uint8_t s = 0; s < pending_num_seeds; s++) {
+				uint8_t chan = pending_seed_channels[s];
+				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
+					float d = signed_delay[chan] - min_signed;
+					if (d < 0.0f) d = 0.0f;
+					if (d > 65534.0f) d = 65534.0f;
+					uint16_t delay = (uint16_t)(d + 0.5f) + 1u;
+					lfos.lpg_trigger_delay[chan] = delay;
+				} else {
+					halo_request_trigger(chan);
+				}
+			}
+			for (uint8_t f = 0; f < pending_num_fills; f++) {
+				uint8_t chan = pending_fill_channels[f];
+				if (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]) {
+					float d = signed_delay[chan] - min_signed;
+					if (d < 0.0f) d = 0.0f;
+					if (d > 65534.0f) d = 65534.0f;
+					uint16_t delay = (uint16_t)(d + 0.5f) + 1u;
+					lfos.lpg_trigger_delay[chan] = delay;
+				} else {
+					halo_request_trigger(chan);
+				}
+			}
+			__enable_irq();
+
+			/* Defer the LFO phase reset to OSC_TIM, alongside the
+			 * Halo reseed atomic commit.  Resetting here (main
+			 * loop) causes PWM_OUTS_TIM (7.2 kHz) to recompute out_lpf
+			 * from the new phase ~140 µs later, while the pitch
+			 * reseed waits for OSC_TIM (1.8 kHz, up to 555 µs) — the
+			 * audio ISR observed envelope re-attack BEFORE pitch
+			 * change, producing an audible artifact on chord
+			 * retriggers in LFO-VCA mode (envelope-shaped LFO most
+			 * obvious).  By setting a pending flag, OSC_TIM applies
+			 * the phase reset inside the same __disable_irq() block
+			 * that flips the buffer_sel and updates phys_N — so the
+			 * audio ISR sees a single coherent transition. */
+			for (uint8_t lc = 0; lc < NUM_CHANNELS; lc++) {
+				if (!lfos.locked[lc] && lfos.to_vca[lc] && lfos.mode[lc] != lfot_LPG) {
+					lfos.lfo_reset_pending[lc] = 1;
 				}
 			}
 		}
 		// else: chord mode active, no recalc needed, no pending trigger - keep existing chord_freqs
+	}
+
+	/* Temporary: commit read_freq() peak period. */
+	{
+		uint32_t dur = DWT->CYCCNT - read_freq_start_cycles;
+		if (dur > diag_read_freq_peak_cycles)
+			diag_read_freq_peak_cycles = dur;
 	}
 }
 
@@ -2294,6 +2620,20 @@ float compute_transposition(int32_t transpose)
 // ########################################################################
 
 
+/* Persistent encoder base for each Halo control (per channel).
+ * Each tick we combine base + CV offset into the live physics parameter.
+ * Without this, the CV-driven path would overwrite any encoder movement on
+ * the very next tick, making the encoder useless while a CV is patched.
+ *
+ * The bases live inside `o_params` (saved with presets, vH+); these macros
+ * are the legacy spelling so the rest of this file can keep its existing
+ * arithmetic style. */
+#define halo_damping_base      (params.halo_damping)
+#define halo_noise_level_base  (params.halo_noise_level)
+#define halo_noise_color_base  (params.halo_noise_color)
+#define halo_wt_attack_base    (params.halo_wt_attack)
+#define halo_lpf_base          (params.halo_lpf_cutoff)
+
 void update_wt(void)
 {
 	uint8_t		i;
@@ -2318,6 +2658,15 @@ void update_wt(void)
 			read_browse_encoder();	//calls read_wtsel() if encoder is pushed+turned and updates wtsel_enc[]
 			read_wtsel_cv();		//updates wtsel_cv based on cv on the jack
 
+			/* WBROWSE_CV → params.wt_browse_step_pos_cv (0..27).
+			 * calc_wt_pos() sums this with the encoder position to
+			 * pick the seed waveform.  The function exists in
+			 * params_wt_browse.c but was never being polled, so
+			 * scanning the wavetable from CV silently did nothing
+			 * (turning the main knob worked because that goes via
+			 * read_browse_encoder() → update_wbrowse()). */
+			update_wbrowse_cv();
+
 			update_wtsel();		//sets calc_params.wtsel[] based on sum of spread and calc_params.wtsel (cv and enc)
 
 			update_wt_bank();		//sets wt_bank = calc_params.wtsel and requests wt update if it's changed
@@ -2326,39 +2675,158 @@ void update_wt(void)
 
 
 		// ------------
-		// WT POSITION
+		// RINGSTRING PARAMS
 		// ------------
 
 		case 4:
-			update_wt_disp (0);
-			update_wbrowse_cv();
+			/* Depth push+turn (sec_DISPERSION) → Halo lpfCutoff.
+			 * Encoder adjusts a per-channel base value; DISP_CV
+			 * (the dedicated dispersion CV jack) adds an offset on
+			 * top.  lpfCutoff is an integer harmonic-number in
+			 * [1,42] so the CV is scaled into the same range and
+			 * summed before clamping. */
+			{
+				int16_t enc_lpf = pop_encoder_q(sec_DISPERSION);
+				if (enc_lpf) {
+					for (i = 0; i < NUM_CHANNELS; i++) {
+						int32_t newval = (int32_t)halo_lpf_base[i] + enc_lpf;
+						if (newval < 1)  newval = 1;
+						if (newval > 42) newval = 42;
+						halo_lpf_base[i] = (int8_t)newval;
+					}
+					if (ui_mode == PLAY)
+						start_ongoing_display_halo_lpf();
+				}
+				/* CV: 0..1 maps across the full 1..42 lpfCutoff
+				 * range; jack must be plugged for the offset to
+				 * apply, otherwise leftover CV from the previous
+				 * patch could shift the baseline silently. */
+				int32_t lpf_cv_q = 0;
+				if (analog_jack_plugged(DISP_CV)) {
+					lpf_cv_q = (int32_t)((float)analog[DISP_CV].bracketed_val
+					           * 41.0f / 4095.0f);
+				}
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					int32_t v = (int32_t)halo_lpf_base[i] + lpf_cv_q;
+					if (v < 1)  v = 1;
+					if (v > 42) v = 42;
+					wt_osc.halo_state[i].lpfCutoff = v;
+					halo_set_lpf_cutoff(i, v);
+				}
+			}
 		break;
 
-		// depth
+		// depth → Halo damping (encoder base + DEPTH_CV offset)
 		case 6:
-			update_wt_nav_cv(0);
-			read_nav_encoder(0);
+			{
+				int16_t enc_d = pop_encoder_q(pec_DEPTH);
+				if (enc_d) {
+					float inc = (float)enc_d * 0.02f;
+					for (i = 0; i < NUM_CHANNELS; i++)
+						halo_damping_base[i] = _CLAMP_F(halo_damping_base[i] + inc, 0.0f, 1.0f);
+					/* Pop the damping bar-graph overlay so the user
+					 * gets immediate feedback on the value being
+					 * adjusted; the default seed-position view
+					 * returns automatically when the timer expires. */
+					if (ui_mode == PLAY)
+						start_ongoing_display_halo_damping();
+				}
+				float damp_cv = analog_jack_plugged(DEPTH_CV)
+					? (float)analog[DEPTH_CV].bracketed_val / 4095.0f : 0.0f;
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					float v = _CLAMP_F(halo_damping_base[i] + damp_cv, 0.0f, 1.0f);
+					wt_osc.halo_state[i].damping = v;
+					halo_set_damping(i, v);
+				}
+			}
 		break;
 
-		// latitude
+		// latitude → Halo noiseLevel (encoder base + LATITUDE_CV offset)
 		case 9:
-			update_wt_nav_cv(1);
-			read_nav_encoder(1);
+			{
+				int16_t enc_l = pop_encoder_q(pec_LATITUDE);
+				if (enc_l) {
+					float inc = (float)enc_l * 0.02f;
+					for (i = 0; i < NUM_CHANNELS; i++)
+						halo_noise_level_base[i] = _CLAMP_F(halo_noise_level_base[i] + inc, 0.0f, 1.0f);
+					if (ui_mode == PLAY)
+						start_ongoing_display_halo_noise_level();
+				}
+				float nl_cv = analog_jack_plugged(LATITUDE_CV)
+					? (float)analog[LATITUDE_CV].bracketed_val / 4095.0f : 0.0f;
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					float v = _CLAMP_F(halo_noise_level_base[i] + nl_cv, 0.0f, 1.0f);
+					wt_osc.halo_state[i].noiseLevel = v;
+					halo_set_noise_level(i, v);
+				}
+			}
 		break;
 
-		// longitude
+		// longitude → Halo wtAttack (injection / attack envelope).
+		//   - Encoder: per-channel base value, step 0.01 per click
+		//     to match the JS reference parameter range/step.
+		//   - CV: WTSEL_SPREAD_CV (the jack normally driving wavetable
+		//     spread) is hijacked here per the user's mapping; it is
+		//     summed into the encoder base before clamping.
 		case 12:
-			update_wt_nav_cv(2);
-			read_nav_encoder(2);
+			{
+				int16_t enc_wa = pop_encoder_q(pec_LONGITUDE);
+				if (enc_wa) {
+					float inc = (float)enc_wa * 0.01f;
+					for (i = 0; i < NUM_CHANNELS; i++)
+						halo_wt_attack_base[i] = _CLAMP_F(halo_wt_attack_base[i] + inc, 0.0f, 1.0f);
+					if (ui_mode == PLAY)
+						start_ongoing_display_halo_wt_attack();
+				}
+				float wa_cv = analog_jack_plugged(WTSEL_SPREAD_CV)
+					? (float)analog[WTSEL_SPREAD_CV].bracketed_val / 4095.0f : 0.0f;
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					float v = _CLAMP_F(halo_wt_attack_base[i] + wa_cv, 0.0f, 1.0f);
+					wt_osc.halo_state[i].wtAttack = v;
+					halo_set_wt_attack(i, v);
+				}
+			}
+		break;
+
+		// latitude push+turn (sec_DISPPATT, "dispersion pattern") →
+		// Halo noiseColor.  CV jack: DISPPAT_CV — the dedicated
+		// dispersion-pattern input is the natural pair for this
+		// push+turn control.  Encoder step matches the existing
+		// noise-level/noise-color UX (0.02 per click).
+		case 14:
+			{
+				int16_t enc_c = pop_encoder_q(sec_DISPPATT);
+				if (enc_c) {
+					float inc = (float)enc_c * 0.02f;
+					for (i = 0; i < NUM_CHANNELS; i++)
+						halo_noise_color_base[i] = _CLAMP_F(halo_noise_color_base[i] + inc, 0.0f, 1.0f);
+					if (ui_mode == PLAY)
+						start_ongoing_display_halo_noise_color();
+				}
+				float color_cv = analog_jack_plugged(DISPPAT_CV)
+					? (float)analog[DISPPAT_CV].bracketed_val / 4095.0f : 0.0f;
+				for (i = 0; i < NUM_CHANNELS; i++) {
+					float v = _CLAMP_F(halo_noise_color_base[i] + color_cv, 0.0f, 1.0f);
+					wt_osc.halo_state[i].noiseColor = v;
+					halo_set_noise_color(i, v);
+				}
+			}
 		break;
 
 		case 15:
-			//Todo: make these functions into one looping function
-			for (i = 0; i < NUM_CHANNELS; i++){
-				calc_wt_pos				(i);
-				update_wt_pos_interp_params	(i, 0);
-				update_wt_pos_interp_params	(i, 1);
-				update_wt_pos_interp_params	(i, 2);
+			/* Publish the per-channel float browse position so
+			 * refresh_ring_seed_caches() can cache the two adjacent
+			 * waveforms (floor/ceil) for interpolation at the next
+			 * note trigger. Using the float form preserves the
+			 * fractional part for lerp — snapping to int16 here would
+			 * make seeds jump abruptly as the encoder crossed integer
+			 * boundaries. */
+			for (i = 0; i < NUM_CHANNELS; i++) {
+				float pos = params.wt_browse_step_pos_enc[i];
+				if (pos < 0.0f) pos = 0.0f;
+				if (pos > (float)(NUM_WAVEFORMS_IN_SPHERE - 1))
+					pos = (float)(NUM_WAVEFORMS_IN_SPHERE - 1);
+				wt_osc.pending_seed_pos[i] = pos;
 			}
 			poll_ctr=0;
 		break;
@@ -2415,80 +2883,77 @@ void read_nav_encoder(uint8_t dim){
 void read_browse_encoder(void)
 {
 	int16_t enc, enc2;
-	int16_t i,j,k;
+	int16_t i;
 	static uint8_t set_new_global_brightness=0;
-	static uint8_t browse_pressed = 0;
-	static uint8_t browse_moved = 0;
 
 	enc = pop_encoder_q(pec_WBROWSE);
 	enc2 = pop_encoder_q(sec_WTSEL);
 
-	if (enc || enc2) browse_moved = 1;
-
-	if (rotary_pressed(rotm_WAVETABLE))
+	/* ── Wavetable turn (no push): scan 0–26 within current bank, wrapping ──
+	 *
+	 * Route through update_wbrowse(enc) + the morph bed instead of
+	 * adding integer steps directly to wt_browse_step_pos_enc[].  The
+	 * old code moved the position by whole wavetable entries per
+	 * click, so pending_seed_pos always landed on an integer and
+	 * halo_seed_lerp's `frac` parameter was always 0 — the
+	 * cross-fade between adjacent waveforms that the seed cache
+	 * already supports never actually ran.
+	 *
+	 * With update_wbrowse(enc):
+	 *   - each click nudges wbrowse_dest[] by F_SCALING_BROWSE (~0.03)
+	 *     with velocity-scaling for fast turns, F_SCALING_FINE_BROWSE
+	 *     (~0.005) when FINE is held.
+	 *   - change_param_f() inside update_wbrowse respects
+	 *     osc_param_lock[], matching the other Halo encoders.
+	 *   - update_wbrowse_step_pos() (called at the top of update_wt
+	 *     once per channel per tick) then glides
+	 *     wt_browse_step_pos_enc[] toward wbrowse_dest at
+	 *     F_SCALING_BROWSE_FADE_STEP (~0.01) per OSC_TIM tick, so
+	 *     the position is continuously fractional while a turn is in
+	 *     progress — the seed lerp blends adjacent wavetable entries
+	 *     smoothly at the next trigger. */
+	if (enc && ui_mode == PLAY)
 	{
-		if (!browse_pressed) {
-			browse_pressed = 1;
-			browse_moved = 0;
-		}
-	} else {
-		if (browse_pressed) {
-			browse_pressed = 0;
-			if (!browse_moved && (ui_mode == WTMONITORING)) {
-				start_play_export_sphere();
-			}
-		}
-	}
-
-	if (ui_mode == WTEDITING && !macro_states.all_af_buttons_released)
-	{
-		params.dispersion_enc = 0;
-		// params.disppatt_enc = 1;
-		update_wt_disp(CLEAR_LPF);
-		update_wt_fx_params(wt_osc.m0[0][0], wt_osc.m0[1][0], wt_osc.m0[2][0], enc);
-	}
-	else
-	{
-		if (!rotary_pressed(rotm_PRESET))
+		if (!rotary_pressed(rotm_PRESET)) {
 			update_wbrowse(enc);
-
-		if (enc)
-		{
-			if (rotary_pressed(rotm_PRESET)) {
-				exit_preset_manager();
-				stop_all_displays();
-				start_ongoing_display_globright();
-				system_settings.global_brightness = _CLAMP_F(system_settings.global_brightness + ((float)enc * F_SCALING_NAVIGATE_GLOBAL_BRIGHTNESS), F_MIN_GLOBAL_BRIGHTNESS, 1.0);
-				set_new_global_brightness =1;
-			}
-		}
-		if (!rotary_pressed(rotm_PRESET) && set_new_global_brightness) {
-			save_flash_params();
-			set_new_global_brightness=0;
-		}
-	}
-
-	if (enc2)
-	{
-		if (ui_mode == WTEDITING)
-		{
-			if (macro_states.all_af_buttons_released)
-				update_sphere_stretch_position(enc2);
-			else
-			{
-				for (i=0; i< WT_DIM_SIZE; i++){
-					for (j=0; j< WT_DIM_SIZE; j++){
-						for (k=0; k< WT_DIM_SIZE; k++){
-							update_wt_fx_params(i,j,k,enc2);
-						}
-					}
+			/* update_wbrowse() lets wbrowse_dest drift unbounded
+			 * (fine for WT_RECORDING).  PLAY mode wants wrap-around
+			 * so the ring keeps scrolling instead of pinning at 0 or
+			 * 27.  Wrap the current step position; if it wrapped,
+			 * snap the morph destination to the wrapped value so the
+			 * glide doesn't take the long way around.  Using
+			 * NUM_WAVEFORMS_IN_SPHERE (27) as the period — not 26 —
+			 * so LED-ring state closes cleanly on wrap: pos=27 maps
+			 * to the same visual + sonic state as pos=0. */
+			for (i = 0; i < NUM_CHANNELS; i++) {
+				float pos = params.wt_browse_step_pos_enc[i];
+				float wrapped = pos;
+				while (wrapped < 0.0f)
+					wrapped += (float)NUM_WAVEFORMS_IN_SPHERE;
+				while (wrapped >= (float)NUM_WAVEFORMS_IN_SPHERE)
+					wrapped -= (float)NUM_WAVEFORMS_IN_SPHERE;
+				if (wrapped != pos) {
+					params.wt_browse_step_pos_enc[i] = wrapped;
+					reset_wbrowse_morph(i);
 				}
 			}
+		} else {
+			/* PRESET+BROWSE = global brightness (keep existing behavior) */
+			exit_preset_manager();
+			stop_all_displays();
+			start_ongoing_display_globright();
+			system_settings.global_brightness = _CLAMP_F(system_settings.global_brightness + ((float)enc * F_SCALING_NAVIGATE_GLOBAL_BRIGHTNESS), F_MIN_GLOBAL_BRIGHTNESS, 1.0);
+			set_new_global_brightness = 1;
 		}
+	}
+	if (!rotary_pressed(rotm_PRESET) && set_new_global_brightness) {
+		save_flash_params();
+		set_new_global_brightness = 0;
+	}
 
-		else if (ui_mode == PLAY) {
-			read_wtsel(enc2);
-		}
+	/* ── Wavetable push+turn (sec_WTSEL): bank select (unchanged behavior) ── */
+	if (enc2 && ui_mode == PLAY) {
+		read_wtsel(enc2);
 	}
 }
 
@@ -2529,6 +2994,28 @@ void update_wt_interp(void)
 		// FIX: Do not attempt to load wavetables for Plaits engines (Virtual Spheres)
 		// Accessing flash for indices >= 100 causes access beyond the flash chip capacity (Bus Fault)
 		if (params.wt_bank[chan] >= PLAITS_SPHERE_OFFSET) {
+			wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_NONE;
+			state[chan] = WT_FLASH_NO_ACTION;
+			continue;
+		}
+
+		/* Halo architecture: wt_osc.mc[][chan][] is the physics
+		 * double-buffer, NOT a wavetable target.  The legacy 8-corner
+		 * blit performed by interp_wt() below would overwrite the
+		 * channel's active physics buffer with raw waveform data and
+		 * flip buffer_sel — corrupting the audio output every time the
+		 * bank changes (req_wt_interp_update fires from
+		 * update_wt_bank()).  Halo sources its waveform via the
+		 * separate seed_cache[][2][] (loaded by refresh_ring_seed_caches
+		 * in oscillator.c), which is keyed on (active_seed_idx,
+		 * active_seed_bank) and already handles bank changes coherently.
+		 *
+		 * Skip the entire flash-load + interp pipeline in PLAY mode and
+		 * just consume the request.  WTEDITING / WT_RECORDING still need
+		 * interp_wt because they render sphere preview into mc[] for
+		 * their own visualization (those modes don't run Halo
+		 * physics). */
+		if (ui_mode == PLAY) {
 			wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_NONE;
 			state[chan] = WT_FLASH_NO_ACTION;
 			continue;
@@ -2762,13 +3249,12 @@ void read_wtsel_spread(void)
 
 void read_wtsel_spread_cv(void)
 {
-	if (!UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-	{
-		if ((params.key_sw[5]==ksw_KEYS_EXT_TRIG || params.key_sw[5]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(F_VOCT))
-			params.wtsel_spread_cv = 0;
-		else
-			params.wtsel_spread_cv = analog[WTSEL_SPREAD_CV].bracketed_val * NUM_WTSEL_SPREADS / 4095;
-	}
+	/* Legacy wavetable-spread CV path is disabled: the
+	 * WTSEL_SPREAD_CV jack now drives the Halo wtAttack
+	 * parameter exclusively (see case 12 in the polling switch).
+	 * Force params.wtsel_spread_cv to zero so update_wtsel()
+	 * applies no offset on top of the wt-spread encoder. */
+	params.wtsel_spread_cv = 0;
 }
 
 int8_t calc_wtspread_offset(uint8_t spread_amt, uint8_t chan)
@@ -2923,39 +3409,21 @@ void update_wt_nav_cv(uint8_t wt_dim)
 
 
 void update_wt_disp(uint8_t clear_lpf){
-
-	int8_t			patt_encoder_motion;
-	float			disp_encoder_motion;
-	static float	disp_encoder_motion_lpf = 0.0f;
-
-	if (clear_lpf==CLEAR_LPF)
-		disp_encoder_motion_lpf = 0;
-
-	else {
-		// Dispersion encoder
-		disp_encoder_motion = pop_encoder_q(sec_DISPERSION) * (switch_pressed(FINE_BUTTON) ? F_SCALING_FINE_DISPERSION : F_SCALING_DISPERSION);
-		disp_encoder_motion_lpf = (disp_encoder_motion_lpf * (1.0-F_SCALING_DISPERSION_LPF)) + (disp_encoder_motion * F_SCALING_DISPERSION_LPF);
-		if (fabs(disp_encoder_motion_lpf)>0.001)
-			params.dispersion_enc = _WRAP_F(params.dispersion_enc + disp_encoder_motion_lpf, 0 ,2.0);
-
-		// Dispersion cv
-		if ((params.key_sw[1]==ksw_KEYS_EXT_TRIG || params.key_sw[1]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(B_VOCT))
-			params.dispersion_cv = 0;
-		else
-			params.dispersion_cv = ((float)analog[DISP_CV].bracketed_val)/4095.0;
-
-
-		// Pattern encoder
-		patt_encoder_motion = pop_encoder_q(sec_DISPPATT);
-		if(patt_encoder_motion)
-			params.disppatt_enc = _WRAP_I8(params.disppatt_enc + patt_encoder_motion, 0, NUM_DISPPAT);
-
-		// Pattern cv
-		if ((params.key_sw[3]==ksw_KEYS_EXT_TRIG || params.key_sw[3]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(D_VOCT))
-			params.disppatt_cv = 0;
-		else
-			params.disppatt_cv = analog[DISPPAT_CV].bracketed_val * NUM_DISPPAT / 4095;
-	}
+	/* Legacy SWN wavetable dispersion / dispersion-pattern paths are
+	 * disabled — sec_DISPERSION (push+depth) and sec_DISPPATT
+	 * (push+lat) encoders, plus the DISP_CV and DISPPAT_CV jacks,
+	 * now drive the Halo lpfCutoff and noiseColor parameters
+	 * (cases 4 and 14 in read_freq()).  Letting the legacy code
+	 * pop the same encoder queues here would race the new path
+	 * (whichever runs first wins the ticks), and writing
+	 * params.dispersion_cv / params.disppatt_cv would still warp
+	 * the wavetable seed-position even though no user UI now
+	 * shows it.  Pin the legacy params to zero so calc_wt_pos()
+	 * sees no dispersion / pattern contribution, regardless of
+	 * how this function is called. */
+	(void)clear_lpf;
+	params.dispersion_cv = 0.0f;
+	params.disppatt_cv   = 0;
 }
 
 
@@ -2996,12 +3464,17 @@ void calc_wt_pos(uint8_t chan){
 	total_browse = params.wt_browse_step_pos_enc[chan] + browse_cv;
 	get_browse_nav(total_browse, &browse_nav[0], &browse_nav[1], &browse_nav[2]);
 
-	// DISPERSION
-	disp_cv = params.wt_pos_lock[chan] ? 0: params.dispersion_cv;
-	total_disp = _FOLD_F(params.dispersion_enc, 1.0) + disp_cv;
-
-	disppat_cv = params.wt_pos_lock[chan] ? 0: params.disppatt_cv;
-	disp_pattern = _WRAP_U8(params.disppatt_enc + disppat_cv, 0, NUM_DISPPAT);
+	// DISPERSION — disabled.  The legacy SWN dispersion / dispersion-
+	// pattern paths have been retired in favour of the Halo
+	// lpfCutoff (push+depth, DISP_CV) and noiseColor (push+lat,
+	// DISPPAT_CV) parameters.  Force every input to zero here so any
+	// stale preset value, encoder bump elsewhere, or live CV doesn't
+	// silently warp the seed-position selection through the
+	// DISP_PATTERN lookup.
+	(void)disppat_cv;
+	disp_cv      = 0.0f;
+	total_disp   = 0.0f;
+	disp_pattern = 0;
 
 	// COMBINING
 	for (wt_dim=0;wt_dim<NUM_WT_DIMENSIONS;wt_dim++){

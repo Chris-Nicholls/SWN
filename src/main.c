@@ -274,20 +274,54 @@ int main(void)
 
 	selBus_Start();
 
+	/* Temporary diagnostic: measure main-loop iteration period AND each
+	 * sub-step individually so a ~100 ms spike in one call can be
+	 * pinpointed. Values land in timekeeper.c globals and are rendered
+	 * on the inner LED ring by display_cpu_usage(). Remove once the
+	 * retrigger-latency investigation is resolved. */
+	extern volatile uint32_t diag_main_loop_peak_cycles;
+	extern volatile uint32_t diag_ml_switches_peak_cycles;
+	extern volatile uint32_t diag_ml_oscparam_peak_cycles;
+	extern volatile uint32_t diag_ml_selbusbtn_peak_cycles;
+	extern volatile uint32_t diag_ml_uimode_peak_cycles;
+	extern volatile uint32_t diag_ml_loadsave_peak_cycles;
+	extern volatile uint32_t diag_ml_selbusev_peak_cycles;
+	extern volatile uint32_t diag_main_loop_iter_count;
+
+	#define DIAG_TIME(peak_var, call) do { \
+		uint32_t _t0 = DWT->CYCCNT; \
+		call; \
+		uint32_t _dt = DWT->CYCCNT - _t0; \
+		if (_dt > (peak_var)) (peak_var) = _dt; \
+	} while (0)
+
+	uint32_t main_loop_prev_cycles = DWT->CYCCNT;
+
 	while(1){
-		read_freq();
+		/* Period is end-to-end of one iteration; any spike propagates
+		 * here so the outer ring shows the worst-case loop length. */
+		{
+			uint32_t now = DWT->CYCCNT;
+			uint32_t period = now - main_loop_prev_cycles;
+			main_loop_prev_cycles = now;
+			if (period > diag_main_loop_peak_cycles)
+				diag_main_loop_peak_cycles = period;
+			diag_main_loop_iter_count++;
+		}
 
-		read_switches();
-		update_osc_param_lock();
-		read_selbus_buttons();
-		check_ui_mode_requests();
+		read_freq();  /* already timed via diag_read_freq_peak_cycles */
 
-		read_load_save_encoder(); // Call from main loop because it can initiate a preset load/save call to sFLASH. If this is moved to an interrupt, then make sure it's lower priority than WT_INTERP
-		check_sel_bus_event();	// FixMe: call from more adequate location (should be updated at about the data rate)
+		DIAG_TIME(diag_ml_switches_peak_cycles,  read_switches());
+		DIAG_TIME(diag_ml_oscparam_peak_cycles,  update_osc_param_lock());
+		DIAG_TIME(diag_ml_selbusbtn_peak_cycles, read_selbus_buttons());
+		DIAG_TIME(diag_ml_uimode_peak_cycles,    check_ui_mode_requests());
+		DIAG_TIME(diag_ml_loadsave_peak_cycles,  read_load_save_encoder());
+		DIAG_TIME(diag_ml_selbusev_peak_cycles,  check_sel_bus_event());
 
 		if (ui_mode == VOCT_CALIBRATE) process_voct_calibrate_mode();
 
 	} //end main loop
+	#undef DIAG_TIME
 
 	return(0);
 

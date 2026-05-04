@@ -28,6 +28,7 @@
 
 #include "envout_pwm.h"
 #include "globals.h"
+#include "halo.h"
 #include "params_update.h"
 #include "params_lfo.h"
 #include "plaits_shim.h"
@@ -167,20 +168,81 @@ void start_envout_pwm(void)
 
 void update_envout_pwm(void){
 
+	/* Temporary: PWM_OUTS_TIM runs at 7.2 kHz (138 µs period) at priority
+	 * 0,3 — higher than OSC_TIM — so anything here preempts the physics
+	 * tick.  A rogue blocking call here would show on inner LED 3 as a
+	 * per-call peak.  Remove once the 200 ms main-loop spike is
+	 * diagnosed. */
+	extern volatile uint32_t diag_pwm_out_peak_cycles;
+	uint32_t pwm_out_start_cycles = DWT->CYCCNT;
+
 	uint8_t j;
 	uint32_t envout_buf;
 
 	extern float lfo_phase_multiplier;
 	update_lfos(lfo_phase_multiplier);
 
-	// Process pending LPG trigger delays (for phase-spread triggering)
+	/* Compute REAL elapsed PWM ticks since the last ISR call.
+	 *
+	 * NVIC_PRIORITYGROUP_2 puts SAI (0,0) and PWM_OUTS_TIM (0,3) in
+	 * the same preemption level, so SAI cannot be preempted by us
+	 * but it CAN delay us — and SAI runs ~250-300 µs every 500 µs,
+	 * which is longer than the 138.9 µs PWM tick.  When SAI runs
+	 * over two consecutive PWM tick boundaries the timer's update-
+	 * interrupt flag stays asserted and the NVIC pending bit
+	 * coalesces the two events into a single deferred ISR call;
+	 * the second tick is silently lost.
+	 *
+	 * If we naively decrement lfos.lpg_trigger_delay[] by 1 per ISR
+	 * call, those lost ticks make the strum schedule lag by 1-2
+	 * ticks (~140-280 µs) at random points.  Whether that lag falls
+	 * between voice-N firing and voice-(N+1) firing depends on
+	 * where SAI happens to be in its block — bar-to-bar dependent —
+	 * so the inter-voice spacing audibly speeds up and slows down
+	 * even with a perfectly stable Pam's clock.
+	 *
+	 * Fix: read the free-running DWT cycle counter (216 MHz, immune
+	 * to ISR scheduling), divide by the known PWM period of 30000
+	 * cycles, and decrement by the *actual* number of ticks elapsed.
+	 * Voices whose deadline is now in the past fire on this call;
+	 * voices still ahead of the deadline get the precise wall-clock
+	 * decrement.  Wall-clock spacing between voices then depends
+	 * only on the schedule that was committed in read_freq() and
+	 * the (rock-stable) hardware timer — not on which ISRs ran in
+	 * between. */
+	static uint32_t prev_pwm_cycles      = 0;
+	static uint8_t  pwm_elapsed_inited   = 0;
+	uint32_t now_cycles    = DWT->CYCCNT;
+	uint32_t elapsed_ticks;
+	if (!pwm_elapsed_inited) {
+		/* First call: we have no prior reference.  Treat as a
+		 * single normal tick so any boot-time pending delay (there
+		 * shouldn't be one) progresses by 1 instead of by some wild
+		 * value derived from CYCCNT == 0 at reset. */
+		elapsed_ticks      = 1u;
+		pwm_elapsed_inited = 1;
+	} else {
+		uint32_t elapsed_cycles = now_cycles - prev_pwm_cycles; /* uint32 wrap is fine */
+		elapsed_ticks = elapsed_cycles / 30000u;        /* 216 MHz / 7.2 kHz */
+		if (elapsed_ticks == 0u) elapsed_ticks = 1u;    /* never go backwards */
+		if (elapsed_ticks > 65535u) elapsed_ticks = 65535u;
+	}
+	prev_pwm_cycles = now_cycles;
+
+	/* Process pending LPG trigger delays (for phase-spread
+	 * triggering).  Each delay is a countdown in PWM ticks; subtract
+	 * elapsed_ticks atomically and fire any voice whose deadline
+	 * has now arrived (or passed during ISR starvation). */
 	for (j=0; j<NUM_CHANNELS; j++) {
-		if (lfos.lpg_trigger_delay[j] > 0) {
-			lfos.lpg_trigger_delay[j]--;
-			if (lfos.lpg_trigger_delay[j] == 0) {
-				// Time to trigger this channel's LPG
+		uint16_t d = lfos.lpg_trigger_delay[j];
+		if (d > 0) {
+			if (d <= elapsed_ticks) {
+				lfos.lpg_trigger_delay[j] = 0;
 				extern void Shim_LPG_Trigger(uint8_t chan);
 				Shim_LPG_Trigger(j);
+				halo_request_trigger(j);
+			} else {
+				lfos.lpg_trigger_delay[j] = (uint16_t)(d - elapsed_ticks);
 			}
 		}
 	}
@@ -236,4 +298,11 @@ void update_envout_pwm(void){
 	ENVOUT_PWM_TIM_DEF->ENVOUT_PWM_CC_D = lfos.envout_pwm[3];
 	ENVOUT_PWM_TIM_DEF->ENVOUT_PWM_CC_E = lfos.envout_pwm[4];
 	ENVOUT_PWM_TIM_DEF->ENVOUT_PWM_CC_F = lfos.envout_pwm[5];
+
+	/* ── Temporary: commit PWM_OUTS_TIM peak duration. ── */
+	{
+		uint32_t dur = DWT->CYCCNT - pwm_out_start_cycles;
+		if (dur > diag_pwm_out_peak_cycles)
+			diag_pwm_out_peak_cycles = dur;
+	}
 }

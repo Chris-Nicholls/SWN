@@ -236,8 +236,13 @@ float apply_voct_calibration(float adc_val, uint8_t chan)
 
 	corrected_adc_val = ((float)adc_val - system_calibrations->voct_offset_adjustment[chan]) * system_calibrations->voct_tracking_adjustment[chan];
 
-	// corrected_adc_val = ((float)adc_val * system_calibrations->voct_tracking_adjustment[chan]) - system_calibrations->voct_offset_adjustment[chan];
-	return _CLAMP_F((uint16_t)corrected_adc_val, 0.0, 4095.0);
+	/* Clamp in float space BEFORE any integer cast.  The old version did
+	 * `(uint16_t)corrected_adc_val` before clamping, which wraps negative
+	 * values to ~65500 → _CLAMP_F pins them to 4095 (max pitch).  Any CV
+	 * below the calibrated C0 would therefore read as the maximum
+	 * possible pitch, causing extreme asymmetric glitches on sequencer
+	 * down-steps that crossed the zero point. */
+	return _CLAMP_F(corrected_adc_val, 0.0f, 4095.0f);
 }
 
 //

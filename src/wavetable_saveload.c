@@ -48,11 +48,15 @@ extern o_calc_params calc_params;
 
 // Given a sphere index (the "nth" sphere), return the physical bank number (flash slot)
 //
-// Given a sphere index (the "nth" sphere), return the physical bank number (flash slot)
+// Plaits banks have been removed from the browseable selection.  The
+// physical flash layout is unchanged (plaits engines still live at
+// PLAITS_SPHERE_OFFSET..PLAITS_SPHERE_OFFSET+NUM_PLAITS_SPHERES-1 in
+// case other code paths poke them directly), but the browse encoder
+// steps over them.  Indexing now reads:
 //
-// 0..11  -> Factory 0..11
-// 12..35 -> Plaits (PLAITS_SPHERE_OFFSET) .. (PLAITS_SPHERE_OFFSET + NUM_PLAITS_SPHERES - 1)
-// 36..   -> User (NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES) .. (MAX_TOTAL_SPHERES - 1)
+//   0..11  -> Factory 0..11
+//   12..   -> User (filled slots in NUM_FACTORY_SPHERES..PLAITS_SPHERE_OFFSET-1)
+//
 uint8_t sphere_index_to_bank(uint8_t wtsel)
 {
 	uint8_t i;
@@ -64,13 +68,8 @@ uint8_t sphere_index_to_bank(uint8_t wtsel)
 		return wtsel;
 	}
 
-	// 2. Plaits (Virtual) Spheres
-	if (wtsel < (NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES)) {
-		return PLAITS_SPHERE_OFFSET + (wtsel - NUM_FACTORY_SPHERES);
-	}
-
-	// 3. User Spheres
-	target_user_index = wtsel - (NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES);
+	// 2. User Spheres (plaits range is skipped)
+	target_user_index = wtsel - NUM_FACTORY_SPHERES;
 
 	// Scan physical user slots (NUM_FACTORY_SPHERES to (PLAITS_SPHERE_OFFSET - 1))
 	for (i=NUM_FACTORY_SPHERES; i<PLAITS_SPHERE_OFFSET; i++)
@@ -86,8 +85,13 @@ uint8_t sphere_index_to_bank(uint8_t wtsel)
 	return 0; // Fail-safe
 }
 
-// Given a physical bank number (flash slot), return sphere index (the "nth" sphere) 
+// Given a physical bank number (flash slot), return sphere index (the "nth" sphere)
 //
+// Plaits banks have been hidden from the browse selection (see
+// sphere_index_to_bank above).  If a preset somehow still references
+// a plaits bank we map it to sphere index 0 (factory bank 0) as a
+// safe fallback rather than returning an index outside the reduced
+// browse range.
 uint8_t bank_to_sphere_index(uint8_t wtbank)
 {
 	uint8_t i;
@@ -98,9 +102,9 @@ uint8_t bank_to_sphere_index(uint8_t wtbank)
 		return wtbank;
 	}
 
-	// 2. Plaits
+	// 2. Plaits — no longer browseable; redirect to factory 0
 	if (wtbank >= PLAITS_SPHERE_OFFSET && wtbank < (PLAITS_SPHERE_OFFSET + NUM_PLAITS_SPHERES)) {
-		return NUM_FACTORY_SPHERES + (wtbank - PLAITS_SPHERE_OFFSET);
+		return 0;
 	}
 
 	// 3. User
@@ -113,7 +117,7 @@ uint8_t bank_to_sphere_index(uint8_t wtbank)
 			filled_user_count++;
 	}
 
-	return NUM_FACTORY_SPHERES + NUM_PLAITS_SPHERES + filled_user_count;
+	return NUM_FACTORY_SPHERES + filled_user_count;
 }
 
 void update_number_of_user_spheres_filled(void)
@@ -124,8 +128,10 @@ void update_number_of_user_spheres_filled(void)
 	// Factory (Always 12)
 	num_filled += NUM_FACTORY_SPHERES;
 
-	// Plaits (Always 24)
-	num_filled += NUM_PLAITS_SPHERES;
+	/* Plaits banks intentionally NOT counted here: they remain in
+	 * flash but are excluded from the browse selection so the
+	 * encoder steps from the last factory bank straight to the
+	 * first filled user bank. */
 
 	// User (Count filled)
 	for (i=NUM_FACTORY_SPHERES; i<PLAITS_SPHERE_OFFSET; i++)

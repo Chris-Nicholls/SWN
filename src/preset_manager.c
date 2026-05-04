@@ -56,7 +56,8 @@ char	preset_signature_v2_x[4] = {'P', 'R', 'C', '\0'};  // v2.x with phase modul
 char	preset_signature_v2_x2[4] = {'P', 'R', 'D', '\0'}; // v2.x with resonator envelope
 char	preset_signature_vE[4]     = {'P', 'R', 'E', '\0'}; // v2.x2 with EQ
 char	preset_signature_vF[4]     = {'P', 'R', 'F', '\0'}; // reverb params (send/time/diff/lp/input_gain)
-char	preset_signature_vLatest[4] = {'P', 'R', 'G', '\0'}; // + reverb output_level
+char	preset_signature_vG[4]     = {'P', 'R', 'G', '\0'}; // + reverb output_level
+char	preset_signature_vLatest[4] = {'P', 'R', 'H', '\0'}; // + Halo encoder bases (damping/noise/color/wt_attack/lpf_cutoff)
 
 static uint8_t cached_preset[sizeof(preset_signature_vLatest) + sizeof(o_params) + sizeof(o_lfos)];
 static uint8_t animation_enabled = 1;
@@ -261,6 +262,20 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 	if (version == preset_signature_vF[2]) {
 		t_params->reverb_output_level = 1.0f;
 	}
+	/* Any version before 'H': initialize Halo encoder bases.
+	 * Older presets have whatever the old PADDING bytes were at these
+	 * offsets — typically zero, but possibly garbage.  Force defaults so
+	 * the synth boots in a sensible state and the user's old "everything
+	 * else" (pitch / spread / chord / reverb / EQ etc.) is preserved. */
+	if (version < preset_signature_vLatest[2]) {
+		for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+			t_params->halo_damping[i]     = 0.2f;
+			t_params->halo_noise_level[i] = 0.1f;
+			t_params->halo_noise_color[i] = 0.4f;
+			t_params->halo_wt_attack[i]   = 0.0f;
+			t_params->halo_lpf_cutoff[i]  = 24;
+		}
+	}
 }
 
 void clear_preset(uint32_t preset_num)
@@ -343,6 +358,7 @@ uint8_t check_preset_filled(uint32_t preset_num, char *version)
 	if (   read_data[0] == preset_signature_vLatest[0]
 		&& read_data[1] == preset_signature_vLatest[1]
 		&& (read_data[2] == preset_signature_vLatest[2] \
+			|| read_data[2] == preset_signature_vG[2] \
 			|| read_data[2] == preset_signature_vF[2] \
 			|| read_data[2] == preset_signature_vE[2] \
 			|| read_data[2] == preset_signature_v1_0[2] \
