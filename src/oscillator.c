@@ -27,40 +27,21 @@
  */
 
 #include "oscillator.h"
-#include <string.h>
 #include "arm_math.h"
 #include "params_lfo.h"
 #include "globals.h"
 #include "analog_conditioning.h"
-#include "audio_util.h"
-#include "flash_params.h"
-#include "params_update.h"
-#include "envout_pwm.h"
-#include "adc_interface.h"
-#include "timekeeper.h"
 #include "compressor.h"
 #include "system_settings.h"
 #include "codec_sai.h"
-#include "ui_modes.h"
-#include "rotary_driver.h"
-#include "math_util.h"
-#include "gpio_pins.h"
-#include "lfo_wavetable_bank.h"
-#include "UI_conditioning.h"
-#include "hardware_controls.h"
-#include "flashram_spidma.h"
+#include "timekeeper.h"
 #include "diag_log.h"
 #include "diag_fsk.h"
 #include "led_cont.h"
 #include "drum_ui.h"
 
-extern enum UI_Modes 	ui_mode;
-extern o_rotary 		rotary[NUM_ROTARIES];
-extern o_params 		params;
-extern o_calc_params	calc_params;
 extern o_systemSettings	system_settings;
 extern o_led_cont 		led_cont;
-extern o_analog 		analog[NUM_ANALOG_ELEMENTS];
 
 void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict__ dst)
 {
