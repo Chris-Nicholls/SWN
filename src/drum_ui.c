@@ -35,6 +35,8 @@ static const DrumVoiceOps *const kMvpKit[NUM_CHANNELS] = {
 #define DRUM_CV_TRIG_THRESHOLD	0.2f
 #define DRUM_PARAM_STEP			0.02f
 #define DRUM_PITCH_STEP			1.0f	/* one semitone per encoder click */
+/* LED update runs at 60 Hz, so 4 ticks is a ~66 ms visible blip. */
+#define DRUM_FLASH_TICKS		4
 
 static void push_params(uint8_t chan)
 {
@@ -134,6 +136,15 @@ static void read_pattern_encoder(void)
 	 * pattern rotate, matching the FINE-modifier idiom used by the rest
 	 * of the encoders on this panel. */
 	int16_t enc = pop_encoder_q(pec_WBROWSE);
+	int16_t enc2 = pop_encoder_q(sec_WTSEL);
+
+	if (!enc && !enc2)
+		return;
+
+	/* The pattern rebuild rewrites n/rotation/pattern as a group, and
+	 * update_drum_triggers() reads all three from OSC_TIM — hold off the
+	 * ISR so a step can't be evaluated against a half-updated pattern. */
+	__disable_irq();
 	if (enc) {
 		if (switch_pressed(FINE_BUTTON))
 			euclid_set_rotation(e, e->rotation + enc);
@@ -142,9 +153,9 @@ static void read_pattern_encoder(void)
 	}
 
 	/* Push+turn: total step count. */
-	int16_t enc2 = pop_encoder_q(sec_WTSEL);
 	if (enc2)
 		euclid_set_n(e, e->n + enc2);
+	__enable_irq();
 }
 
 void read_drum_ui(void)
@@ -160,7 +171,7 @@ void read_drum_ui(void)
 static void fire(uint8_t chan)
 {
 	drum_chan[chan].trigger_pending = 1;
-	drum_trig_flash[chan] = 30;
+	drum_trig_flash[chan] = DRUM_FLASH_TICKS;
 }
 
 void update_drum_triggers(void)

@@ -62,8 +62,6 @@ extern o_systemSettings	system_settings;
 extern o_led_cont 		led_cont;
 extern o_analog 		analog[NUM_ANALOG_ELEMENTS];
 
-__attribute__((aligned(32))) o_wt_osc	wt_osc;
-
 void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict__ dst)
 {
 	extern volatile uint32_t diag_audio_isr_peak_cycles;
@@ -168,7 +166,3 @@ void start_osc_updates(void){
 	start_timer_IRQ(OSC_TIM_number, &update_oscillators);
 }
 
-void init_wt_osc(void) {
-	memset(&wt_osc, 0, sizeof(wt_osc));
-	init_drum_ui();
-}

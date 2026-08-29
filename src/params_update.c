@@ -61,7 +61,6 @@
 #include "drivers/flashram_spidma.h"
 #include "preset_manager_selbus.h"
 
-extern o_wt_osc wt_osc;
 extern enum UI_Modes ui_mode;
 extern o_lfos lfos;
 extern SystemCalibrations *system_calibrations;
@@ -1339,15 +1338,7 @@ void retune_oscillators(void)
 
 void resync_audio_osc(uint8_t channels)
 {
-	uint8_t i;
-
-	for (i=0; i<NUM_CHANNELS; i++)
-	{
-		if (channels & (1<<i)) {
-			uint8_t v;
-			for(v=0;v<MAX_UNISON_VOICES;v++) wt_osc.wt_head_pos[i][v] = 0;
-		}
-	}
+	(void)channels;
 }
 
 

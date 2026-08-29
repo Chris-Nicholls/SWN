@@ -45,7 +45,6 @@
 
 
 extern o_params params;
-extern o_wt_osc wt_osc;
 extern o_calc_params calc_params;
 extern o_led_cont led_cont;
 extern o_macro_states 	macro_states;

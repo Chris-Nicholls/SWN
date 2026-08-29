@@ -148,7 +148,7 @@ int main(void)
 
 
 	//Initialize param values (do not start updating them yet)
-	init_wt_osc();
+	init_drum_ui();
 	init_params();
 	init_pitch_params();
 	init_quantz_scales();

@@ -73,7 +73,6 @@ extern		o_calc_params		calc_params;
 extern 		o_lfos				lfos;
 extern		o_preset_manager	preset_mgr;
 extern		o_systemSettings	system_settings;
-extern		o_wt_osc			wt_osc;
 
 // Hardware
 extern 		o_monoLed   		monoLed[NUM_MONO_LED];
@@ -234,6 +233,14 @@ void update_display_at_encoder_press(void)
 void update_led_flash(void)
 {
 	led_cont.flash_state = (HAL_GetTick()/TICKS_PER_MS) & 0x080; //128ms flash period
+
+	/* Age the per-channel hit flashes here rather than in the button
+	 * renderer, so they still expire while an ongoing-display overlay
+	 * owns the button LEDs. */
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		if (drum_trig_flash[c])
+			drum_trig_flash[c]--;
+	}
 }
 
 void update_button_leds(void){
@@ -348,10 +355,8 @@ void update_button_leds(void){
 					/* Drum play: full brightness while the channel is
 					 * flashing from a hit, a steady mid glow for the
 					 * edit-focus channel, dim otherwise. */
-					if (drum_trig_flash[i]) {
-						drum_trig_flash[i]--;
+					if (drum_trig_flash[i])
 						brightness = F_MAX_BRIGHTNESS;
-					}
 					else if (i == drum_selected_chan)
 						brightness = 0.35f;
 					else
