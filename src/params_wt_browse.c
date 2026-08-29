@@ -32,7 +32,7 @@
 #include "UI_conditioning.h"
 #include "key_combos.h"
 #include "gpio_pins.h"
-#include "ui_modes.h" // UIMODE_IS_WT_RECORDING_EDITING
+#include "ui_modes.h"
 #include "params_update.h"
 #include "params_lfo.h"
 
@@ -197,13 +197,13 @@ void update_wbrowse(int16_t inc)
 		return;
 
 	//No LPF in WTREC modes (unless Fine is pressed)
-	if(UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && !switch_pressed(FINE_BUTTON)){
+	if(0){
 		new_inc = inc;
 		last_inc_time = 0;
 	}
 	//Normal browsing (no Fine pressed)
 	//In WTREC modes, Fine+Browse is same as not pressing Fine in normal mode
-	else if(!switch_pressed(FINE_BUTTON) || (UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && switch_pressed(FINE_BUTTON)))
+	else if(!switch_pressed(FINE_BUTTON))
 	{
 
 		if ((last_inc * inc) < 0 || last_inc_time==0) //different sign = changed direction
@@ -231,7 +231,7 @@ void update_wbrowse(int16_t inc)
 		change_param_f(wbrowse_dest, new_inc);
 	}
 
-	if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && !switch_pressed(FINE_BUTTON)) {
+	if (0) {
 //			params.disppatt_enc = 0;
 			params.dispersion_enc = 0;
 			update_wt_disp(CLEAR_LPF);

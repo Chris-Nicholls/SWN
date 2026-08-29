@@ -217,9 +217,6 @@ void update_display_at_encoder_press(void)
 	else if (rotary_pressed(rotm_OCT) && switch_pressed(FINE_BUTTON))
 		start_ongoing_display_scale();
 
-	if (!UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && rotary_pressed(rotm_WAVETABLE))
-		start_ongoing_display_sphere_sel();
-
 	static uint8_t cpu_toggle_handled = 0;
 	if (rotary_pressed(rotm_LFOSPEED) == SHORT_PRESSED) {
 		if (!cpu_toggle_handled) {
@@ -348,25 +345,19 @@ void update_button_leds(void){
 
 				else { //no ongoing_display
 
-					if (params.key_sw[i] == ksw_MUTE)
-					{
-						if (params.osc_param_lock[i] && lock_flash_state())
-							brightness = 0;
-						else
-							brightness = F_MAX_BRIGHTNESS;
-
-						if (!params.note_on[i])
-							brightness = F_MAX_BRIGHTNESS - brightness;
+					/* Drum play: full brightness while the channel is
+					 * flashing from a hit, a steady mid glow for the
+					 * edit-focus channel, dim otherwise. */
+					if (drum_trig_flash[i]) {
+						drum_trig_flash[i]--;
+						brightness = F_MAX_BRIGHTNESS;
 					}
-					else{
+					else if (i == drum_selected_chan)
+						brightness = 0.35f;
+					else
+						brightness = 0.08f;
 
-						if (params.osc_param_lock[i] && lock_flash_state())
-							brightness = 0;
-						else
-							brightness = 0.30 + lfos.out_lpf[i]/2.0;
-					}
-
-					set_rgb_color_brightness(&led_cont.button[i], key_sw_mode_colors[params.key_sw[i]], brightness);
+					set_rgb_color_by_array(&led_cont.button[i], CH_COLOR_MAP[i], brightness);
 				}
 			}
 
@@ -431,17 +422,11 @@ void update_encoder_leds(void){
 	if (led_cont.ongoing_display == ONGOING_DISPLAY_RECORD)
 		color = ledc_FUSHIA;
 
-	else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-		color = ledc_GOLD;
-
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_TRANSPOSE)
 		color = ledc_FUSHIA;
 
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_FINETUNE)
 		color = ledc_MED_BLUE;
-
-	else if (ui_mode == REVERB_EDIT)
-		color = ledc_AQUA;  // DEPTH/LATITUDE/LONGITUDE rings show reverb params
 
 	else
 		color = ledc_PURPLE;
@@ -557,20 +542,7 @@ void update_audioin_led(void)
 
 	o_rgb_led rgb;
 
-	if (ui_mode == WTREC_WAIT)
-		set_rgb_color_brightness(&rgb, ledc_RED, led_cont.flash_state);
-
-	else if (jack_unplugged(WAVEFORMIN_SENSE))
-		set_rgb_color(&rgb, ledc_OFF);
-
-	else if (ui_mode == WTRECORDING)
-		set_rgb_color(&rgb, ledc_RED);
-
-	else if ((ui_mode == WTMONITORING) || (ui_mode == WTTTONE))
-		set_rgb_color(&rgb, ledc_GREEN);
-
-	else
-		set_rgb_color(&rgb, ledc_OFF);
+	set_rgb_color(&rgb, ledc_OFF);
 
 	set_pwm_led(ledm_AUDIOIN, &rgb);
 

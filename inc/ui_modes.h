@@ -37,18 +37,6 @@ enum UI_Modes {
 	PLAY,
 	SELECT_PARAMS,
 
-	WTRECORDING,				// <---- WT rec/edit section must start with WTRECORDING 
-	WTREC_WAIT,
-	WTMONITORING,
-	WTTTONE,
-	WTRENDERING,
-	WTEDITING,
-	WTLOAD_SELECTING,
-	WTPLAYEXPORT,
-	WTPLAYEXPORT_LOAD,
-	WTSAVING,					// <---- WT rec/edit section must end with WTSAVING
-	WTREC_EXIT,
-
 	RGB_COLOR_ADJUST,
 
 	VOCT_CALIBRATE,
@@ -57,13 +45,9 @@ enum UI_Modes {
 
 	FACTORY_RESET,
 
-	REVERB_EDIT,
-
 	NUM_UI_MODES
 };
 
-
-static inline uint8_t UIMODE_IS_WT_RECORDING_EDITING(enum UI_Modes X) { return (((X) >= WTRECORDING) && ((X) <= WTSAVING)); }
 
 void check_ui_mode_requests(void);
 
