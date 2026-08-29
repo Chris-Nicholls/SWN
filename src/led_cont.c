@@ -44,21 +44,15 @@
 #include "drivers/mono_led_driver.h"
 #include "system_settings.h"
 #include "ui_modes.h"
-#include "wavetable_editing.h"
 #include "key_combos.h"
+#include "drum_ui.h"
 
 #include "drivers/leds_pwm.h"
-#include "eq.h"
-#include "wavetable_recording.h"
-#include "wavetable_editing.h"
-#include "wavetable_saveload.h"
 #include "quantz_scales.h"
 #include "calibrate_voct.h"
-#include "wavetable_saveload_UI.h"
 #include "flash_params.h"
 #include "timekeeper.h"
 #include "ui_modes.h"
-#include "wavetable_play_export.h"
 #include "oscillator.h"
 #include "hardware_controls.h"
 #include "oscillator.h"
@@ -78,7 +72,6 @@ extern 		o_params 			params;
 extern		o_calc_params		calc_params;
 extern 		o_lfos				lfos;
 extern		o_preset_manager	preset_mgr;
-extern 		o_spherebuf	 		spherebuf;
 extern		o_systemSettings	system_settings;
 extern		o_wt_osc			wt_osc;
 
@@ -99,7 +92,6 @@ const uint8_t OCT_OUTRING_MAP[NUM_LED_OUTRING] 		    	= { 9, 10, 11, 12, 13, 14,
 // Color palettes
 extern uint32_t colorPalette[NUM_LED_COLORS][NUM_PALETTE_COLORS];
 extern const enum colorCodes qtz_scale_colors[NUM_QTZ_SCALES];
-extern const enum colorCodes fx_colors[NUM_FX];
 
 // TABLES
 extern const float 	exp_1voct_10_41V[4096];
@@ -412,42 +404,6 @@ void update_button_leds(void){
 
 		} //if (ui_mode==PLAY)
 
-		// WT RECORDING / EDITING
-		else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode)){
-
-			// mute
-			if (i < NUM_CHANNELS){
-				brightness = spherebuf.fx[i][(uint8_t)(calc_params.wt_pos[0][0])][(uint8_t)(calc_params.wt_pos[1][0])][(uint8_t)(calc_params.wt_pos[2][0])];
-				brightness = exp_1voct_10_41V[_SCALE_F2U16(brightness, 0.0, 1.0, 2700, 4095)] / 1370.0;
-
-				set_rgb_color_brightness(&led_cont.button[i], fx_colors[i], brightness);
-			}
-
-			// rec button
-			else if (i==butm_LFOVCA_BUTTON){
-				if (ui_mode==WTREC_WAIT)		brightness = ((HAL_GetTick()/TICKS_PER_MS) & 0x040) ? 1 : 0;
-				else if (ui_mode==WTRECORDING) 	brightness = 1;
-				else 							brightness = led_cont.flash_state;
-
-				set_rgb_color_brightness(&led_cont.button[i], ledc_RED, brightness);
-			}
-
-			// monitor button
-			else if (i==butm_LFOMODE_BUTTON){
-
-				if (ui_mode==WTTTONE) 			color = ledc_PURPLE;
-				else if (ui_mode==WTREC_WAIT) 	color = ledc_OFF;
-				else 							color = ledc_GREEN;
-
-				if (ui_mode == WTEDITING)
-					brightness = led_cont.flash_state;
-				else
-					brightness = 1;
-
-				set_rgb_color_brightness(&led_cont.button[i], color, brightness);
-			}
-		}
-
 		else if (ui_mode==VOCT_CALIBRATE)
 		{
 			color = ledc_OFF;
@@ -462,24 +418,6 @@ void update_button_leds(void){
 				if (voct_state == VOCTCAL_CALIBRATED)		color = ledc_WHITE;
 			}
 			set_rgb_color(&led_cont.button[i], color);
-		}
-
-		else if (ui_mode == REVERB_EDIT)
-		{
-			if (i < NUM_CHANNELS) {
-				// Channel buttons: AQUA, brightness reflects per-channel reverb send.
-				// Minimum glow (0.05) so all buttons remain visible at send=0.
-				float send_brightness = 0.05f + params.reverb_send[i] * 0.95f;
-				set_rgb_color_brightness(&led_cont.button[i], ledc_AQUA, send_brightness);
-			}
-			else if (i == butm_LFOVCA_BUTTON) {
-				// LFOVCA button: solid bright AQUA — indicates active reverb edit mode
-				set_rgb_color_brightness(&led_cont.button[i], ledc_AQUA, F_MAX_BRIGHTNESS);
-			}
-			else {
-				// LFOMODE button: off
-				set_rgb_color(&led_cont.button[i], ledc_OFF);
-			}
 		}
 
 		set_pwm_led(led_button_map[i], &led_cont.button[i]);
@@ -535,30 +473,6 @@ void update_mono_leds(void){
 		mono_led_off(mledm_SLIDER_D);
 		mono_led_off(mledm_SLIDER_E);
 		mono_led_off(mledm_SLIDER_F);
-	}
-	else if (switch_pressed(FINE_BUTTON))
-	{
-		// Fine held: LEDs show stored EQ position relative to center
-		// LED brightness indicates how far EQ is from flat (50%)
-		if (slider_pwm-- == 0)
-		{
-			slider_pwm = 32;  // 32 steps of brightness
-			for (i = 0; i < NUM_CHANNELS; i++) {
-				mono_led_off(i);
-			}
-		}
-		else
-		{
-			// Calculate brightness for each slider based on distance from center
-			for (i = 0; i < NUM_CHANNELS; i++) {
-				int16_t eq_val = (int16_t)params.eq_slider_values[i];
-				float distance = fabsf((float)(eq_val - EQ_SLIDER_MID)) / (float)EQ_SLIDER_MID;
-				float brightness = distance * system_settings.global_brightness;
-				if (brightness > 0.01f && (brightness * 32.0f > (32 - slider_pwm))) {
-					mono_led_on(i);
-				}
-			}
-		}
 	}
 	else {
 
@@ -732,67 +646,11 @@ void calculate_led_ring(void){
 
 	update_ongoing_display_timers();
 
-	if (ui_mode == WTRECORDING) {
-		display_wt_recbuff_fill_outring();
-		display_wtpos_inring();
-	}
-	else if (ui_mode == WTREC_WAIT) {
-		display_wt_rec_wait();
-		display_wtpos_inring();
-	}
-
-	else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode)) {
-		if (led_cont.ongoing_display == ONGOING_DISPLAY_SOFT_CLIP) {
-		display_soft_clip();
-		return;
-	}	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_SAVE) {
-			display_sphere_save();
-		}
-		else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_PLAYEXPORT) {
-			display_sphere_play_export();
-		}
-		else {
-			display_wt_recbuf_sel_outring();
-			display_wtpos_inring();
-		}
-	}
-	else if (ui_mode==VOCT_CALIBRATE) {
+	if (ui_mode==VOCT_CALIBRATE) {
 		turn_outring_off();
 
 		for (i = 0; i < NUM_LED_INRING; i++){
 			set_rgb_color(&led_cont.inring[i], ledc_OFF);
-		}
-	}
-	else if (ui_mode == REVERB_EDIT) {
-		// Reverb edit mode: show three reverb parameters as bar graphs on the outring,
-		// same visual language as display_plaits_params() but in AQUA tones.
-		// Red = reverb_time, Green = diffusion, Blue = lp (brightness)
-		float rv_time = params.reverb_time;
-		float rv_diff = params.reverb_diffusion;
-		float rv_lp   = params.reverb_lp;
-
-		for (i = 0; i < NUM_LED_OUTRING; i++) {
-			uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
-			float pos = (float)i / (float)NUM_LED_OUTRING;
-
-			uint16_t red   = (pos < rv_time) ? 4095 : 0;
-			uint16_t green = (pos < rv_diff) ? 4095 : 0;
-			uint16_t blue  = (pos < rv_lp)   ? 4095 : 0;
-
-			led_cont.outring[j].c_red   = exp_1voct_10_41V[red] * 3;
-			led_cont.outring[j].c_green = exp_1voct_10_41V[green];
-			led_cont.outring[j].c_blue  = exp_1voct_10_41V[blue] * 3;
-			led_cont.outring[j].brightness = F_MAX_BRIGHTNESS;
-		}
-
-		// Inner ring: show per-channel send levels as AQUA brightness
-		for (i = 0; i < NUM_CHANNELS; i++) {
-			uint8_t j = rotate_origin(i, NUM_CHANNELS);
-			float send = params.reverb_send[i];
-			if (send < 0.0f) send = 0.0f;
-			if (send > 1.0f) send = 1.0f;
-			float bri = 0.05f + send * 0.95f;
-			set_rgb_color_brightness(&led_cont.inring[j], ledc_AQUA, bri);
 		}
 	}
 	else {
@@ -814,60 +672,52 @@ void calculate_led_ring(void){
 				display_preset();
 				break;
 
-
-
-			case ONGOING_DISPLAY_SPHERE_SEL:
-				display_sphere_sel();
-				break;
-
-			case ONGOING_DISPLAY_UNISON:
-				display_unison();
-				break;
-
 			case ONGOING_DISPLAY_CPU_USAGE:
 				display_cpu_usage();
 				break;
 
-			case ONGOING_DISPLAY_HALO_DAMPING:
-				display_halo_damping();
-				break;
-
-			case ONGOING_DISPLAY_HALO_NOISELEVEL:
-				display_halo_noise_level();
-				break;
-
-			case ONGOING_DISPLAY_HALO_NOISECOLOR:
-				display_halo_noise_color();
-				break;
-
-			case ONGOING_DISPLAY_HALO_WTATTACK:
-				display_halo_wt_attack();
-				break;
-
-			case ONGOING_DISPLAY_HALO_LPF:
-				display_halo_lpf();
-				break;
-
 			default:
-			// Engine selection: Plaits if any channel is in Plaits mode,
-			// otherwise show the Halo parameter view (Halo
-			// is the active engine for every non-Plaits channel).
-			{
-				uint8_t has_plaits = 0;
-				for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
-					if (params.wt_bank[i] >= 100) {
-						has_plaits = 1;
-						break;
-					}
-				}
-				if (has_plaits)
-					display_plaits_params();
-				else
-					display_halo_params();
-				flash_wt_lock();
-			}
-			break;
+				display_drum_pattern();
+				break;
 		}
+	}
+}
+
+/* Outer ring = the selected channel's euclidean pattern: `n` steps
+ * mapped 1:1 onto ring positions from 0, active steps lit dim, playhead
+ * bright.  Inner ring = one LED per channel, lit while that channel is
+ * flashing from a hit. */
+void display_drum_pattern(void)
+{
+	const EuclidChannelState *e = &drum_chan[drum_selected_chan].euclid;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+		float bri = 0.0f;
+
+		if (i < e->n) {
+			if (i == e->current_step)
+				bri = F_MAX_BRIGHTNESS;
+			else if (euclid_step_active(e, i))
+				bri = F_MAX_BRIGHTNESS * 0.25f;
+			else
+				bri = F_MAX_BRIGHTNESS * 0.02f;
+		}
+
+		set_rgb_color_brightness(&led_cont.outring[j],
+		                         (i == e->current_step) ? ledc_WHITE : ledc_AQUA,
+		                         bri);
+	}
+
+	for (i = 0; i < NUM_LED_INRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_INRING);
+		float bri = 0.0f;
+		if (i < NUM_CHANNELS)
+			bri = drum_trig_flash[i] ? F_MAX_BRIGHTNESS : 0.05f;
+		set_rgb_color_brightness(&led_cont.inring[j],
+		                         (i == drum_selected_chan) ? ledc_WHITE : ledc_AQUA,
+		                         bri);
 	}
 }
 
@@ -1009,94 +859,6 @@ void display_wt_pos(void)
 	}
 }
 
-void display_plaits_params(void)
-{
-	uint8_t i, j;
-	
-	// Find first unlocked Plaits channel to display
-	uint8_t display_chan = 0xFF;
-	for (i = 0; i < NUM_CHANNELS; i++) {
-		if (params.wt_bank[i] >= 100 && !params.wt_pos_lock[i]) {
-			display_chan = i;
-			break;
-		}
-	}
-	
-	// If no unlocked Plaits channel, fall back to first Plaits channel
-	if (display_chan == 0xFF) {
-		for (i = 0; i < NUM_CHANNELS; i++) {
-			if (params.wt_bank[i] >= 100) {
-				display_chan = i;
-				break;
-			}
-		}
-	}
-	
-	if (display_chan == 0xFF) {
-		// No Plaits channels, shouldn't reach here
-		display_wt_pos();
-		return;
-	}
-	
-	// Display parameters as bar graphs using RGB
-	// Harmonics = Red, Timbre = Green, Morph = Blue
-	// Each LED's color intensity shows the parameter value (0-1)
-	float harmonics = params.plaits_params[display_chan].harmonics;
-	float timbre = params.plaits_params[display_chan].timbre;
-	float morph = params.plaits_params[display_chan].morph;
-	
-	for (i = 0; i < NUM_LED_OUTRING ; i++) {
-		j = rotate_origin(i, NUM_LED_OUTRING);
-		
-		// Calculate bar graph: light up LEDs proportionally
-		float pos = (float)i / (float)NUM_LED_OUTRING;
-		
-		// Harmonics bar (Red)
-		uint16_t red = (pos < harmonics) ? 4095 : 0;
-		// Timbre bar (Green)  
-		uint16_t green = (pos < timbre) ? 4095 : 0;
-		// Morph bar (Blue)
-		uint16_t blue = (pos < morph) ? 4095 : 0;
-		
-		led_cont.outring[j].c_red = exp_1voct_10_41V[red] * 3;
-		led_cont.outring[j].c_green = exp_1voct_10_41V[green];
-		led_cont.outring[j].c_blue = exp_1voct_10_41V[blue] * 3;
-		led_cont.outring[j].brightness = F_MAX_BRIGHTNESS;
-	}
-
-	// Inner ring shows Plaits channel
-	for (i = 0; i < NUM_CHANNELS; i++) {
-		j = rotate_origin(i, NUM_CHANNELS);
-		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
-		get_wt_color(params.wt_bank[i], &led_cont.inring[j]);
-	}
-}
-
-/* Halo default LED ring view: where in the wavetable are we?
- *   Outer ring (18 LEDs):
- *     - One cursor LED *per channel*, placed at the channel's
- *       pending_seed_pos (0..NUM_WAVEFORMS_IN_SPHERE-1) mapped onto
- *       the 18-LED ring.  The cursor is lit in that channel's sphere
- *       color (via get_wt_color()), so different banks across channels
- *       are immediately distinguishable, and chord-spread reads as a
- *       cluster of cursors that fans out as spread increases.
- *     - LEDs with no cursor on them are dark.  If two channels happen
- *       to land on the same LED their colors are summed (saturating).
- *   Inner ring (6 LEDs): one LED per channel in the channel's sphere
- *     color, identifying which bank each channel is in regardless of
- *     pending_seed_pos.
- *
- * The previous default (R/G/B bar graphs of damping/noiseLevel/
- * noiseColor + white lpfCutoff cursor) is now an ongoing-display
- * overlay shown briefly when one of those encoders moves — see
- * display_halo_damping / display_halo_noise_level / display_halo_noise_color
- * below and the start_ongoing_display_halo_* hooks in params_update.c.
- */
-void display_halo_params(void)
-{
-	display_wt_seed_pos();
-}
-
 void display_wt_seed_pos(void)
 {
 	uint8_t i, j;
@@ -1197,106 +959,6 @@ void display_wt_seed_pos(void)
  *     inring tint (captures CV-offset divergence across channels).
  *   r_w/g_w/b_w: per-channel weights (0..255) for the bar color.
  */
-static void display_halo_param_bar(float value, const float *per_channel,
-                                 uint8_t r_w, uint8_t g_w, uint8_t b_w)
-{
-	uint8_t i, j;
-
-	if (value < 0.0f) value = 0.0f;
-	if (value > 1.0f) value = 1.0f;
-
-	for (i = 0; i < NUM_LED_OUTRING; i++) {
-		j = rotate_origin(i, NUM_LED_OUTRING);
-		float pos = (float)i / (float)NUM_LED_OUTRING;
-		uint16_t lit = (pos < value) ? 4095 : 0;
-
-		/* Match the R/G/B intensity scaling that the previous combined
-		 * bar-graph used: red and blue picked up a ×3 boost while green
-		 * was unscaled.  Honouring this keeps colour balance consistent
-		 * between the overlays so users learn one visual language. */
-		uint16_t base = exp_1voct_10_41V[lit];
-		uint16_t red   = (uint16_t)(((uint32_t)base * (uint32_t)r_w * 3u) / 255u);
-		uint16_t green = (uint16_t)(((uint32_t)base * (uint32_t)g_w)      / 255u);
-		uint16_t blue  = (uint16_t)(((uint32_t)base * (uint32_t)b_w * 3u) / 255u);
-
-		led_cont.outring[j].c_red   = red;
-		led_cont.outring[j].c_green = green;
-		led_cont.outring[j].c_blue  = blue;
-		led_cont.outring[j].brightness = F_MAX_BRIGHTNESS;
-	}
-
-	/* Inner ring: per-channel value of the *same* parameter, scaled
-	 * into the chosen colour.  Makes per-channel CV-offset
-	 * divergence visible while the overlay is up. */
-	for (i = 0; i < NUM_CHANNELS; i++) {
-		j = rotate_origin(i, NUM_CHANNELS);
-
-		float v = per_channel[i];
-		if (v < 0.0f) v = 0.0f;
-		if (v > 1.0f) v = 1.0f;
-
-		uint16_t mag = (uint16_t)(v * 4095.0f);
-		led_cont.inring[j].c_red   = (uint16_t)(((uint32_t)mag * (uint32_t)r_w) / 255u);
-		led_cont.inring[j].c_green = (uint16_t)(((uint32_t)mag * (uint32_t)g_w) / 255u);
-		led_cont.inring[j].c_blue  = (uint16_t)(((uint32_t)mag * (uint32_t)b_w) / 255u);
-		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
-	}
-}
-
-void display_halo_damping(void)
-{
-	float vals[NUM_CHANNELS];
-	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].damping;
-	display_halo_param_bar(wt_osc.halo_state[0].damping, vals, 255, 0, 0);
-}
-
-void display_halo_noise_level(void)
-{
-	float vals[NUM_CHANNELS];
-	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].noiseLevel;
-	display_halo_param_bar(wt_osc.halo_state[0].noiseLevel, vals, 0, 255, 0);
-}
-
-void display_halo_noise_color(void)
-{
-	float vals[NUM_CHANNELS];
-	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].noiseColor;
-	display_halo_param_bar(wt_osc.halo_state[0].noiseColor, vals, 0, 0, 255);
-}
-
-void display_halo_wt_attack(void)
-{
-	/* Yellow (red+green) bar for wtAttack — distinct from the R/G/B
-	 * damping/noise-level/noise-color overlays so the parameter in
-	 * focus is immediately identifiable. */
-	float vals[NUM_CHANNELS];
-	for (uint8_t c = 0; c < NUM_CHANNELS; c++) vals[c] = wt_osc.halo_state[c].wtAttack;
-	display_halo_param_bar(wt_osc.halo_state[0].wtAttack, vals, 255, 255, 0);
-}
-
-void display_halo_lpf(void)
-{
-	/* Cyan (green+blue) bar for the lpfCutoff (dispersion) overlay,
-	 * giving each of the five Halo parameters a distinct hue.
-	 * lpfCutoff is an integer harmonic-number in the range 1..42 (see
-	 * src/halo_voice.cpp).  Normalise to 0..1 for the bar
-	 * graph using the same range so 1 → empty and 42 → full. */
-	const float kLpfMin = 1.0f;
-	const float kLpfMax = 42.0f;
-	const float span    = kLpfMax - kLpfMin;
-	float vals[NUM_CHANNELS];
-	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
-		float v = ((float)wt_osc.halo_state[c].lpfCutoff - kLpfMin) / span;
-		if (v < 0.0f) v = 0.0f;
-		if (v > 1.0f) v = 1.0f;
-		vals[c] = v;
-	}
-	float ref = ((float)wt_osc.halo_state[0].lpfCutoff - kLpfMin) / span;
-	if (ref < 0.0f) ref = 0.0f;
-	if (ref > 1.0f) ref = 1.0f;
-	display_halo_param_bar(ref, vals, 0, 255, 255);
-}
-
 void display_firmware_version(void)
 {
 	uint8_t i, j;
@@ -1556,19 +1218,6 @@ void display_soft_clip(void) {
 	}
 }
 
-void display_fx(void)
-{
-	uint8_t slot_i, led;
-	enum colorCodes led_color;
-
-	for (slot_i = 0; slot_i < NUM_LED_OUTRING; slot_i++)
-	{
-		led = rotate_origin(slot_i, NUM_LED_OUTRING);
-		led_color = animate_fx_level(slot_i);
-		set_rgb_color(&led_cont.outring[led], led_color);
-	}
-
-}
 
 
 void display_preset(void)
@@ -1599,113 +1248,7 @@ void display_preset(void)
 	}
 }
 
-void display_sphere_save(void)
-{
-	uint8_t slot_i, bank_i, led;
 
-	uint16_t hover_bank;
-	uint8_t slot_color = ledc_OFF;
-
-	uint8_t hover_slot = get_sphere_hover();
-
-	if (hover_slot >= NUM_FACTORY_SPHERES)
-		hover_bank = (hover_slot - NUM_FACTORY_SPHERES) / NUM_LED_OUTRING;
-	else
-		hover_bank = 0xFF;
-
-	for (slot_i = 0; slot_i < NUM_LED_OUTRING; slot_i++)
-	{
-		led = rotate_origin(slot_i, NUM_LED_OUTRING);
-		animate_wt_saving_ledring(slot_i, &led_cont.outring[led]);
-	}
-	for ( bank_i = 0; bank_i < NUM_CHANNELS; bank_i++)
-	{
-		led = rotate_origin(bank_i, NUM_CHANNELS);
-
-		if (hover_bank>=NUM_CHANNELS) 	slot_color = ledc_WHITE;
-		else if (bank_i==hover_bank)	slot_color = ledc_WHITE;
-		else							slot_color = ledc_OFF;
-
-		set_rgb_color(&led_cont.inring[led], slot_color);
-	}
-}
-
-void display_sphere_play_export(void)
-{
-	uint8_t slot_i, bank_i;//, led;
-
-	for (slot_i = 0; slot_i < NUM_LED_OUTRING; slot_i++)
-	{
-		// led = rotate_origin(slot_i, NUM_LED_OUTRING);
-		animate_play_export_ledring(slot_i, &led_cont.outring[slot_i]);
-	}
-	for ( bank_i = 0; bank_i < NUM_CHANNELS; bank_i++)
-	{
-		set_rgb_color(&led_cont.inring[bank_i], ledc_OFF);
-	}
-
-}
-void display_sphere_sel(void)
-{
-	uint8_t i, led, chan;
-
-	uint8_t overlap[NUM_LED_OUTRING][NUM_CHANNELS];
-	uint8_t overlap_num[NUM_LED_OUTRING];
-	static uint8_t overlap_ctr[NUM_LED_OUTRING]={0};
-	uint8_t pos[NUM_CHANNELS];
-
-	uint8_t do_advance_overlap = 0;
-	static uint32_t last_advance_overlap_tmr=0;
-	uint32_t now = HAL_GetTick()/TICKS_PER_MS;
-
-	if ((now - last_advance_overlap_tmr) > 300)
-	{
-		do_advance_overlap = 1;
-		last_advance_overlap_tmr = now;
-	}
-
-	for (i = 0; i < NUM_LED_OUTRING; i++){
-		led_cont.outring[i].brightness = 0;
-		overlap_num[i] = 0;
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-			overlap[i][chan] = 99;
-	}
-
-	// Create overlap[led_position][channels_occupying_position] = channel#
-	for (i = 0; i < NUM_CHANNELS; i++)
-	{
-		pos[i] = rotate_origin(calc_params.wtsel[i] % NUM_LED_OUTRING, NUM_LED_OUTRING);
-		led = rotate_origin(i, NUM_CHANNELS);
-
-		get_wt_color(params.wt_bank[i], &led_cont.inring[led]);
-
-		if (params.osc_param_lock[i] && lock_flash_state())
-			led_cont.inring[led].brightness = 0;
-		else
-			led_cont.inring[led].brightness = F_MAX_BRIGHTNESS;
-
-		overlap[ pos[i] ][ overlap_num[pos[i]] ] = i;
-		overlap_num[ pos[i] ]++;
-	}
-
-	for (i = 0; i<NUM_LED_OUTRING; i++)
-	{
-		if (do_advance_overlap) {
-			overlap_ctr[i]++;
-			if (overlap_ctr[i] >= overlap_num[i]) overlap_ctr[i]=0;
-		}
-
-		chan = overlap[i][overlap_ctr[i]];
-		if (chan<=NUM_CHANNELS)  {
-			get_wt_color(params.wt_bank[chan], &led_cont.outring[i]);
-
-			if (params.osc_param_lock[chan] && lock_flash_state())
-				led_cont.outring[i].brightness = 0;
-			else
-				led_cont.outring[i].brightness = F_MAX_BRIGHTNESS;
-		}
-	}
-}
 
 void display_octave(void)
 {
@@ -1819,25 +1362,6 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_UNISON && !rotary_pressed(rotm_TRANSPOSE))
 		tick_down = 1;
 
-	/* Halo param overlays are short-lived and tick down whenever
-	 * the matching encoder isn't being held down (so we don't blow the
-	 * timer away while the user is mid-adjust).  pec_DEPTH/LATITUDE/
-	 * LONGITUDE map to rotm_DEPTH/LATITUDE/LONGITUDE. */
-	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_DAMPING)
-		tick_down = 1;
-
-	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_NOISELEVEL)
-		tick_down = 1;
-
-	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_NOISECOLOR)
-		tick_down = 1;
-
-	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_WTATTACK)
-		tick_down = 1;
-
-	else if (led_cont.ongoing_display == ONGOING_DISPLAY_HALO_LPF)
-		tick_down = 1;
-
 	if (!tick_down)
 		return;
 
@@ -1933,44 +1457,6 @@ void start_ongoing_display_unison(void) {
 	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 
-/* Halo parameter overlays.  Triggered by depth/lat/long encoder
- * movement in update_wt() (params_update.c, cases 6/9/12).  Each
- * overlay shows a single-parameter bar graph for ~FINETUNE_TIMER_LIMIT,
- * after which the default seed-position view returns automatically. */
-void start_ongoing_display_halo_damping(void) {
-	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_DAMPING;
-	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
-}
-
-void start_ongoing_display_halo_noise_level(void) {
-	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_NOISELEVEL;
-	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
-}
-
-void start_ongoing_display_halo_noise_color(void) {
-	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_NOISECOLOR;
-	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
-}
-
-void start_ongoing_display_halo_lpf(void) {
-	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_LPF;
-	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
-}
-
-void start_ongoing_display_halo_wt_attack(void) {
-	led_cont.ongoing_display = ONGOING_DISPLAY_HALO_WTATTACK;
-	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
-}
-
-void stop_all_displays(void){
-	led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
-	led_cont.ongoing_timeout = 0;
-}
-
-uint16_t return_display_timer(void){
-	return led_cont.ongoing_timeout;
-}
-
 /* Calibration sweep state: on entry to CPU-usage mode, light the inner
  * ring LEDs one at a time in index order so the user can map their
  * clock-position observations to inring[0..5] unambiguously.  Set by
@@ -1978,7 +1464,7 @@ uint16_t return_display_timer(void){
 static uint32_t cpu_usage_entry_tick = 0;
 static uint8_t  cpu_usage_calibration_active = 0;
 /* Step time in *real* milliseconds.  HAL_GetTick() returns values at
- * TICKS_PER_MS (8×) the rate of wall-clock ms, so the arithmetic below
+ * TICKS_PER_MS (8x) the rate of wall-clock ms, so the arithmetic below
  * multiplies by TICKS_PER_MS when comparing elapsed ticks. */
 #define CPU_USAGE_CAL_STEP_MS 700u
 #define CPU_USAGE_CAL_STEPS   NUM_LED_INRING

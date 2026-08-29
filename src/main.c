@@ -63,14 +63,12 @@
 #include "params_lfo.h"
 #include "led_color_adjust.h"
 #include "sphere.h"
-#include "wavetable_recording.h"
-#include "wavetable_editing.h"
 #include "wavetable_saveload.h"
 #include "analog_conditioning.h"
 #include "UI_conditioning.h"
 #include "drivers/flashram_spidma.h"
 #include "sel_bus.h"
-#include "eq.h"
+#include "drum_ui.h"
 
 
 
@@ -244,17 +242,11 @@ int main(void)
 
 	//Start updating oscillator parameters and wavetable
 	start_osc_updates();
-	start_osc_interp_updates();
-	force_all_wt_interp_update(); 	// do first wavetabe interpolation (initializes routine's static variables)
 
 	//Start LFO outputs
 	start_envout_pwm();
 
 	init_compressor(COMPRESS_SIGNED_24BIT, 0.90);
-
-	// Initialize EQ (always active, flat response by default)
-	eq_init();
-	eq_update_from_sliders(params.eq_slider_values);
 
 	ui_mode = PLAY;
 
@@ -309,7 +301,7 @@ int main(void)
 			diag_main_loop_iter_count++;
 		}
 
-		read_freq();  /* already timed via diag_read_freq_peak_cycles */
+		read_drum_ui();
 
 		DIAG_TIME(diag_ml_switches_peak_cycles,  read_switches());
 		DIAG_TIME(diag_ml_oscparam_peak_cycles,  update_osc_param_lock());

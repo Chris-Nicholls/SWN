@@ -27,11 +27,9 @@
  */
 
 #include "ui_modes.h"
-#include "wavetable_recording.h"
 #include "key_combos.h"
 #include "params_update.h"
 #include "led_cont.h"
-#include "wavetable_editing.h" 
 #include "wavetable_saveload.h" 
 #include "UI_conditioning.h"
 #include "calibrate_voct.h"

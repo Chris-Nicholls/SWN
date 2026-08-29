@@ -41,8 +41,6 @@
 #include "system_settings.h"
 #include "analog_conditioning.h"
 #include "ui_modes.h"
-#include "wavetable_recording.h"
-#include "wavetable_editing.h"
 #include "oscillator.h"
 
 
@@ -272,44 +270,7 @@ void update_lfo_sample(void)
 	float 			lfo_frac, pos_in_table;
 	uint16_t		rh0, rh1;
 	uint8_t			chan;
-	uint32_t		recbuf_pos;
 
-	if (ui_mode == WTRECORDING)
-	{
-		recbuf_pos = get_recbuf_wh();
-
-		// 1 ramp for full buffer x many spheres: clamp at highest point when we're recording the extra smoothing buffer on the end
-		lfos.preload[0] = _CLAMP_F(recbuf_pos * WT_REC_RAMP_AMPLITUDE / NUM_SAMPLES_IN_RECBUF, 0, WT_REC_RAMP_AMPLITUDE);
-
-		// 1 ramp per sphere: clamp at highest point when we're recording the extra smoothing buffer on the end
-		lfos.preload[1] = _WRAP_F(NUM_SPHERES_IN_RECBUF * recbuf_pos * WT_REC_RAMP_AMPLITUDE / NUM_SAMPLES_IN_RECBUF, 0, WT_REC_RAMP_AMPLITUDE);
-		
-		// 1 ramp per waveform
-		lfos.preload[2] =  _WRAP_F(recbuf_pos * WT_REC_RAMP_AMPLITUDE / WT_TABLELEN, 0, WT_REC_RAMP_AMPLITUDE);	
-		
-		// 1 trigger at start, as wide as one WT (~11.6ms)
-		lfos.preload[3] = (recbuf_pos < WT_TABLELEN) ? WT_REC_TRIGGER_AMPLITUDE : 0;
-
-		// 1 trigger per sphere, as wide as one WT (~11.6ms), clamp low when we're recording the extra smoothing buffer on the end
-		if ( ((recbuf_pos % NUM_SAMPLES_IN_SPHERE) < WT_TABLELEN) && (recbuf_pos<(NUM_SAMPLES_IN_RECBUF)) )  
-			lfos.preload[4] = WT_REC_TRIGGER_AMPLITUDE;
-		else
-			lfos.preload[4] = 0;
-
-		// 1 trigger per waveform, 50% duty cycle, clamp low when we're recording the extra smoothing buffer on the end
-		if ( ((recbuf_pos & (WT_TABLELEN-1)) < (WT_TABLELEN>>1)) && (recbuf_pos<(NUM_SAMPLES_IN_RECBUF+WT_TABLELEN)) )  
-			lfos.preload[5] = WT_REC_TRIGGER_AMPLITUDE;
-		else
-			lfos.preload[5] = 0;
-
-	}
-	else if (ui_mode == WTMONITORING || ui_mode == WTTTONE || ui_mode == WTREC_WAIT)
-	{
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-			lfos.preload[chan] = 0;
-	}
-
-	else 
 	{
 		for (chan=0; chan<NUM_CHANNELS; chan++)
 		{
@@ -535,8 +496,6 @@ void read_lfo_speed(int16_t turn)
 		for (i=0; i<NUM_CHANNELS; i++) {
 			if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG) {
 				lfos.lpg_decay[i] = _CLAMP_F(lfos.lpg_decay[i] + (turn_amt / 20.0f), 0.0f, 1.0f);
-				// Also update plaits params for Plaits-based modes
-				params.plaits_params[i].lpg_decay = lfos.lpg_decay[i];
 			}
 		}
 	}
@@ -551,7 +510,6 @@ void read_lfo_speed(int16_t turn)
 				if (lfos.mode[i] == lfot_LPG) {
 					// LPG mode: adjust lpg_decay for this channel
 					lfos.lpg_decay[i] = _CLAMP_F(lfos.lpg_decay[i] + (turn_amt / 20.0f), 0.0f, 1.0f);
-					params.plaits_params[i].lpg_decay = lfos.lpg_decay[i];
 				} else {
 					// LFO mode: adjust divmult_id for this channel
 					lfos.divmult_id[i] = _CLAMP_F(lfos.divmult_id[i] + turn_amt, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
@@ -706,7 +664,6 @@ void read_LFO_shape(void)
 					if (lfos.mode[i] == lfot_LPG) {
 						// LPG mode: adjust lpg_color (resonance)
 						lfos.lpg_color[i] = _CLAMP_F(lfos.lpg_color[i] + (enc / 20.0f), 0.0f, 1.0f);
-						params.plaits_params[i].lpg_color = lfos.lpg_color[i];
 					} else {
 						// LFO mode: adjust shape
 						lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
@@ -726,7 +683,6 @@ void read_LFO_shape(void)
 					if (lfos.mode[i] == lfot_LPG) {
 						// LPG mode: adjust lpg_color (resonance)
 						lfos.lpg_color[i] = _CLAMP_F(lfos.lpg_color[i] + (enc / 20.0f), 0.0f, 1.0f);
-						params.plaits_params[i].lpg_color = lfos.lpg_color[i];
 					} else {
 						// LFO mode: adjust shape
 						lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);

@@ -42,7 +42,6 @@
 #include "timekeeper.h"
 #include "wavetable_saveload.h"
 #include "startup_preset_storage.h"
-#include "eq.h"
 
 extern o_params params;
 extern o_lfos lfos;

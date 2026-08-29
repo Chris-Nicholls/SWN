@@ -28,10 +28,8 @@
 
 #include "envout_pwm.h"
 #include "globals.h"
-#include "halo.h"
 #include "params_update.h"
 #include "params_lfo.h"
-#include "plaits_shim.h"
 #include "led_cont.h"
 #include "gpio_pins.h"
 #include "timekeeper.h"
@@ -229,24 +227,6 @@ void update_envout_pwm(void){
 	}
 	prev_pwm_cycles = now_cycles;
 
-	/* Process pending LPG trigger delays (for phase-spread
-	 * triggering).  Each delay is a countdown in PWM ticks; subtract
-	 * elapsed_ticks atomically and fire any voice whose deadline
-	 * has now arrived (or passed during ISR starvation). */
-	for (j=0; j<NUM_CHANNELS; j++) {
-		uint16_t d = lfos.lpg_trigger_delay[j];
-		if (d > 0) {
-			if (d <= elapsed_ticks) {
-				lfos.lpg_trigger_delay[j] = 0;
-				extern void Shim_LPG_Trigger(uint8_t chan);
-				Shim_LPG_Trigger(j);
-				halo_request_trigger(j);
-			} else {
-				lfos.lpg_trigger_delay[j] = (uint16_t)(d - elapsed_ticks);
-			}
-		}
-	}
-
 	for (j=0;j<NUM_CHANNELS;j++)
 	{		
 		envout_buf = lfos.preload[j];
@@ -268,27 +248,9 @@ void update_envout_pwm(void){
 			lfos.trigout[j]=0;
 		}
 
-		if (ui_mode == WTRECORDING && j>=3)
-		{ 						
-			//Do not apply gain or LFO mode to trigger outputs for WT Rec Sync
-			lfos.envout_pwm[j] = envout_buf; 													
-			lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-		}
-		else if (lfos.mode[j] == lfot_LPG)
-		{
-			float env_val = Shim_LPG_GetEnvelope(j);
-			
-			// Use LPG-specific gain for peak level
-			lfos.envout_pwm[j] = (uint32_t)(env_val * PWM_MAX * lfos.lpg_gain[j]);
-			lfos.out_lpf[j] = env_val * lfos.lpg_gain[j];
-		} 
-
-		else //lfos.mode[j] == lfot_LFO (standard LFO shape mode)
-		{
-			lfos.envout_pwm[j] = envout_buf;
-			lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-			lfos.envout_pwm[j] *= lfos.gain[j];
-		}
+		lfos.envout_pwm[j] = envout_buf;
+		lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
+		lfos.envout_pwm[j] *= lfos.gain[j];
 	}
 
 	//ENVOUTs A,B are higher res (12 bits)

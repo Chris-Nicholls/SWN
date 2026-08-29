@@ -30,7 +30,6 @@
 #include <stm32f7xx.h>
 #include "wavetable_saveload.h"
 #include "wavetable_saveload_UI.h"
-#include "wavetable_editing.h"
 #include "params_sphere_enable.h"
 #include "math_util.h"
 #include "sphere.h"

@@ -143,8 +143,6 @@ enum PanStates {
 	pan_CACHED_LEVEL,
 };
 
-#include "plaits_shim.h"
-
 typedef struct o_calc_params{
 	uint8_t		wtsel 					[NUM_CHANNELS];
 	float		wt_pos 					[3][NUM_CHANNELS];
@@ -244,11 +242,6 @@ typedef struct o_params{
 	// Chord generation overtone weights (v2.x4)
 	float		chord_overtone_weights[7];			// Weights for fundamental + 6 overtones (0.0 to 1.0)
 
-	// Plaits Params (v2.x3)
-	PlaitsParams plaits_params		[NUM_CHANNELS];
-
-	#define FW_PLAITS_PARAMS_SIZE (sizeof(PlaitsParams)*NUM_CHANNELS) 
-
 	// Reverb params (vF)
 	float		reverb_send			[NUM_CHANNELS];	// Per-channel send to reverb (0=dry, 1=wet)
 	float		reverb_time;						// Decay time [0,1]
@@ -267,7 +260,7 @@ typedef struct o_params{
 	float		halo_wt_attack		[NUM_CHANNELS];
 	int8_t		halo_lpf_cutoff		[NUM_CHANNELS];	// Harmonic index 1..42
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_PLAITS_PARAMS_SIZE - FW_REVERB_PARAMS_SIZE - FW_HALO_PARAMS_SIZE];
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_REVERB_PARAMS_SIZE - FW_HALO_PARAMS_SIZE];
 } o_params;
 
 void 		check_reset_navigation(void);

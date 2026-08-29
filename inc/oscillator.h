@@ -33,7 +33,6 @@
 
 #include "sphere.h"
 #include "globals.h"
-#include "halo.h"
 
 #define MAX_UNISON_VOICES		6									// Maximum number of unison voices per channel
 
@@ -78,69 +77,7 @@ typedef struct o_wt_osc{
 	float						unison_spread_amt	[NUM_CHANNELS];
 	uint8_t						unison_voice_count	[NUM_CHANNELS];
 
-	// Plaits state
-	float						plaits_last_cv_input[NUM_CHANNELS];
-	uint32_t					plaits_refractory_timer[NUM_CHANNELS];
-
-	// Halo physical model state (per channel)
-	o_halo				halo_state[NUM_CHANNELS];
-
-	// Seed waveform cache — per channel we keep TWO adjacent waveforms
-	// from the current bank (floor(pos) and ceil(pos)) so that on note
-	// trigger we can linearly interpolate between them by the fractional
-	// part of pending_seed_pos. This preserves smooth WT morphing when
-	// the user holds the browse encoder between two integer positions.
-	int16_t						seed_cache       [NUM_CHANNELS][2][WT_TABLELEN];
-	// Float browse position (0..NUM_WAVEFORMS_IN_SPHERE), written by
-	// update_wt()'s case 15. Moving this does NOT immediately change
-	// what's playing — the currently-running buffer keeps running until
-	// the next note trigger, at which point q_back is seeded with
-	// lerp(seed_cache[0], seed_cache[1], frac).
-	float						pending_seed_pos [NUM_CHANNELS];
-	// Which integer index / bank is currently loaded in each cache slot.
-	// Set to 0xFFFF during an in-flight flash read so neither
-	// update_oscillators nor the audio ISR will use a half-written seed.
-	uint16_t					active_seed_idx  [NUM_CHANNELS][2];
-	uint16_t					active_seed_bank [NUM_CHANNELS][2];
-
-	// ─── Buffer-flip crossfade ────────────────────────────────────────
-	// After every buffer flip (cycle-advance OR trigger) we keep a small
-	// "shadow" reader following the previous buffer's trajectory and
-	// blend its output against the new buffer's output for xfade_remaining
-	// audio samples.  This masks the ~Δ-sample phase rotation that the
-	// cascaded circular LPF imparts every cycle (visible as a tiny step
-	// at the transition from q_front[M-1] → q_back[0]); without it the
-	// step lands once per audible cycle and smears across harmonics as
-	// audible aliasing, especially with high damping/cutoff.
-	//
-	// Done in the OUTPUT (audio ISR) rather than buffer content because
-	// any in-place modification to q_back's first/last samples would
-	// break the LPF's own circular closure and just relocate the step
-	// inside q_back (q_back[M-1] → q_back[0] hard step).  Both buffers
-	// stay valid until the next OSC_TIM round-robin pass for this
-	// channel (~3 ms grace at 6-channel load) — comfortably more than
-	// the ~32-sample xfade duration.
-	//
-	// Latched atomically with the flip itself: cycle-advance flips
-	// happen in the audio ISR (so the state is captured inline);
-	// trigger flips happen in OSC_TIM (so the trigger fast path
-	// captures state under __disable_irq() before flipping buffer_sel).
-	int32_t						xfade_remaining   [NUM_CHANNELS];
-	uint8_t						xfade_prev_buffer [NUM_CHANNELS]; // mc[] index of the dying buffer
-	float						xfade_prev_head   [NUM_CHANNELS]; // continuing read pos in dying buffer
-	int32_t						xfade_prev_M      [NUM_CHANNELS]; // dying buffer's phys_N (might differ on trigger)
-	float						xfade_prev_inc    [NUM_CHANNELS]; // dying buffer's phase increment
-
 } o_wt_osc;
-
-// ─── Crossfade duration ───
-// 32 samples ≈ 0.67 ms at 48 kHz.  Long enough to mask the LPF phase
-// step at any reasonable damping (verified: |Δ| stays under ~6 samples
-// across the lpfCutoff × damping range), short enough that the new
-// cycle's timbre is fully heard well before the next physics step
-// arrives at high pitch.  Adjust here if needed; both event types
-// share this length so tuning is one-knob.
-#define WT_XFADE_LEN 32
 
 
 void	init_wt_osc(void);

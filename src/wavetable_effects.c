@@ -30,7 +30,6 @@
 #include <math.h>
 #include "globals.h"
 #include "wavetable_effects.h"
-#include "wavetable_editing.h"
 #include "math_util.h"
 #include "hardware_controls.h"
 #include "UI_conditioning.h"
