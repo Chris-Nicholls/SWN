@@ -40,7 +40,6 @@
 #include "preset_manager_undo.h"
 #include "preset_manager_UI.h"
 #include "timekeeper.h"
-#include "wavetable_saveload.h"
 #include "startup_preset_storage.h"
 
 extern o_params params;
@@ -204,16 +203,12 @@ void recall_preset(uint32_t preset_num, o_params *t_params, o_lfos *t_lfos)
 			t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 		}
 
-		fix_wtsel_wtbank_offset();
 	}
 	else {
 		//Loading an unfilled preset re-initializes params
 		init_param_object(t_params);
 		init_lfo_object(t_lfos);
 	}
-
-	// Apply EQ settings from preset
-	eq_update_from_sliders(t_params->eq_slider_values);
 
 	init_wbrowse_morph();
 
@@ -306,10 +301,7 @@ void clear_preset(uint32_t preset_num)
 void recalc_active_params(void)
 {
 	init_calc_params();
-	update_number_of_user_spheres_filled();
-	update_all_wt_pos_interp_params();
 	flag_all_lfos_recalc();
-	force_all_wt_interp_update();
 	for (int i=0; i<NUM_CHANNELS; i++)
 		compute_tuning(i);	
 }

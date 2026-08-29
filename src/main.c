@@ -51,7 +51,6 @@
 #include "drivers/mono_led_driver.h"
 #include "hardware_tests.h"
 #include "hal_handlers.h"
-#include "sphere_flash_io.h"
 #include "system_settings.h"
 #include "preset_manager.h"
 #include "preset_manager_UI.h"
@@ -63,7 +62,6 @@
 #include "params_lfo.h"
 #include "led_color_adjust.h"
 #include "sphere.h"
-#include "wavetable_saveload.h"
 #include "analog_conditioning.h"
 #include "UI_conditioning.h"
 #include "drivers/flashram_spidma.h"
@@ -168,23 +166,6 @@ int main(void)
 	//start displaying mono leds
 	start_monoled_updates();
 
-	init_sphere_flash();
-
-#ifdef ERASE_ALL_WAVETABLES
-	for (uint8_t ww=0; ww<12; ww++)
-		sFLASH_erase_sector( sFLASH_get_sector_addr(WT_SECTOR_START+ww) );
-#endif
-
-#ifdef CLEAR_USER_SPHERES_FROM_FLASH
-	empty_all_user_spheres();
-#endif
-
-	if (key_combo_reload_factory_spheres())
-		write_factory_spheres_to_extflash();
-
-#ifdef FORCE_WRITE_FACTORY_SPHERES
-	write_factory_spheres_to_extflash();
-#endif
 
 	// Load system_calibrations from internal flash if it's present
 	if (HAS_INTERNAL_FLASH)
@@ -195,16 +176,10 @@ int main(void)
 		{
 			factory_reset_all_calibrations();
 			factory_reset();
-			write_factory_spheres_to_extflash();
 		}
 	}
 	else
 		factory_reset_all_calibrations();
-
-	restore_factory_spheres_to_extflash();
-
-	read_all_spheretypes();
-	update_number_of_user_spheres_filled();
 
 	// Init ADC
 	adc_init_all(); //starts hi-res ADC reading timers

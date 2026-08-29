@@ -1442,6 +1442,14 @@ void start_ongoing_display_soft_clip(void) {
 	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 
+/* Cancel any transient parameter overlay so the caller's own display
+ * (or the default drum-pattern view) takes over immediately. */
+void stop_all_displays(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
+	led_cont.ongoing_timeout = 0;
+}
+
 void start_ongoing_display_sphere_sel(void){
 	led_cont.ongoing_display = ONGOING_DISPLAY_SPHERE_SEL;
 	led_cont.ongoing_timeout = SPHERE_SEL_TIMER_LIMIT;
