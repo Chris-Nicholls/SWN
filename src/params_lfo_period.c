@@ -159,7 +159,6 @@ void update_lfo_calcs(void)
 
 	if (recalc_flagged[GLO_CLK]) {
 		recalc_flagged[GLO_CLK] = 0;
-		// Note: divmult_cv is no longer used - LFO CV jack repurposed as Global VCA
 		lfos.divmult[GLO_CLK] = calc_divmult_amount(lfos.divmult_id[GLO_CLK]);
 		lfos.period[GLO_CLK] = lfos.period[REF_CLK] / calc_divmult_amount(lfos.divmult_id[GLO_CLK]);
 		lfos.inc[GLO_CLK] = calc_lfo_inc(lfos.period[GLO_CLK]);

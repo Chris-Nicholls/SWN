@@ -502,15 +502,6 @@ void read_lfo_speed(int16_t turn)
 
 	if (!turn) return;
 
-	// Hold LFO->VCA + turn LFO Speed = adjust resonator attack
-	if (button_pressed(butm_LFOVCA_BUTTON)) {
-		float factor = powf(1.2f, (float)turn);
-		params.resonator_attack_freq *= factor;
-		params.resonator_attack_freq = _CLAMP_F(params.resonator_attack_freq, 10.0f, 2000.0f);
-		calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 1;
-		return;
-	}
-
 	// Check if any unlocked channel is in LPG mode (for global behavior)
 	for (i=0; i<NUM_CHANNELS; i++) {
 		if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG)
@@ -658,7 +649,7 @@ void read_LFO_phase(void)
 		 * Only meaningful for LFO-mode channels: lets the user offset
 		 * one voice's free-running phase relative to the spread baseline.
 		 * LPG-mode channels are timed entirely by phase_spread + the
-		 * clock, so an "individual nudge" no longer applies. */
+		 * clock, so individual nudge does not apply. */
 		if (enc_turn)
 		{
 			if (fine)
@@ -707,16 +698,6 @@ void read_LFO_shape(void)
 
 	if(enc)
 	{
-		// Hold LFO->VCA + turn LFO Shape = adjust resonator decay
-		if (button_pressed(butm_LFOVCA_BUTTON)) {
-			float factor = powf(1.2f, (float)enc);
-			params.resonator_decay_freq *= factor;
-			params.resonator_decay_freq = _CLAMP_F(params.resonator_decay_freq, 1.0f, 1000.0f);
-			calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 1;
-			return;
-		}
-
-
 		if (macro_states.all_af_buttons_released)
 		{
 			for (i = 0; i < NUM_CHANNELS; i++){

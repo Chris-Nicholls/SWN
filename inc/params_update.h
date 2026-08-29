@@ -54,9 +54,6 @@
 #define XFADE_TIME_SEC					0.001
 #define XFADE_INC						(1.0/(F_SAMPLERATE * XFADE_TIME_SEC))
 
-#define AUDIO_GATE_THRESHOLD 			(-50000000.0)
-#define AUDIO_GATE_DEBOUNCE_LENGTH 		4
-
 // DISPLAY TIMERS: specified in # of tick
 #define OSC_PARAM_LOCK_TIMER_LIMIT		700
 #define WT_POS_LOCK_TIMER_LIMIT			2000
@@ -119,8 +116,6 @@ enum MuteNoteKeyStates {
 	ksw_MUTE,
 	ksw_NOTE,
 	ksw_KEYS,
-	ksw_KEYS_EXT_TRIG,
-	ksw_KEYS_EXT_TRIG_SUSTAIN,
 
 	NUM_MUTE_NOTE_KEY_STATES
 };
@@ -225,17 +220,18 @@ typedef struct o_params{
 	uint8_t		wtsel_lock				[NUM_CHANNELS];	//For v1.0 this is always the same as osc_param_lock
 
 	//v1.2:
-	uint8_t		enabled_spheres			[14]; // Fixed at 14 bytes to match 112/8 range or similar legacy size
-	// Note: NUM_WAVETABLES is 100, so 13-14 bytes is sufficient.
-	// We keep this fixed to avoid breaking preset alignment when MAX_TOTAL_SPHERES changes.
+	uint8_t		enabled_spheres			[14]; // Fixed at 14 bytes; NUM_WAVETABLES is 100,
+	                                          // so 13-14 bytes is sufficient.  Kept fixed to
+	                                          // preserve preset alignment across MAX_TOTAL_SPHERES bumps.
 
 	//v2.0
 	float		pan						[NUM_CHANNELS];
 
-	// Resonator envelope
 	float		soft_clip_pregain;				// Pre-clipping gain for output soft clipper
-	float		resonator_attack_freq;				// Attack frequency in Hz (higher = faster)
-	float		resonator_decay_freq;				// Decay frequency in Hz (higher = faster)
+	/* Reserved slots — preserved to keep the preset binary layout
+	 * stable.  Reusing requires a preset version bump. */
+	float		_reserved_param_a;
+	float		_reserved_param_b;
 
 	// Unison mode (v2.x3)
 	float		unison_spread_amt		[NUM_CHANNELS];		// Detune amount (0.0 to 1.0)
@@ -284,7 +280,6 @@ void 		init_calc_params(void);
 void 		set_pitch_params_to_ttone(void);
 
 void 		read_noteon(uint8_t i);
-void 		read_ext_trigs(void);
 void 		read_level_and_pan(uint8_t chan);
 float		default_pan(uint8_t chan);
 void 		set_master_gain(void);

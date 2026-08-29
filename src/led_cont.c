@@ -207,8 +207,6 @@ void init_led_cont(void)
 	key_sw_mode_colors[ksw_MUTE] = ledc_WHITE;
 	key_sw_mode_colors[ksw_NOTE] = ledc_PINK;
 	key_sw_mode_colors[ksw_KEYS] = ledc_PURPLE;
-	key_sw_mode_colors[ksw_KEYS_EXT_TRIG] = ledc_GOLD;
-	key_sw_mode_colors[ksw_KEYS_EXT_TRIG_SUSTAIN] = ledc_BUTTERCUP;
 }
 
 void update_display_at_encoder_press(void)
@@ -699,22 +697,11 @@ void calculate_lfo_leds(void)
 {
 	uint8_t chan=0;
 	float brightness;
-	uint8_t resonator_mode_active;
-
-	// Check if resonator mode is active (waveform input jack plugged)
-	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY);
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
-		// Resonator mode: show coherence levels when LFO->VCA is enabled
-		// Square to match VCA response curve
-		if (resonator_mode_active && lfos.to_vca[chan]) {
-			float coh = wt_osc.coherence_env[chan];
-			brightness = coh * coh * RESONATOR_LED_SCALE;
-			if (brightness > 1.0f) brightness = 1.0f;
-		}
 		// Audio rate and shape selection- -> LFO static brightness
-		else if  ( (params.key_sw[chan] == ksw_MUTE) && (lfos.audio_mode[chan] || led_cont.lfoshape_timeout[chan]) ){
+		if  ( (params.key_sw[chan] == ksw_MUTE) && (lfos.audio_mode[chan] || led_cont.lfoshape_timeout[chan]) ){
 			brightness 	= lfos.gain[chan];
 		}
 		else
@@ -2051,9 +2038,6 @@ void display_cpu_usage(void)
 	extern volatile uint32_t diag_osc_ringtick_peak_cycles;
 	extern volatile uint32_t diag_advance_cycle_peak_cycles;
 	extern volatile uint32_t diag_seed_lerp_peak_cycles;
-	/* The main-loop iteration count and chord-recalc count live in
-	 * globals for debugger inspection; they are no longer displayed
-	 * on any LED, so no extern declaration is needed here. */
 
 	/* ── Calibration sweep ──────────────────────────────────────────────
 	 * For the first NUM_LED_INRING × 300 ms after entering CPU-usage

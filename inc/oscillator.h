@@ -35,8 +35,6 @@
 #include "globals.h"
 #include "halo.h"
 
-#define RESONATOR_GAIN			32.0f								// Gain applied to coherence VCA
-#define RESONATOR_LED_SCALE		32.0f								// Scale coherence to 0-1 for LED display
 #define MAX_UNISON_VOICES		6									// Maximum number of unison voices per channel
 
 enum WtInterpRequests {
@@ -75,11 +73,6 @@ typedef struct o_wt_osc{
 	float 						rhd						[NUM_CHANNELS][MAX_UNISON_VOICES]; 
 	float 						rhd_inv					[NUM_CHANNELS][MAX_UNISON_VOICES];
 
-
-	// Resonator mode: quadrature coherence detection (pseudo-Hilbert)
-	float						coherence_dc_I		[NUM_CHANNELS];			// In-phase DC component (slow LPF)
-	float						coherence_dc_Q		[NUM_CHANNELS];			// Quadrature DC component (90° shifted)
-	float						coherence_env		[NUM_CHANNELS];			// Envelope of sqrt(I²+Q²)
 
 	// Unison params (cached here for audio thread performance)
 	float						unison_spread_amt	[NUM_CHANNELS];

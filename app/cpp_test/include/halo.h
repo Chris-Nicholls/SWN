@@ -93,13 +93,29 @@ typedef struct o_halo {
     /* One-pole LP state for colored noise */
     float       noiseFilterState;
 
-    /* Cached streaming-LPF coefficients (consumed by halo_advance_cycle
-     * — used by the host A/B harness's Engine A; the firmware audio
-     * path lives in halo_voice.cpp). */
+    /* Cached streaming-LPF coefficients — separate for q (full cutoff)
+     * and v (half cutoff).  Cache key is a float because the velocity
+     * filter runs at lpfCutoff*0.5, which is a half-integer for odd
+     * lpfCutoff.  Sentinel `-1.0f` for "cache invalid".
+     *
+     * We use a STREAMING (non-cyclic) cascaded 2-pole IIR rather than
+     * the original circular LPF: each advance_cycle picks up filter
+     * state from the previous cycle's last sample, so q_back[0] is
+     * naturally continuous with q_front[N-1] across the buffer flip
+     * without requiring any read-side crossfade.  Cost ~1 pass of N
+     * vs. ~4 passes for the cyclic solve — about 4× faster, which is
+     * what makes per-cycle physics affordable (the round-robin schedule
+     * was its own source of audible artefacts: at high pitches the
+     * audio could wrap several times within the same q_front buffer
+     * before OSC_TIM had a fresh q_back ready, exposing a phase step
+     * the cyclic LPF couldn't fully hide).  The trade-off is that the
+     * buffer is no longer self-cyclic — q[N-1] != q[0] in general — so
+     * we MUST guarantee per-cycle physics (no round-robin), otherwise
+     * within-buffer wraps become audible. */
     float       lpfCachedCutoffQ;
     float       lpfAlphaQ;
-    float       lpfStateQ1;
-    float       lpfStateQ2;
+    float       lpfStateQ1;          /* pole 1 last output */
+    float       lpfStateQ2;          /* pole 2 last output */
 
     float       lpfCachedCutoffV;
     float       lpfAlphaV;
@@ -173,8 +189,7 @@ typedef struct o_halo {
 void halo_init(o_halo *rs, float *q);
 
 /* Run one cycle of the physics simulation on q[RS_N].
- * Batch path used by the host A/B harness's Engine A; the firmware
- * audio path uses the streaming HaloVoice (see inc/halo_voice.hpp). */
+ * Low-level; prefer halo_tick() which handles double-buffering. */
 void halo_advance_cycle(o_halo *rs, float *q);
 
 /* Drive one iteration of the cross-context state machine.
@@ -224,9 +239,7 @@ void halo_seed_lerp(o_halo *rs, float *q,
                            const int16_t *wave_a, const int16_t *wave_b,
                            float frac, int M);
 
-/* Arms the envelope state on the o_halo struct.  The public trigger
- * entrypoint that callers should use is halo_trigger(uint8_t chan, ...)
- * declared in halo_voice.hpp. */
+/* Trigger: start noise ADSR attack phase. */
 void halo_arm_envelope(o_halo *rs);
 
 /* Release: transition noise ADSR to release phase. */

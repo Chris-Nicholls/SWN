@@ -102,7 +102,7 @@ uint8_t bank_to_sphere_index(uint8_t wtbank)
 		return wtbank;
 	}
 
-	// 2. Plaits — no longer browseable; redirect to factory 0
+	// 2. Plaits banks are not browseable: redirect to factory 0.
 	if (wtbank >= PLAITS_SPHERE_OFFSET && wtbank < (PLAITS_SPHERE_OFFSET + NUM_PLAITS_SPHERES)) {
 		return 0;
 	}

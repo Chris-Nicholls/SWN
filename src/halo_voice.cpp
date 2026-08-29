@@ -1,12 +1,8 @@
 /*
  * halo_voice.cpp — see inc/halo_voice.hpp for design.
  *
- * Ported from app/cpp_test/halo_voice_amortized.cpp (the
- * Engine B that the host A/B harness validated against the legacy
- * batch path).  The only adaptations for firmware are:
- *   - Buffer length / sample rate come from globals.h / sphere.h
- *     (numerically identical to the host harness's compile-time
- *     constants, but defined here as one source of truth).
+ * Firmware-specific bits:
+ *   - Buffer length / sample rate come from globals.h / sphere.h.
  *   - Seed waveforms arrive from update_oscillators as int16
  *     pairs + frac, so we expose halo_build_seed_wave() to
  *     do the lerp/scale once at the call site.
@@ -25,8 +21,20 @@ inline float clampf(float x, float lo, float hi) {
     return (x < lo) ? lo : (x > hi ? hi : x);
 }
 
-/* xorshift32 → uniform float in [-1, 1].  Identical to the legacy
- * implementation in src/halo.c. */
+/* Per-tap detune ratios for unison.  First entry is 0.0 so sub-voice 0
+ * always plays exactly on the requested pitch and the remaining taps
+ * spread asymmetrically around it.  Values are "prime-ish" to avoid
+ * predictable beating. */
+constexpr float kUnisonDetuneFactors[HaloVoice::kMaxUnison] = {
+    0.0f, 0.11f, -0.13f, 0.27f, -0.31f, 0.47f
+};
+/* Multiplied into spread_amt to bound the maximum detune.  At
+ * spread_amt = 1.0 the outer-most tap is detuned by
+ *     0.47 * 0.06 = 0.0282 ≈ +28 cents,
+ * for a total spread of roughly ±50 cents across the stack. */
+constexpr float kUnisonDetuneScaler = 0.06f;
+
+/* xorshift32 → uniform float in [-1, 1]. */
 inline float xor_rand(uint32_t* s) {
     uint32_t x = *s;
     if (x == 0) x = 0xDEADBEEFu;
@@ -39,31 +47,70 @@ inline float xor_rand(uint32_t* s) {
 
 } /* namespace */
 
+/* ── DTCM-resident hot position buffer ───────────────────────────────
+ *
+ * q_ is the single most-read array on the audio hot path — every
+ * unison tap reads q_[r0] and q_[r1] once per audio sample, plus the
+ * streaming physics step does another two reads.  Promoting just
+ * this one buffer to DTCM (zero wait states on the Cortex-M7 D-bus)
+ * removes the SRAM1 cache-fill stall on the most-frequent access.
+ *
+ * Cost: kBufLen × NUM_CHANNELS × sizeof(float) = 512 × 6 × 4 = 12 KB.
+ * v_ stays inline in HaloVoice (and therefore in SRAM1 via the
+ * SRAM1DATA attribute on g_voices) to keep DTCM under budget — the
+ * full DTCM is 128 KB and is already crowded with stack, BSS, codec
+ * DMA buffers, and Plaits state. */
+namespace {
+alignas(8) float dtcm_q[NUM_CHANNELS][HaloVoice::kBufLen];
+} /* namespace */
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
+void HaloVoice::bind_buffers(float* q_buf) {
+    q_ = q_buf;
+}
+
 void HaloVoice::init() {
-    std::memset(q_, 0, sizeof(q_));
+    /* q_ was bound to a DTCM-resident array by the caller via
+     * bind_buffers() — required before init() runs. */
+    std::memset(q_, 0, (size_t)kBufLen * sizeof(float));
     std::memset(v_, 0, sizeof(v_));
     std::memset(wt_orig_, 0, sizeof(wt_orig_));
-    std::memset(xfade_old_q_, 0, sizeof(xfade_old_q_));
+    for (int s = 0; s < kNumXfadeSlots; ++s) {
+        std::memset(xfade_slots_[s].q, 0, sizeof(xfade_slots_[s].q));
+        for (int v = 0; v < kMaxUnison; ++v) {
+            xfade_slots_[s].head[v] = 0.0f;
+            xfade_slots_[s].inc [v] = 0.0f;
+        }
+        xfade_slots_[s].M         = 0;
+        xfade_slots_[s].count     = 1;
+        xfade_slots_[s].norm      = 1.0f;
+        xfade_slots_[s].total     = kXfadeLen;
+        xfade_slots_[s].remaining = 0;
+    }
 
-    /* Boot silent.  The legacy halo_init seeded q[] with a
-     * full-amplitude sine "so the voice makes a sound from cycle
-     * zero before any trigger arrives", but that meant six voices
-     * × full-amplitude sines all at the same phase showed up at
-     * the codec on the very first audio block when the output mute
-     * released — audible as a hard impulse on power-on.  Leaving
-     * q[] at zero means each voice stays silent until its first
-     * trigger (key press, chord change, jack gate, LFO cycle in
-     * LFO-VCA mode).  In normal use the user always provokes a
-     * trigger within a few milliseconds of touching the module. */
+    /* Boot silent: q[] starts at zero so the voice stays silent
+     * until its first trigger (key press, chord change, jack gate,
+     * LFO cycle in LFO-VCA mode).  Seeding with a full-amplitude sine
+     * would put six voices x full-amplitude sines at the same phase
+     * on the codec at the moment the output mute releases, audible
+     * as a hard impulse on power-on. */
 
     M_                 = kBufLen;
-    read_head_         = 0.0f;
+    /* Single-tap default; set_unison() can widen the stack later. */
+    unison_count_      = 1;
+    unison_spread_     = 0.0f;
+    unison_norm_       = 1.0f;
+    for (int v = 0; v < kMaxUnison; ++v) {
+        read_head_[v]      = 0.0f;
+        read_inc_[v]       = 1.0f;
+        unison_detune_[v]  = 1.0f;
+    }
     pitch_hz_          = 110.0f;
     phys_head_         = 0;
     phys_accum_        = 0.0f;
     dtt_               = kDt;
+    dtt_decay_         = kDt * 0.1f;
     inj_amt_           = 0.0f;
     wt_amp_ = noise_amp_ = damp_scale_ = 0.0f;
     alpha_             = 0.0f;
@@ -73,6 +120,7 @@ void HaloVoice::init() {
     inj_dc_full_ = inj_dc_partial_ = 0.0f;
     lpf_q1_ = lpf_q2_ = lpf_v1_ = lpf_v2_ = 0.0f;
     lpf_alpha_q_ = lpf_alpha_v_ = 0.0f;
+    lpf_b_q_ = lpf_b_v_ = 1.0f;
     lpf_dirty_         = true;
     lpf_cutoff_        = 24;
     damping_           = 0.2f;
@@ -81,11 +129,6 @@ void HaloVoice::init() {
     wt_attack_         = 0.0f;
     external_env_      = 1.0f;
     rng_state_         = 0x12345678u + (uint32_t)(uintptr_t)this;
-    xfade_remaining_   = 0;
-    xfade_total_       = kXfadeLen;
-    xfade_old_M_       = 0;
-    xfade_old_head_    = 0.0f;
-    xfade_old_inc_     = 0.0f;
     inj_blend_         = 0.0f;
     attack_env_        = 1.0f;
     attack_env_inc_    = 1.0f;
@@ -130,7 +173,57 @@ void HaloVoice::set_pitch_hz(float hz) {
 }
 
 void HaloVoice::recompute_read_inc() {
-    read_inc_ = pitch_hz_ * (float)M_ / kSampleRate;
+    /* read_inc_[v] is in samples/sample for tap v, i.e. how far the
+     * read head walks across q[] per audio sample.  Tap 0's ratio is
+     * always 1.0 so its inc matches the un-detuned pitch; the other
+     * taps walk slightly faster or slower per kUnisonDetuneFactors[].
+     *
+     * We always update all kMaxUnison entries (not just the active
+     * count) so that if the user widens the stack mid-note via
+     * set_unison() the newly-activated taps already have correct
+     * increments without needing recompute_read_inc to be re-called. */
+    float base = pitch_hz_ * (float)M_ / kSampleRate;
+    for (int v = 0; v < kMaxUnison; ++v) {
+        read_inc_[v] = base * unison_detune_[v];
+    }
+}
+
+/* ── Unison configuration ───────────────────────────────────────── */
+void HaloVoice::set_unison(int count, float spread_amt) {
+    if (count < 1)            count = 1;
+    if (count > kMaxUnison)   count = kMaxUnison;
+    if (!(spread_amt >= 0.0f)) spread_amt = 0.0f;       /* NaN-safe */
+    if (spread_amt > 1.0f)    spread_amt = 1.0f;
+
+    int prev_count   = unison_count_;
+    unison_count_    = count;
+    unison_spread_   = spread_amt;
+
+    /* Detune ratios.  Bounded around 1.0 so frequency shift per tap
+     * is at most ~kUnisonDetuneScaler * max(|factor|) ≈ 2.8% (~50¢). */
+    for (int v = 0; v < kMaxUnison; ++v) {
+        unison_detune_[v] = 1.0f + spread_amt
+                                 * kUnisonDetuneFactors[v]
+                                 * kUnisonDetuneScaler;
+    }
+
+    /* Constant-power normaliser.  For uncorrelated taps the summed
+     * RMS grows as sqrt(N), so 1/sqrt(N) keeps perceived loudness
+     * roughly stable as the user changes voice count.  Real unison
+     * is partially correlated (especially at small spreads), so the
+     * actual loudness creeps up with N — we accept this as the
+     * intended "thicker" character of higher unison settings.  */
+    unison_norm_ = 1.0f / std::sqrt((float)count);
+
+    /* Phase-align newly-activated taps with tap 0 so a count increase
+     * mid-note doesn't introduce a click from a stale read position.
+     * Existing active taps keep their current head so spread changes
+     * during sustain feel like smooth chorusing rather than rephasing. */
+    for (int v = prev_count; v < count; ++v) {
+        read_head_[v] = read_head_[0];
+    }
+
+    recompute_read_inc();
 }
 
 /* ── wtAttack split parameter ───────────────────────────────────
@@ -183,6 +276,12 @@ void HaloVoice::recompute_lpf_coefs() {
     float cutoff_v = clampf((float)lpf_cutoff_ * 0.5f, 1.0f, max_cutoff);
     lpf_alpha_q_ = std::exp(-2.0f * (float)M_PI * cutoff_q / (float)M_);
     lpf_alpha_v_ = std::exp(-2.0f * (float)M_PI * cutoff_v / (float)M_);
+    /* Cache (1 - alpha) so the per-sample IIR step doesn't recompute
+     * it every call.  Hot path for high-pitched voices: at the cap
+     * (one physics step per audio sample), this saves 2 sub/sample
+     * across both Q- and V-stage LPFs. */
+    lpf_b_q_ = 1.0f - lpf_alpha_q_;
+    lpf_b_v_ = 1.0f - lpf_alpha_v_;
     lpf_dirty_ = false;
 }
 
@@ -209,9 +308,8 @@ void HaloVoice::prepare_trigger(const float* wave_512, float pitch_hz) {
     }
 
     /* Seed q_staging_ from wt_orig_staging_ scaled by (1 - inj_blend),
-     * with optional coloured-noise mixed in.  DC removed.  Mirrors
-     * the legacy halo_seed_lerp's "Step 2".  inj_blend_ is
-     * the lower-half mapping of wt_attack (saturates at 1.0 once
+     * with optional coloured-noise mixed in.  DC removed.  inj_blend_
+     * is the lower-half mapping of wt_attack (saturates at 1.0 once
      * param ≥ 0.5), so the upper-half attack-envelope range still
      * starts from a fully empty buffer. */
     float seed_amt = 1.0f - clampf(inj_blend_, 0.0f, 1.0f);
@@ -327,12 +425,30 @@ void HaloVoice::commit_trigger() {
         if (attack_samples > xf_len) xf_len = attack_samples;
     }
     if (M_ > 0 && M_ <= kBufLen) {
-        std::memcpy(xfade_old_q_, q_, (size_t)M_ * sizeof(float));
-        xfade_old_M_     = M_;
-        xfade_old_head_  = read_head_;
-        xfade_old_inc_   = read_inc_;
-        xfade_total_     = xf_len;
-        xfade_remaining_ = xf_len;
+        /* Pick the slot to write into: prefer an idle slot (remaining
+         * == 0); otherwise evict the slot with the smallest remaining
+         * count (closest to silent already, so the listener loses the
+         * least audible tail). */
+        int target = 0;
+        for (int s = 1; s < kNumXfadeSlots; ++s) {
+            if (xfade_slots_[s].remaining < xfade_slots_[target].remaining)
+                target = s;
+        }
+        XfadeSlot& slot = xfade_slots_[target];
+        std::memcpy(slot.q, q_, (size_t)M_ * sizeof(float));
+        slot.M     = M_;
+        /* Snapshot the unison configuration as it was just before the
+         * trigger — the slot keeps reading back with that same N-tap
+         * arrangement so the fade-out tail sounds like a continuation
+         * of that note rather than collapsing to a single tap. */
+        slot.count = unison_count_;
+        slot.norm  = unison_norm_;
+        for (int v = 0; v < kMaxUnison; ++v) {
+            slot.head[v] = read_head_[v];
+            slot.inc [v] = read_inc_ [v];
+        }
+        slot.total     = xf_len;
+        slot.remaining = xf_len;
     }
 
     /* NOTE: there is no separate amplitude ramp-in.  The earlier
@@ -367,7 +483,12 @@ void HaloVoice::commit_trigger() {
     std::memset(v_, 0, sizeof(v_));
     M_              = new_M;
     pitch_hz_       = pending_pitch_hz_;
-    read_head_      = 0.0f;
+    /* Reset all unison taps (active or not) to phase 0.  The taps
+     * will diverge over time as their differing read_inc_ values
+     * accumulate — that's what makes the unison stack sound chorused
+     * rather than just louder. */
+    for (int v = 0; v < kMaxUnison; ++v)
+        read_head_[v] = 0.0f;
     phys_head_      = 0;
     phys_accum_     = 0.0f;
     q_dc_full_      = 0.0f;
@@ -390,7 +511,7 @@ void HaloVoice::commit_trigger() {
     pending_commit_ = false;
 }
 
-/* ── Combined single-call trigger (test/legacy path) ───────────── */
+/* ── Combined single-call trigger ───────────────────────────────── */
 
 void HaloVoice::trigger(const float* wave_512, float pitch_hz) {
     prepare_trigger(wave_512, pitch_hz);
@@ -399,8 +520,7 @@ void HaloVoice::trigger(const float* wave_512, float pitch_hz) {
 
 void HaloVoice::load_wavetable(const float* wave_512) {
     /* Live refresh of the per-cycle injection source — does NOT
-     * touch q[], v[], or filter state.  Matches the legacy
-     * halo_refresh_wt_original semantics. */
+     * touch q[], v[], or filter state. */
     const float ratio = (float)kBufLen / (float)M_;
     for (int n = 0; n < M_; ++n) {
         float pos = (float)n * ratio;
@@ -414,7 +534,10 @@ void HaloVoice::load_wavetable(const float* wave_512) {
 /* ── Per-cycle physics setup ───────────────────────────────────── */
 
 void HaloVoice::start_new_phys_cycle() {
-    dtt_ = clampf(kDt + q_[0] * kDt * 0.5f, 0.005f, 0.05f);
+    dtt_       = clampf(kDt + q_[0] * kDt * 0.5f, 0.005f, 0.05f);
+    /* Per-sample physics uses dtt_ * 0.1 in the position-decay term
+     * (`v_[n] -= qn * dtt_ * 0.1f`).  Pre-multiply once per cycle. */
+    dtt_decay_ = dtt_ * 0.1f;
 
     float lvl = clampf(external_env_, 0.0f, 1.0f);
     inj_amt_  = clampf(inj_blend_, 0.0f, 1.0f) * lvl * kDt;
@@ -477,12 +600,13 @@ void HaloVoice::step_one_physics_index() {
         v_[n] -= inj_dc_full_ * damp_scale_;
     }
 
-    /* 2. Antipodal coupling. */
+    /* 2. Antipodal coupling.  dtt_decay_ = dtt_ * 0.1 was pre-computed
+     * in start_new_phys_cycle so this step does 2 muladds + 1 sub. */
     float qn  = q_[n];
     float qnR = q_[nR];
     float d   = qnR - qn;
     float f   = d * kNonlin;
-    v_[n] += f * dtt_ - qn * dtt_ * 0.1f;
+    v_[n] += f * dtt_ - qn * dtt_decay_;
 
     /* 3. Velocity soft-clip. */
     float vn = v_[n];
@@ -502,38 +626,27 @@ void HaloVoice::step_one_physics_index() {
     if (q_[n] >  2.0f) q_[n] =  2.0f;
     if (q_[n] < -2.0f) q_[n] = -2.0f;
 
-    /* 7. Streaming LPF on q. */
+    /* 7+8. Streaming cascaded LPFs on q and v.  Branchless: when
+     * damping_ == 0 the (lpf_q2_ - x) term contributes nothing to
+     * q_[n] (and likewise for v), so the `if (damping > 0)` guard
+     * can be elided.  The IIR state still tracks the signal smoothly
+     * at damping=0, which means transitioning from 0 → non-zero
+     * damping is now click-free instead of snapping the LPF to the
+     * current sample.  lpf_b_q_ / lpf_b_v_ are cached (1-alpha) values
+     * recomputed only when lpf cutoff or M_ changes. */
     {
-        float mix = damping_;
-        if (mix > 0.0f) {
-            float a   = lpf_alpha_q_;
-            float b   = 1.0f - a;
-            float dry = 1.0f - mix;
-            float x   = q_[n];
-            lpf_q1_   = a * lpf_q1_ + b * x;
-            lpf_q2_   = a * lpf_q2_ + b * lpf_q1_;
-            q_[n]     = dry * x + mix * lpf_q2_;
-        } else {
-            lpf_q1_ = q_[n];
-            lpf_q2_ = q_[n];
-        }
+        float a = lpf_alpha_q_, b = lpf_b_q_;
+        float x = q_[n];
+        lpf_q1_ = a * lpf_q1_ + b * x;
+        lpf_q2_ = a * lpf_q2_ + b * lpf_q1_;
+        q_[n]   = x + damping_ * (lpf_q2_ - x);
     }
-
-    /* 8. Streaming LPF on v. */
     {
-        float mix = damping_;
-        if (mix > 0.0f) {
-            float a   = lpf_alpha_v_;
-            float b   = 1.0f - a;
-            float dry = 1.0f - mix;
-            float x   = v_[n];
-            lpf_v1_   = a * lpf_v1_ + b * x;
-            lpf_v2_   = a * lpf_v2_ + b * lpf_v1_;
-            v_[n]     = dry * x + mix * lpf_v2_;
-        } else {
-            lpf_v1_ = v_[n];
-            lpf_v2_ = v_[n];
-        }
+        float a = lpf_alpha_v_, b = lpf_b_v_;
+        float x = v_[n];
+        lpf_v1_ = a * lpf_v1_ + b * x;
+        lpf_v2_ = a * lpf_v2_ + b * lpf_v1_;
+        v_[n]   = x + damping_ * (lpf_v2_ - x);
     }
 
     /* Advance head; new cycle setup on wrap. */
@@ -544,113 +657,161 @@ void HaloVoice::step_one_physics_index() {
     }
 }
 
-/* ── Resonator-mode injection ──────────────────────────────────── */
-
-void HaloVoice::inject_velocity(int idx, float amount) {
-    if (idx < 0 || idx >= M_) return;
-    v_[idx] += amount;
-}
-
 /* ── Audio block render ───────────────────────────────────────── */
 
-void HaloVoice::fillBlock(float* out, int n_samples,
-                                const float* audio_in) {
+void HaloVoice::fillBlock(float* out, int n_samples) {
     const float fM = (float)M_;
+    const int   M  = M_;
     /* Cap physics rate at one step per audio sample.  At low pitches
-     * (read_inc_ < 1) this is a no-op and physics still runs exactly
-     * "one cycle per audio cycle" — matching the legacy behaviour.
-     * At high pitches (read_inc_ > 1) we'd otherwise do read_inc_
-     * physics steps per audio sample, which scales CPU linearly with
-     * pitch and blows the audio block budget around 8 kHz with all
-     * six voices.  The cap pins per-sample physics CPU to a constant
-     * (≈ 6 × kSampleRate steps/s ≈ 1.4 % of CPU) at the cost of the
-     * physics "evolving" at a fixed M/Fs Hz rate above the cap.
-     * Audio still scans the buffer at the correct pitch — it just
-     * reads a snapshot of more slowly-evolving physics. */
-    float steps_per_sample = read_inc_;
+     * (read_inc_[0] < 1) this is a no-op and physics still runs
+     * exactly one cycle per audio cycle.  At high pitches
+     * (read_inc_[0] > 1) we'd otherwise do read_inc_ physics steps
+     * per audio sample, which scales CPU linearly with pitch and
+     * blows the audio block budget around 8 kHz with all six voices.
+     * The cap pins per-sample physics CPU to a constant
+     * (≈ 6 × kSampleRate steps/s ≈ 1.4 % of CPU).
+     * Note: physics rate is driven by tap 0's increment, not the
+     * detuned taps — they only influence the read pointer, not the
+     * physics simulation rate.  Detune is at most ±~3% so this is a
+     * negligible difference. */
+    float steps_per_sample = read_inc_[0];
     if (steps_per_sample > 1.0f) steps_per_sample = 1.0f;
-    /* xfade_total_ is set per-trigger in commit_trigger (defaults to
-     * kXfadeLen; longer when the slow-attack path is active). */
-    const int   xf_total = (xfade_total_ > 0) ? xfade_total_ : kXfadeLen;
-    const float inv_xf   = 1.0f / (float)xf_total;
+
+    const int   uni_count    = unison_count_;
+    const float uni_norm     = unison_norm_;
+
+    /* Snapshot tap state into stack arrays so the inner loops keep
+     * heads/incs in registers instead of reloading them through the
+     * implicit `this` pointer every iteration. */
+    float head[kMaxUnison];
+    float inc [kMaxUnison];
+    for (int v = 0; v < uni_count; ++v) {
+        head[v] = read_head_[v];
+        inc [v] = read_inc_ [v];
+    }
+
+    /* Per-slot stack mirrors.  Each active slot reads its frozen
+     * buffer with EXACTLY the unison config that was active at its
+     * trigger time — otherwise a count change between triggers would
+     * make the fade-out tail different from what the user just heard.
+     * The mix below sums every active slot's contribution, faded
+     * linearly by its own (remaining/total), so multiple overlapping
+     * tails can ring out simultaneously instead of clobbering each
+     * other on rapid retriggers. */
+    struct SlotMirror {
+        float head[kMaxUnison];
+        float inc [kMaxUnison];
+        float fM;
+        int   M;
+        int   count;
+        float norm;
+        float inv_total;   /* 1 / slot.total */
+        int   total;
+        int   remaining;   /* live, decremented per sample */
+        bool  active;
+    };
+    SlotMirror sm[kNumXfadeSlots];
+    for (int s = 0; s < kNumXfadeSlots; ++s) {
+        const XfadeSlot& slot = xfade_slots_[s];
+        sm[s].active    = (slot.remaining > 0) && (slot.M > 0);
+        sm[s].M         = slot.M;
+        sm[s].fM        = (float)slot.M;
+        sm[s].count     = slot.count;
+        sm[s].norm      = slot.norm;
+        sm[s].total     = slot.total;
+        sm[s].remaining = slot.remaining;
+        sm[s].inv_total = (slot.total > 0) ? (1.0f / (float)slot.total) : 0.0f;
+        if (sm[s].active) {
+            for (int v = 0; v < slot.count; ++v) {
+                sm[s].head[v] = slot.head[v];
+                sm[s].inc [v] = slot.inc [v];
+            }
+        }
+    }
 
     for (int i = 0; i < n_samples; ++i) {
-        /* Advance the wtAttack envelope at audio rate so the slow-
-         * onset window timing is independent of pitch / physics
-         * step rate.  Saturates at 1.0 once the configured attack
-         * time has elapsed. */
         if (attack_env_ < 1.0f) {
             attack_env_ += attack_env_inc_;
             if (attack_env_ > 1.0f) attack_env_ = 1.0f;
         }
 
-        /* Audio: advance read head. */
-        read_head_ += read_inc_;
-        if (read_head_ >= fM) {
-            while (read_head_ >= fM) read_head_ -= fM;
-            if (!std::isfinite(read_head_)) read_head_ = 0.0f;
+        /* New voice render. */
+        float raw = 0.0f;
+        for (int v = 0; v < uni_count; ++v) {
+            float h = head[v] + inc[v];
+            if (h >= fM) h -= fM;
+            head[v] = h;
+            int   r0 = (int)h;
+            int   r1 = r0 + 1;
+            if (r1 >= M) r1 = 0;
+            float rd = h - (float)r0;
+            float q0 = q_[r0];
+            raw += q0 + (q_[r1] - q0) * rd;
         }
-        int   r0 = (int)read_head_;
-        if (r0 < 0 || r0 >= M_) r0 = 0;
-        int   r1 = r0 + 1;
-        if (r1 >= M_) r1 = 0;
-        float rd = read_head_ - (float)r0;
+        raw *= uni_norm;
 
-        /* Resonator mode: inject external audio into v[] at the
-         * audio read position BEFORE physics runs at this index. */
-        if (audio_in) {
-            float amt = audio_in[i] * 0.5f;
-            v_[r0] += amt * (1.0f - rd);
-            v_[r1] += amt * rd;
-        }
+        /* Slot mix.  For each active slot:
+         *   slot_w_new   = (total - remaining + 1) / total   ∈ (0, 1]
+         *   slot_w_old   = 1 - slot_w_new
+         * The new voice's fade-in weight tracks the SMALLEST slot_w_new
+         * across active slots (i.e. the most-recently committed slot),
+         * so the new voice swells in lock-step with the freshest tail
+         * fading out.  When no slots are active, w_new = 1 and the
+         * sample passes through unaltered. */
+        float w_new_min = 1.0f;
+        float old_sum   = 0.0f;
+        for (int s = 0; s < kNumXfadeSlots; ++s) {
+            if (!sm[s].active) continue;
+            const XfadeSlot& slot = xfade_slots_[s];
 
-        float raw = q_[r0] * (1.0f - rd) + q_[r1] * rd;
-        if (!std::isfinite(raw)) raw = 0.0f;
-
-        /* Trigger crossfade against the dying buffer.  Linear blend:
-         * w_new = t,  w_old = 1 - t,  with t = (kXfadeLen -
-         * xfade_remaining + 1) · inv_xf in (0, 1].  A linear
-         * crossfade dips by ~3 dB at the midpoint for uncorrelated
-         * signals, but the previous equal-power form (cos/sin)
-         * required two software trig calls per sample (~200 cycles)
-         * which — across 6 voices × 24 samples × ~21 blocks of
-         * crossfade — pushed the audio ISR past its 500 µs block
-         * budget, audibly underrunning SAI DMA and stalling the
-         * same-priority PWM_OUTS_TIM ISR enough to flicker the
-         * envelope LEDs.  Linear is ~5 cycles per sample, so the
-         * crossfade work is now negligible against the rest of the
-         * audio path. */
-        if (xfade_remaining_ > 0 && xfade_old_M_ > 0) {
-            xfade_old_head_ += xfade_old_inc_;
-            float old_fM = (float)xfade_old_M_;
-            if (xfade_old_head_ >= old_fM) {
-                while (xfade_old_head_ >= old_fM)
-                    xfade_old_head_ -= old_fM;
-                if (!std::isfinite(xfade_old_head_)) xfade_old_head_ = 0.0f;
+            float slot_raw = 0.0f;
+            const int   sM    = sm[s].M;
+            const float sfM   = sm[s].fM;
+            const int   scnt  = sm[s].count;
+            for (int v = 0; v < scnt; ++v) {
+                float h = sm[s].head[v] + sm[s].inc[v];
+                if (h >= sfM) h -= sfM;
+                sm[s].head[v] = h;
+                int   o0 = (int)h;
+                int   o1 = o0 + 1;
+                if (o1 >= sM) o1 = 0;
+                float od = h - (float)o0;
+                float qo0 = slot.q[o0];
+                slot_raw += qo0 + (slot.q[o1] - qo0) * od;
             }
-            int   o0 = (int)xfade_old_head_;
-            if (o0 < 0 || o0 >= xfade_old_M_) o0 = 0;
-            int   o1 = o0 + 1;
-            if (o1 >= xfade_old_M_) o1 = 0;
-            float od = xfade_old_head_ - (float)o0;
-            float old_raw = xfade_old_q_[o0] * (1.0f - od) +
-                            xfade_old_q_[o1] * od;
+            old_raw *= xf_uni_norm;
 
             float w_new = (float)(xf_total - xfade_remaining_ + 1) * inv_xf;
-            if (w_new < 0.0f) w_new = 0.0f;
             if (w_new > 1.0f) w_new = 1.0f;
-            float w_old = 1.0f - w_new;
-            raw = old_raw * w_old + raw * w_new;
+            raw = old_raw * (1.0f - w_new) + raw * w_new;
             xfade_remaining_--;
         }
 
+        if (!std::isfinite(raw)) raw = 0.0f;
         out[i] = raw;
 
-        /* Physics: do `steps_per_sample` work units (fractional). */
         phys_accum_ += steps_per_sample;
         while (phys_accum_ >= 1.0f) {
             step_one_physics_index();
             phys_accum_ -= 1.0f;
+        }
+    }
+
+    for (int v = 0; v < uni_count; ++v) {
+        read_head_[v] = head[v];
+    }
+    /* Write back slot state.  We always update remaining (it counts
+     * down even for slots that were already 0), and update head[]
+     * for slots that were active so their next block's read picks up
+     * exactly where this one left off. */
+    for (int s = 0; s < kNumXfadeSlots; ++s) {
+        XfadeSlot& slot = xfade_slots_[s];
+        if (slot.remaining > 0) {
+            slot.remaining = sm[s].remaining;
+            const int scnt = slot.count;
+            for (int v = 0; v < scnt; ++v) {
+                slot.head[v] = sm[s].head[v];
+            }
         }
     }
 }
@@ -659,12 +820,11 @@ void HaloVoice::fillBlock(float* out, int n_samples,
  * C facade — one static voice per channel, dispatched by index.
  * ─────────────────────────────────────────────────────────────── */
 
-/* Voice array lives in SRAM1 — at 4 × 512 × 4 = 8 KB per voice and
- * NUM_CHANNELS = 6 that's 48 KB, way too big for DTCM (which is also
- * crowded with the codec / DMA / Plaits state).  SRAM1 is plenty
- * large and the latency penalty is negligible: each fillBlock makes
- * sequential strided accesses through q_/v_/wt_orig_, so the cache
- * + prefetcher hide the SRAM1 latency completely. */
+/* The bulk of each voice (~12 KB of params, v_, wt_orig_, LPF state,
+ * staging buffers, xfade snapshot) lives in SRAM1 to keep DTCM
+ * available for the hot q_ buffer (peeled out into dtcm_q[] above).
+ * Each voice's q_ pointer is wired up via bind_buffers() before
+ * init() runs. */
 namespace {
 
 SRAM1DATA HaloVoice g_voices[NUM_CHANNELS];
@@ -678,8 +838,11 @@ inline HaloVoice* voice_at(uint8_t chan) {
 extern "C" {
 
 void halo_init_all(void) {
-    for (uint8_t c = 0; c < NUM_CHANNELS; ++c)
+    for (uint8_t c = 0; c < NUM_CHANNELS; ++c) {
+        /* Order matters: bind first, then init() can memset q_. */
+        g_voices[c].bind_buffers(dtcm_q[c]);
         g_voices[c].init();
+    }
 }
 
 void halo_trigger(uint8_t chan, const float* wave_512, float pitch_hz) {
@@ -706,13 +869,12 @@ void halo_set_noise_color(uint8_t chan, float val)    { if (auto* v = voice_at(c
 void halo_set_wt_attack(uint8_t chan, float val)      { if (auto* v = voice_at(chan)) v->set_wt_attack(val); }
 void halo_set_external_env(uint8_t chan, float val)   { if (auto* v = voice_at(chan)) v->set_external_env(val); }
 
-void halo_inject_velocity(uint8_t chan, int32_t idx, float amount) {
-    if (auto* v = voice_at(chan)) v->inject_velocity((int)idx, amount);
+void halo_set_unison(uint8_t chan, uint8_t count, float spread_amt) {
+    if (auto* v = voice_at(chan)) v->set_unison((int)count, spread_amt);
 }
 
-void halo_fill_block(uint8_t chan, float* out, int32_t n_samples,
-                           const float* audio_in) {
-    if (auto* v = voice_at(chan)) v->fillBlock(out, (int)n_samples, audio_in);
+void halo_fill_block(uint8_t chan, float* out, int32_t n_samples) {
+    if (auto* v = voice_at(chan)) v->fillBlock(out, (int)n_samples);
     else if (out) std::memset(out, 0, (size_t)n_samples * sizeof(float));
 }
 

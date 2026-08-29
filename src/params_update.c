@@ -89,8 +89,6 @@ extern	o_switch	hwSwitch[NUM_SWITCHES];
 extern	o_monoLed 	monoLed[NUM_MONO_LED];
 extern	o_led_cont	led_cont;
 
-extern uint8_t audio_in_gate;
-
 extern const uint8_t ALL_CHANNEL_MASK;
 
 extern	SRAM1DATA o_spherebuf spherebuf;
@@ -354,9 +352,8 @@ void init_param_object(o_params *t_params){
 
 	t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 
-	// Resonator envelope defaults
-	t_params->resonator_attack_freq = 500.0f;  // Fast attack
-	t_params->resonator_decay_freq = 8.0f;     // Slow decay
+	t_params->_reserved_param_a = 0.0f;
+	t_params->_reserved_param_b = 0.0f;
 
 	// EQ defaults (flat)
 	for (chan = 0; chan < 6; chan++)
@@ -458,18 +455,15 @@ static uint8_t last_chord_num_seeds = 0;
 static uint8_t last_chord_num_fills = 0;
 
 /* ── Trigger stability gate ────────────────────────────────────────
- * Two-seed chord mode used to fire two consecutive retriggers when
- * the seeds settled a few ms apart (each seed's NoteFilter snapped
- * independently → two observed quantised-value changes → two
- * triggers).  Gating the trigger fire on "all seed quantised values
- * stable for ≥CHORD_TRIGGER_STABILITY_MS" eliminates this without
- * the value-loss risk of a fixed refractory period: if the user
- * changes a seed *during* the wait, the timer resets and we trigger
- * later with the FINAL value.
+ * Two-seed chord mode coalesces near-simultaneous seed-value changes
+ * by holding the trigger fire until "all seed quantised values
+ * stable for ≥CHORD_TRIGGER_STABILITY_MS".  If the user changes a
+ * seed during the wait the timer resets and we trigger later with
+ * the FINAL value — preferred over a fixed refractory period which
+ * would drop intermediate updates.
  *
  * 5 ms is below perceptual threshold for note-on latency (~20 ms is
- * the usual "instant" bound), and longer than the few-ms inter-seed
- * settling we're trying to coalesce. */
+ * the usual "instant" bound). */
 #define CHORD_TRIGGER_STABILITY_MS  5
 
 /* Per-channel last quantised note observed in the chord detector,
@@ -652,63 +646,6 @@ void cache_uncache_pitch_params(enum CacheUncache cache_uncache)
 
 static uint8_t new_key_armed[NUM_CHANNELS] = {0};
 
-void read_ext_trigs(void)
-{
-	uint8_t chan;
-	uint8_t chans_in_cvgate_mode=0;
-
-	static uint8_t last_trig_level[NUM_CHANNELS+1]={0};
-	uint8_t trig_level[NUM_CHANNELS+1]={0};
-
-	trig_level[0] = (params.key_sw[0]==ksw_KEYS_EXT_TRIG) ? audio_in_gate : (analog[WTSEL_CV].raw_val > 2048);
-	trig_level[1] = analog[DISP_CV].raw_val > 2048;
-	trig_level[2] = analog[DEPTH_CV].raw_val > 2048;
-	trig_level[3] = analog[DISPPAT_CV].raw_val > 2048;
-	trig_level[4] = analog[LATITUDE_CV].raw_val > 2048;
-	trig_level[5] = analog[WTSEL_SPREAD_CV].raw_val > 2048;
-	trig_level[6] = analog[CHORD_CV].raw_val > 2048;
-
-	for (chan=0; chan<NUM_CHANNELS; chan++)
-	{
-		uint8_t is_sustaining = 0;
-		if (params.key_sw[chan]==ksw_KEYS_EXT_TRIG || params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN)
-		{
-			chans_in_cvgate_mode++;
-
-			if (analog_jack_plugged(A_VOCT+chan) || button_pressed(chan)) {
-				if ((trig_level[chan] || button_pressed(chan)) && !last_trig_level[chan])
-				{
-					lfos.cycle_pos[chan] = 0.f;
-					params.note_on[chan] = 1;
-					params.new_key[chan] = 1;
-					new_key_armed[chan] = 0;
-				}
-				if (params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN && (trig_level[chan] || button_pressed(chan)))
-					is_sustaining = 1;
-			}
-		}
-		last_trig_level[chan] = (trig_level[chan] || button_pressed(chan));
-		calc_params.gate_in_is_sustaining[chan] = is_sustaining;
-	}
-
-	//Transpose CV jack must be patched for gate to work on Chord CV
-	if (chans_in_cvgate_mode && analog_jack_plugged(TRANSPOSE_CV))
-	{
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-		{
-			if (trig_level[6] && !last_trig_level[6])
-			{
-				lfos.cycle_pos[chan] = 0.f;
-				params.note_on[chan] = 1;
-				params.new_key[chan] = 1;
-				new_key_armed[chan]	= 0;
-			}
-			if (params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN && trig_level[6])
-				calc_params.gate_in_is_sustaining[chan] = 1;
-		}
-	}
-	last_trig_level[6] = trig_level[6];
-}
 enum SelBusActions {SELBUS_NO_ACTION, SELBUS_TOGGLE_RECALL, SELBUS_TOGGLE_SAVE, SELBUS_STORE_SETTINGS};
 void read_selbus_buttons(void)
 {
@@ -813,13 +750,7 @@ void read_noteon(uint8_t i)
 					new_key_armed[i] = 1;
 					params.new_key[i] = 1;
 					params.note_on[i] = 1;
-					if (params.key_sw[i]==ksw_KEYS_EXT_TRIG)
-						lfos.cycle_pos[i] = 0;
 				}
-				// if (params.key_sw[i]==ksw_KEYS_EXT_TRIG_SUSTAIN) {
-				// 	calc_params.gate_in_is_sustaining[i] = 1;
-				// 	lfos.cycle_pos[i] = 0;
-				// }
 			}
 			else //button_released(i)
 			{
@@ -988,15 +919,6 @@ void set_master_gain(void)
 
 float read_vca_cv(uint8_t chan)
 {
-	// Resonator mode: use coherence as VCA instead of CV input
-	// Square to suppress weak coherences, amplify strong ones
-	// Disable for Plaits engines (bank >= 100)
-	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY) && (params.wt_bank[chan] < 100)) {
-		float coh = wt_osc.coherence_env[chan];
-		coh = _CLAMP_F(coh-0.005, 0.0f, 2.0f);
-		return coh * RESONATOR_GAIN;
-	}
-
 	//No VCA CV if switch is set to V/oct, or if Key Mode is Key or Note
 	if ((params.voct_switch_state[chan] == SW_VOCT) || (params.key_sw[chan] != ksw_MUTE))
 		return 1.0;
@@ -1267,18 +1189,6 @@ void apply_keymode(uint8_t chan, enum MuteNoteKeyStates new_keymode)
 			//params.indiv_scale[chan] = params.indiv_scale_buf[chan];
 		}
 
-		//Switched to Ext Trig
-		else if (new_keymode == ksw_KEYS_EXT_TRIG)
-		{
-			params.indiv_scale[chan] = sclm_NONE;
-			force_wt_interp_update(chan);
-		}
-		else if (new_keymode == ksw_KEYS_EXT_TRIG_SUSTAIN)
-		{
-			calc_params.gate_in_is_sustaining[chan] = 0;
-			force_wt_interp_update(chan);
-		}
-
 		params.key_sw[chan] = new_keymode;
 	}
 
@@ -1358,7 +1268,7 @@ void update_pitch(uint8_t chan)
 	int8_t oct;
 	int16_t oct_clamped;
 
-	if ( params.key_sw[chan]==ksw_MUTE || params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN || params.key_sw[chan]==ksw_KEYS_EXT_TRIG || params.new_key[chan] || ((params.key_sw[chan] == ksw_NOTE) && !params.note_on[chan]) )
+	if ( params.key_sw[chan]==ksw_MUTE || params.new_key[chan] || ((params.key_sw[chan] == ksw_NOTE) && !params.note_on[chan]) )
 	{
 		// Calculate pitch multiplier from individual jack 1V/oct CV
 		if ((params.voct_switch_state[chan] == SW_VOCT) || (params.key_sw[chan] != ksw_MUTE))
@@ -1461,6 +1371,15 @@ void update_wt_head_pos_inc(uint8_t chan){
 			wt_osc.wt_head_pos_inc[chan][v] = 0.0f;
 		}
 	}
+
+	/* Forward unison parameters into the Halo voice engine — the
+	 * audible unison is produced by halo_voice's per-tap read
+	 * pointers (see HaloVoice::set_unison() in src/halo_voice.cpp).
+	 * set_unison() is cheap (O(kMaxUnison) FMAs + one sqrtf) and
+	 * only called on pitch updates. */
+	halo_set_unison(chan,
+	                params.unison_voice_count[chan],
+	                params.unison_spread_amt[chan]);
 }
 
 /*** Move to params_pitch.c ***/
@@ -2491,25 +2410,9 @@ void update_spread(int16_t tmp){
 	start_ongoing_display_transpose();
 }
 
-static uint8_t any_key_sw(enum MuteNoteKeyStates state);
-static uint8_t any_key_sw(enum MuteNoteKeyStates state) {
-	if (   params.key_sw[0]==state
-		|| params.key_sw[1]==state
-		|| params.key_sw[2]==state
-		|| params.key_sw[3]==state
-		|| params.key_sw[4]==state
-		|| params.key_sw[5]==state)
-		return 1;
-	else
-		return 0;
-}
-
 void update_spread_cv(void)
 {
-	if (analog_jack_plugged(TRANSPOSE_CV) && (any_key_sw(ksw_KEYS_EXT_TRIG) || any_key_sw(ksw_KEYS_EXT_TRIG_SUSTAIN)))
-		params.spread_cv = 0;
-	else
-		params.spread_cv = (int8_t)((float)(analog[CHORD_CV].bracketed_val)  * (float)(NUM_CHORDS) / (4095.0*1.04));//4% down-scaling allows black keys to select chords (C#0 to C#5)
+	params.spread_cv = (int8_t)((float)(analog[CHORD_CV].bracketed_val)  * (float)(NUM_CHORDS) / (4095.0*1.04));//4% down-scaling allows black keys to select chords (C#0 to C#5)
 }
 
 void combine_transpose_spread(void){
@@ -2625,9 +2528,7 @@ float compute_transposition(int32_t transpose)
  * Without this, the CV-driven path would overwrite any encoder movement on
  * the very next tick, making the encoder useless while a CV is patched.
  *
- * The bases live inside `o_params` (saved with presets, vH+); these macros
- * are the legacy spelling so the rest of this file can keep its existing
- * arithmetic style. */
+ * The bases live inside `o_params` (saved with presets, vH+). */
 #define halo_damping_base      (params.halo_damping)
 #define halo_noise_level_base  (params.halo_noise_level)
 #define halo_noise_color_base  (params.halo_noise_color)
@@ -3000,21 +2901,15 @@ void update_wt_interp(void)
 		}
 
 		/* Halo architecture: wt_osc.mc[][chan][] is the physics
-		 * double-buffer, NOT a wavetable target.  The legacy 8-corner
-		 * blit performed by interp_wt() below would overwrite the
-		 * channel's active physics buffer with raw waveform data and
-		 * flip buffer_sel — corrupting the audio output every time the
-		 * bank changes (req_wt_interp_update fires from
-		 * update_wt_bank()).  Halo sources its waveform via the
-		 * separate seed_cache[][2][] (loaded by refresh_ring_seed_caches
-		 * in oscillator.c), which is keyed on (active_seed_idx,
-		 * active_seed_bank) and already handles bank changes coherently.
+		 * double-buffer, NOT a wavetable target.  Halo sources its
+		 * waveform via the separate seed_cache[][2][] (loaded by
+		 * refresh_ring_seed_caches in oscillator.c), keyed on
+		 * (active_seed_idx, active_seed_bank).
 		 *
-		 * Skip the entire flash-load + interp pipeline in PLAY mode and
-		 * just consume the request.  WTEDITING / WT_RECORDING still need
+		 * Skip the flash-load + interp pipeline in PLAY mode and just
+		 * consume the request.  WTEDITING / WT_RECORDING still need
 		 * interp_wt because they render sphere preview into mc[] for
-		 * their own visualization (those modes don't run Halo
-		 * physics). */
+		 * visualization (those modes don't run Halo physics). */
 		if (ui_mode == PLAY) {
 			wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_NONE;
 			state[chan] = WT_FLASH_NO_ACTION;
@@ -3221,10 +3116,7 @@ void read_wtsel(int8_t wtsel)
 
 
 void read_wtsel_cv(void){
-	if ((params.key_sw[0]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(A_VOCT))
-		params.wtsel_cv = 0;
-	else
-		params.wtsel_cv = analog[WTSEL_CV].bracketed_val * num_spheres_filled / 4095;
+	params.wtsel_cv = analog[WTSEL_CV].bracketed_val * num_spheres_filled / 4095;
 }
 
 
@@ -3249,11 +3141,10 @@ void read_wtsel_spread(void)
 
 void read_wtsel_spread_cv(void)
 {
-	/* Legacy wavetable-spread CV path is disabled: the
-	 * WTSEL_SPREAD_CV jack now drives the Halo wtAttack
-	 * parameter exclusively (see case 12 in the polling switch).
-	 * Force params.wtsel_spread_cv to zero so update_wtsel()
-	 * applies no offset on top of the wt-spread encoder. */
+	/* The WTSEL_SPREAD_CV jack drives the Halo wtAttack parameter
+	 * (see case 12 in the polling switch); pin wtsel_spread_cv to
+	 * zero so update_wtsel() applies no offset on top of the
+	 * wt-spread encoder. */
 	params.wtsel_spread_cv = 0;
 }
 
@@ -3384,17 +3275,11 @@ void update_wt_nav_cv(uint8_t wt_dim)
 {
 	switch (wt_dim) {
 		case 0:
-			if ((params.key_sw[2]==ksw_KEYS_EXT_TRIG || params.key_sw[2]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(C_VOCT))
-				params.wt_nav_cv[0] = 0;
-			else
-				params.wt_nav_cv[0] = (float)(analog[DEPTH_CV].bracketed_val) * (float)WT_DIM_SIZE / 4095.0; //0..3
+			params.wt_nav_cv[0] = (float)(analog[DEPTH_CV].bracketed_val) * (float)WT_DIM_SIZE / 4095.0; //0..3
 			break;
 
 		case 1:
-			if ((params.key_sw[4]==ksw_KEYS_EXT_TRIG || params.key_sw[4]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(E_VOCT))
-				params.wt_nav_cv[1] = 0;
-			else
-				params.wt_nav_cv[1] = (float)(analog[LATITUDE_CV].bracketed_val) * (float)WT_DIM_SIZE / 4095.0; //0..3
+			params.wt_nav_cv[1] = (float)(analog[LATITUDE_CV].bracketed_val) * (float)WT_DIM_SIZE / 4095.0; //0..3
 			break;
 
 		case 2:
@@ -3409,18 +3294,12 @@ void update_wt_nav_cv(uint8_t wt_dim)
 
 
 void update_wt_disp(uint8_t clear_lpf){
-	/* Legacy SWN wavetable dispersion / dispersion-pattern paths are
-	 * disabled — sec_DISPERSION (push+depth) and sec_DISPPATT
-	 * (push+lat) encoders, plus the DISP_CV and DISPPAT_CV jacks,
-	 * now drive the Halo lpfCutoff and noiseColor parameters
-	 * (cases 4 and 14 in read_freq()).  Letting the legacy code
-	 * pop the same encoder queues here would race the new path
-	 * (whichever runs first wins the ticks), and writing
-	 * params.dispersion_cv / params.disppatt_cv would still warp
-	 * the wavetable seed-position even though no user UI now
-	 * shows it.  Pin the legacy params to zero so calc_wt_pos()
-	 * sees no dispersion / pattern contribution, regardless of
-	 * how this function is called. */
+	/* sec_DISPERSION (push+depth) and sec_DISPPATT (push+lat)
+	 * encoders, plus the DISP_CV and DISPPAT_CV jacks, drive the
+	 * Halo lpfCutoff and noiseColor parameters (cases 4 and 14 in
+	 * read_freq()).  Pin params.dispersion_cv / params.disppatt_cv
+	 * to zero so calc_wt_pos() sees no dispersion contribution from
+	 * any stray write to those fields. */
 	(void)clear_lpf;
 	params.dispersion_cv = 0.0f;
 	params.disppatt_cv   = 0;
@@ -3464,13 +3343,10 @@ void calc_wt_pos(uint8_t chan){
 	total_browse = params.wt_browse_step_pos_enc[chan] + browse_cv;
 	get_browse_nav(total_browse, &browse_nav[0], &browse_nav[1], &browse_nav[2]);
 
-	// DISPERSION — disabled.  The legacy SWN dispersion / dispersion-
-	// pattern paths have been retired in favour of the Halo
-	// lpfCutoff (push+depth, DISP_CV) and noiseColor (push+lat,
-	// DISPPAT_CV) parameters.  Force every input to zero here so any
-	// stale preset value, encoder bump elsewhere, or live CV doesn't
-	// silently warp the seed-position selection through the
-	// DISP_PATTERN lookup.
+	// Dispersion is unused — its encoders / CVs drive Halo lpfCutoff
+	// and noiseColor instead (cases 4 and 14 in read_freq()).  Force
+	// inputs to zero so stale preset values can't warp seed-position
+	// selection through the DISP_PATTERN lookup.
 	(void)disppat_cv;
 	disp_cv      = 0.0f;
 	total_disp   = 0.0f;

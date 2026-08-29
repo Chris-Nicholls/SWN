@@ -42,14 +42,14 @@ void Reverb_Init(void) {
     std::memset(reverb_buffer, 0, sizeof(reverb_buffer));
 
     reverb.Init(reverb_buffer);
-    // amount = 1.0: we feed pre-scaled send signals, output is pure wet
-    reverb.set_amount(1.0f);
+    // amount = 1.0: we feed pre-scaled send signals, 0 is full wet, 1 is full dry
+    reverb.set_amount(0.8f);
     // input_gain: drive into the tank. With correct normalisation the
     // send bus is ±1.0 at max. 0.5 gives ±1.0 peak in the tank (the
     // ×2 tap extraction makes the wet output ≈ unity relative to dry).
     reverb.set_input_gain(0.5f);
     // Parameters — overridden by preset once loaded
-    reverb.set_time(0.6f);
+    reverb.set_time(0.8f);
     reverb.set_diffusion(0.625f);
     reverb.set_lp(0.7f);
 }

@@ -238,10 +238,9 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 			t_params->pan[i] = default_pan(i);
 	}
 
-	// Any version before 'D': Initialize resonator envelope params
 	if (version < preset_signature_v2_x2[2]) {
-		t_params->resonator_attack_freq = 500.0f;
-		t_params->resonator_decay_freq = 8.0f;
+		t_params->_reserved_param_a = 0.0f;
+		t_params->_reserved_param_b = 0.0f;
 	}
 	// Any version before 'E': Initialize EQ to flat
 	if (version < preset_signature_vE[2]) {
@@ -275,6 +274,11 @@ void update_preset_version(char version, o_params *t_params, o_lfos *t_lfos)
 			t_params->halo_wt_attack[i]   = 0.0f;
 			t_params->halo_lpf_cutoff[i]  = 24;
 		}
+	}
+
+	for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+		if ((unsigned)t_params->key_sw[i] >= NUM_MUTE_NOTE_KEY_STATES)
+			t_params->key_sw[i] = ksw_KEYS;
 	}
 }
 

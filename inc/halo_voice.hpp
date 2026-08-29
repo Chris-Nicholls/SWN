@@ -1,8 +1,5 @@
 /*
- * halo_voice.hpp — Halo voice with streaming/amortised
- * physics.  This is the active firmware engine; the legacy batch
- * advance_cycle path in inc/halo.h has been retired (it lives
- * on only as Engine A in the host A/B harness under app/cpp_test/).
+ * halo_voice.hpp — Halo voice with streaming/amortised physics.
  *
  * Algorithm
  * ─────────
@@ -15,7 +12,7 @@
  *    constant — no M-sample wrap-time spike.
  *  - Velocity buffer v[M] persists across cycles.  Coloured-noise
  *    injection state restarts each phys cycle (matches the JS
- *    reference and the legacy batch path).
+ *    reference).
  *  - Cascaded 2-pole LPF (q at full cutoff, v at half) runs in
  *    streaming form: the pole state is carried sample-by-sample
  *    inside step_one, naturally continuous across all index
@@ -26,18 +23,6 @@
  *  - Trigger is the only place the buffer changes abruptly; we
  *    snapshot the dying q[] into a 32-sample shadow and read-side
  *    crossfade for kXfadeLen samples to mask the seed step.
- *
- * Why
- * ───
- *  - Host harness (app/cpp_test/) confirmed sonic parity with the
- *    legacy double-buffer engine across 17 stress scenarios, with
- *    BETTER behaviour on hard-saw / inject cases (max sample step
- *    0.553 vs 0.787).
- *  - The legacy path put a synchronous advance_cycle inside the
- *    audio ISR at every wrap; with 6 voices this could blow the
- *    1.33 ms audio-block budget (yellow led[2] in CPU-test mode →
- *    DAC underrun click).  Streaming amortises that cost evenly,
- *    so the worst case equals the average.
  */
 
 #pragma once
@@ -57,6 +42,10 @@ public:
     static constexpr float kNonlin      = 0.01f;
     static constexpr int   kMmin        = 96;
     static constexpr int   kMstep       = 16;
+    /* Maximum simultaneous unison sub-voices per channel.  Each sub-voice
+     * is a read tap on the same q[] buffer with its own detune ratio;
+     * the physics simulation is shared.  See set_unison(). */
+    static constexpr int   kMaxUnison   = 6;
 
     /* Trigger crossfade length.  At 48 kHz, 512 samples ≈ 10.7 ms.
      *
@@ -72,8 +61,18 @@ public:
      * to do any abrupt gain reduction. */
     static constexpr int   kXfadeLen    = 512;
 
+    /* Bind the per-voice DTCM-resident hot position buffer.  Must be
+     * called BEFORE init() — init() memsets q_ via the bound pointer.
+     * q_ is peeled out of the HaloVoice instance so the position
+     * buffer (the hottest read target — every unison tap reads it
+     * twice per audio sample) lives in DTCM with zero wait states.
+     * v_ remains inline in SRAM1: it's only touched once per physics
+     * step, so cache misses are amortised, and putting it in DTCM
+     * along with q_ would overflow the 128 KB DTCM budget. */
+    void bind_buffers(float* q_buf);
+
     /* No constructors / destructors run on STM32 BSS instances at
-     * boot — call init() once from init_wt_osc(). */
+     * boot — call init() once from init_wt_osc(), AFTER bind_buffers(). */
     void init();
 
     /* Trigger / re-trigger.  Picks a new pitch-adapted M, resamples
@@ -126,32 +125,63 @@ public:
                                                  * envelope (0.5..1) */
     void set_external_env(float v)    { external_env_ = v; }
 
-    /* Resonator mode: external audio adds to v[idx] before physics.
-     * Safe to call from the audio ISR; the cpp class' fillBlock will
-     * pick up the deposit on its next physics step at that index. */
-    void inject_velocity(int idx, float amount);
+    /* Configure unison.  count: 1..kMaxUnison (clamped).  spread_amt:
+     * 0..1 (clamped) — at 1.0 the outer taps detune by ~±1 semitone.
+     * The detune ratios are taken from a fixed factor table inside
+     * halo_voice.cpp; see set_unison() for details.  Cheap to call —
+     * recomputes read-tap increments and the 1/√N normaliser, but
+     * leaves q[]/v[]/LPF state alone.  Newly-activated taps are
+     * phase-aligned with tap 0 to avoid a click on count increase
+     * mid-note. */
+    void set_unison(int count, float spread_amt);
 
-    /* Render n_samples of audio into out[].  If audio_in is non-null,
-     * each output sample i additionally injects audio_in[i] * 0.5
-     * into v[] at the audio read position (resonator mode). */
-    void fillBlock(float* out, int n_samples,
-                   const float* audio_in = nullptr);
+    /* Render n_samples of audio into out[]. */
+    void fillBlock(float* out, int n_samples);
 
     int   phys_n()    const { return M_; }
     float pitch_hz()  const { return pitch_hz_; }
 
 private:
-    /* Position / velocity / per-cycle injection source. */
-    float q_[kBufLen];
-    float v_[kBufLen];
-    float wt_orig_[kBufLen];
+    /* Position buffer — the hot read target.  Pointer into the
+     * DTCM-resident dtcm_q[] arrays (see bind_buffers in
+     * halo_voice.cpp).  Every unison tap reads q_[r0] and q_[r1]
+     * once per audio sample, so DTCM's zero-wait-state access
+     * directly removes the SRAM1 stall on the most-frequent read.
+     *
+     * v_ and wt_orig_ stay inline (i.e. in SRAM1 with the cold
+     * voice state).  v_ is only touched once per physics step (once
+     * per audio sample at peak pitch); wt_orig_ once per phys cycle. */
+    float* q_ = nullptr;
+    float  v_[kBufLen];
+    float  wt_orig_[kBufLen];
 
     int   M_         = kBufLen;
 
-    /* Audio read head. */
-    float read_head_ = 0.0f;
-    float read_inc_  = 1.0f;
+    /* Audio read heads.  Up to kMaxUnison taps share q[] but each has
+     * its own read position and per-sample increment.  When unison is
+     * disabled (unison_count_ = 1) only entry [0] is used (one lerp
+     * per sample).
+     *
+     * read_inc_[v] = pitch_hz_ * unison_detune_[v] * M_ / kSampleRate;
+     * recomputed by recompute_read_inc() any time pitch, M_, or the
+     * detune ratios change. */
+    float read_head_[kMaxUnison] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float read_inc_ [kMaxUnison] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     float pitch_hz_  = 110.0f;
+
+    /* Unison configuration.
+     *   unison_count_      number of active read taps (1..kMaxUnison).
+     *   unison_spread_     stored 0..1 spread amount (encoder/CV value).
+     *   unison_detune_[v]  per-tap pitch ratio (1.0 = un-detuned).
+     *                       Tap 0 is always 1.0 so one voice stays on
+     *                       pitch and the others spread around it.
+     *   unison_norm_       output normaliser, 1/sqrt(count) so summed
+     *                       N-tap output keeps roughly constant power
+     *                       relative to the single-tap case. */
+    int   unison_count_  = 1;
+    float unison_spread_ = 0.0f;
+    float unison_detune_[kMaxUnison] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    float unison_norm_   = 1.0f;
 
     /* Physics writer. */
     int   phys_head_  = 0;
@@ -159,6 +189,7 @@ private:
 
     /* Per-cycle latched coefficients (refreshed at phys_head wrap). */
     float dtt_         = kDt;
+    float dtt_decay_   = kDt * 0.1f;   /* cached dtt_ * 0.1 (used per step) */
     float inj_amt_     = 0.0f;
     float wt_amp_      = 0.0f;
     float noise_amp_   = 0.0f;
@@ -173,10 +204,14 @@ private:
     float inj_dc_full_    = 0.0f;
     float inj_dc_partial_ = 0.0f;
 
-    /* Streaming cascaded 2-pole LPF state. */
+    /* Streaming cascaded 2-pole LPF state.  lpf_b_q_ / lpf_b_v_ are
+     * the cached (1 - alpha) factors used in the IIR update; recompute
+     * them in recompute_lpf_coefs() so the per-sample physics step
+     * doesn't have to do the subtraction every call. */
     float lpf_q1_ = 0.0f, lpf_q2_ = 0.0f;
     float lpf_v1_ = 0.0f, lpf_v2_ = 0.0f;
     float lpf_alpha_q_ = 0.0f, lpf_alpha_v_ = 0.0f;
+    float lpf_b_q_ = 1.0f, lpf_b_v_ = 1.0f;
     bool  lpf_dirty_ = true;
 
     /* User parameters. */
@@ -188,7 +223,7 @@ private:
 
     /* wt_attack split into two derived controls; both updated by
      * set_wt_attack().
-     *   inj_blend_       (0..1)  - injection mix used today
+     *   inj_blend_       (0..1)  - injection mix
      *                              (param 0..0.5 maps to 0..1; >0.5 stays 1)
      *   attack_env_inc_  per-sample step that drives attack_env_ from 0→1.
      *                              Param  0..0.5 → instant (inc = 1);
@@ -202,19 +237,36 @@ private:
     /* RNG (xorshift32). */
     uint32_t rng_state_ = 0x12345678u;
 
-    /* Trigger crossfade shadow.  The old q[] keeps "playing" via
-     * xfade_old_head_ for xfade_total_ samples after a trigger and
-     * is mixed linearly with the freshly-seeded q[].  Default total
-     * is kXfadeLen but the slow-attack path (wt_attack > 0.5)
-     * stretches it to match the attack-envelope duration so the old
-     * note doesn't get cut off in 10 ms while the new note takes
-     * up to 2 s to reach full amplitude. */
-    float xfade_old_q_[kBufLen];
-    int   xfade_remaining_ = 0;
-    int   xfade_total_     = kXfadeLen;
-    int   xfade_old_M_     = 0;
-    float xfade_old_head_  = 0.0f;
-    float xfade_old_inc_   = 0.0f;
+    /* Trigger crossfade shadow slots.  Each slot is an independent
+     * snapshot of a previously-live q[] plus the unison/read state
+     * that was active at the moment its trigger committed.  The slot
+     * keeps "playing" by reading its own frozen buffer through its
+     * own per-tap heads, with its amplitude linearly faded out over
+     * `total` samples (long-attack triggers stretch `total` to match
+     * the attack-envelope duration so the dying note isn't cut off
+     * in 10 ms while the new voice takes up to 2 s to reach full
+     * amplitude).
+     *
+     * Multiple slots so rapid retriggers don't clobber the still-
+     * audible tail of the previous trigger: commit_trigger() picks
+     * the slot with the smallest `remaining` (so an idle slot is
+     * always preferred over an active one).  When triggers fire
+     * faster than tails fade out, the oldest still-audible tail
+     * gets evicted — which is the same as the old single-slot
+     * behaviour for back-to-back triggers but preserves overlapping
+     * tails for spaced-out retriggers. */
+    static constexpr int kNumXfadeSlots = 2;
+    struct XfadeSlot {
+        float q[kBufLen];
+        float head[kMaxUnison];
+        float inc [kMaxUnison];
+        int   M         = 0;
+        int   count     = 1;
+        float norm      = 1.0f;
+        int   total     = kXfadeLen;
+        int   remaining = 0;       /* 0 ⇒ inactive */
+    };
+    XfadeSlot xfade_slots_[kNumXfadeSlots];
 
     /* Trigger staging.  prepare_trigger() writes the new seed buffer
      * and resampled wavetable here while audio is still reading the
@@ -272,11 +324,10 @@ void    halo_set_noise_level(uint8_t chan, float v);
 void    halo_set_noise_color(uint8_t chan, float v);
 void    halo_set_wt_attack(uint8_t chan, float v);
 void    halo_set_external_env(uint8_t chan, float v);
+void    halo_set_unison(uint8_t chan, uint8_t count, float spread_amt);
 
-void    halo_inject_velocity(uint8_t chan, int32_t idx, float amount);
 void    halo_fill_block(uint8_t chan,
-                              float* out, int32_t n_samples,
-                              const float* audio_in);
+                              float* out, int32_t n_samples);
 
 int32_t halo_phys_n(uint8_t chan);
 

@@ -462,7 +462,7 @@ void halo_seed_lerp(o_halo *rs, float *q,
      * smaller-M note. */
     memset(rs->v, 0, sizeof(rs->v));
 
-    /* LPF state reset (legacy advance_cycle path). */
+    /* LPF state reset for the advance_cycle path. */
     int Mclamped = M;
     if (Mclamped < RS_M_MIN || Mclamped > RS_N) Mclamped = RS_N;
     float seed_last = (Mclamped > 0) ? q[Mclamped - 1] : 0.0f;
@@ -683,7 +683,7 @@ void halo_start_phys_cycle(o_halo *rs, const float *q) {
     if (N < RS_M_MIN || N > RS_N) N = RS_N;
 
     /* dtt depends on q[0], evaluated at the moment we start a new
-     * cycle.  Same clamp as the legacy advance_cycle. */
+     * cycle.  Same clamp as advance_cycle. */
     rs->cycle_dtt = clampf(RS_DT + q[0] * RS_DT * 0.5f, 0.005f, 0.05f);
 
     /* Injection coefficients — match advance_cycle's per-cycle derivation
@@ -711,7 +711,7 @@ void halo_start_phys_cycle(o_halo *rs, const float *q) {
         rs->cycle_damp_scale = 0.0f;
     }
 
-    /* Coloured-noise filter restarts each cycle, matching JS / legacy. */
+    /* Coloured-noise filter restarts each cycle, matching the JS reference. */
     rs->cycle_noise_state = 0.0f;
 
     /* Promote last cycle's running sums to "the mean to subtract this

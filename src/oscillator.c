@@ -73,7 +73,6 @@ extern o_analog 		analog[NUM_ANALOG_ELEMENTS];
 
 extern o_recbuf 		recbuf;
 __attribute__((aligned(32))) o_wt_osc	wt_osc;
-uint8_t 				audio_in_gate;
 
 /* Physics-cost diagnostic — peak duration of one halo_advance_cycle()
  * call in DWT cycles.  Now updated from the audio ISR (which owns the
@@ -109,12 +108,10 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	static float 	prev_pan[NUM_CHANNELS] = {0.f};
 	float 			interpolated_pan, pan_inc;
 
-	float 			audio_in_sum = 0.0f;
-	static uint8_t	audio_gate_ctr=0;
-
-	// Waveform-in: external audio excites the Halo velocity buffer
-	uint8_t			resonator_mode_active;
-	float			audio_in_buffer[MONO_BUFSZ];
+	/* Waveform-in jack samples, only populated when audiomon_status
+	 * is set (WT recording / monitoring screens) so the user can hear
+	 * the input while staging a wavetable rec. */
+	int32_t			audio_in_raw[MONO_BUFSZ];
 	
 	// Per-channel accumulation buffer
 	float			temp_buffer[MONO_BUFSZ];
@@ -122,19 +119,25 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	// Reverb send accumulation (wavetable channels only; cleared each block)
 	float			reverb_send_L[MONO_BUFSZ] = {0.f};
 	float			reverb_send_R[MONO_BUFSZ] = {0.f};
+	/* Set if any channel actually contributed audio to the reverb send
+	 * bus (chan_wet > 0.001f).  When clear we skip the whole reverb
+	 * processing block — Reverb_Process + the pre-saturator + the
+	 * output add together cost ~80 µs in the audio ISR.  Reverb is
+	 * frequently switched off entirely (chan_send=0 on every channel),
+	 * which makes that 80 µs pure overhead. */
+	uint8_t			any_reverb_active = 0;
 
 	oscout_status = 	((ui_mode != WTRECORDING) && (ui_mode != WTMONITORING) && (ui_mode != WTREC_WAIT));
 	audiomon_status = 	((ui_mode == WTRECORDING) || (ui_mode == WTMONITORING) || (ui_mode == WTREC_WAIT) || (ui_mode == WTTTONE));
 
-	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && oscout_status;
-
-	// 1. UNIFIED INPUT READING
-	int32_t *src_ptr = src;
-	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-		audio_in_sample = convert_s24_to_s32(*src_ptr++);
-		src_ptr++; // ignore right
-		audio_in_buffer[i_sample] = (float)audio_in_sample / 8388608.0f;
-		if (audio_in_sample < 0) audio_in_sum += (float)audio_in_sample;
+	// 1. UNIFIED INPUT READING — only needed for the audiomon path.
+	if (audiomon_status) {
+		int32_t *src_ptr = src;
+		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
+			audio_in_sample = convert_s24_to_s32(*src_ptr++);
+			src_ptr++; // ignore right
+			audio_in_raw[i_sample] = audio_in_sample;
+		}
 	}
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
@@ -208,13 +211,12 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 		prev_new_key[chan] = params.new_key[chan];
 
 		{
-			// --- RINGSTRING PATH ---
+			// --- HALO PATH ---
 			// Trigger detection runs in the audio ISR (priority 0,0); the
 			// physics is rendered by the cpp-class voice (streaming /
 			// amortised across audio samples) via halo_fill_block.
 			// All buffer/flip/crossfade machinery moved INSIDE the class;
-			// here we only set the trigger flag and drive optional
-			// resonator-mode audio injection.
+			// here we only set the trigger flag.
 			o_halo *rs = &wt_osc.halo_state[chan];
 
 			uint8_t do_reseed = 0;
@@ -264,21 +266,11 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			}
 
 			// Render this block's audio.  fillBlock handles the read head,
-			// streaming physics, trigger crossfade, and (when audio_in is
-			// non-null) the resonator-mode external-audio injection into
-			// v[] at the audio read position.
-			float voice_buf[MONO_BUFSZ];
-			const float *audio_in_for_inject =
-				resonator_mode_active ? audio_in_buffer : (const float *)0;
-			halo_fill_block(chan, voice_buf, MONO_BUFSZ, audio_in_for_inject);
-
-			// Scale ±1.0 → ±32768 for the downstream level/pan/reverb path.
-			// NaN guard before the float→int32 cast.
-			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-				float raw = voice_buf[i_sample];
-				if (__builtin_expect(!__builtin_isfinite(raw), 0)) raw = 0.0f;
-				temp_buffer[i_sample] = raw * 32768.0f;
-			}
+			// streaming physics, and trigger crossfade, and writes
+			// samples in the unified ±1.0 float scale used throughout
+			// the rest of the audio pipeline.  HaloVoice::fillBlock
+			// clamps non-finite samples to 0 before writing.
+			halo_fill_block(chan, temp_buffer, MONO_BUFSZ);
 		}
 
 		// LPG Processing (keep for amplitude shaping)
@@ -296,34 +288,68 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 		// Equal-power crossfade: dry^2 + wet^2 = 1 → constant power
 		float chan_dry = sqrtf(1.0f - chan_send);
 		float chan_wet = sqrtf(chan_send);
+		uint8_t chan_has_wet = (chan_wet > 0.001f);
+		if (chan_has_wet) any_reverb_active = 1;
 
-		// Optimized Mixing Loop: 4-sample blocks with vectorized math
-		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
-			float avg_level = interpolated_level + (level_inc * 1.5f); // Halfway through the 4-sample block
-			float avg_pan = interpolated_pan + (pan_inc * 1.5f);
-			
-			float32_t block[4];
-			float32_t pan_L[4];
-			float32_t pan_R[4];
+		/* Fused mixing loop: gain, pan, dry/wet split, accumulate into
+		 * the output and reverb-send buses in one inline pass.  Replaces
+		 * 5×arm_scale_f32 + 2–4×arm_add_f32 per 4-sample sub-block.  The
+		 * per-call setup of CMSIS-DSP at n=4 dominates the actual work,
+		 * so a straight C loop with FPU-vectorised muladd is materially
+		 * faster on Cortex-M7.  Level and pan are still held constant
+		 * inside each 4-sample block (matching the previous behaviour);
+		 * the gain coefficients are pre-multiplied once per sub-block.
+		 *
+		 * calc_params.level[] is a 0..4095 slider value; the inverse
+		 * scale is folded into the level recurrence so the output bus
+		 * stays in the unified ±1.0 scale with no per-sample mul.
+		 *
+		 * The dry- and dry+wet inner loops are split out to keep the
+		 * sub-block branch predicted on chan_has_wet only once per
+		 * channel (instead of every 4 samples) and to let the wet
+		 * gains drop out of the dry-only path entirely.
+		 */
+		const float kInvLevelMax = 1.0f / 4095.0f;
+		float avg_level      = (interpolated_level + level_inc * 1.5f) * kInvLevelMax;
+		float avg_pan        = interpolated_pan   + pan_inc   * 1.5f;
+		const float lvl_step = level_inc * 4.0f * kInvLevelMax;
+		const float pan_step = pan_inc   * 4.0f;
 
-			arm_scale_f32(&temp_buffer[i_sample], avg_level, block, 4);
-			arm_scale_f32(block, avg_pan * chan_dry, pan_L, 4);
-			arm_scale_f32(block, (1.0f - avg_pan) * chan_dry, pan_R, 4);
+		if (chan_has_wet) {
+			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
+				float gL = avg_level * avg_pan;
+				float gR = avg_level - gL;            /* = avg_level*(1-avg_pan) */
+				float gL_dry = gL * chan_dry;
+				float gR_dry = gR * chan_dry;
+				float gL_wet = gL * chan_wet;
+				float gR_wet = gR * chan_wet;
 
-			arm_add_f32(&output_buffer_evens[i_sample], pan_L, &output_buffer_evens[i_sample], 4);
-			arm_add_f32(&output_buffer_odds[i_sample], pan_R, &output_buffer_odds[i_sample], 4);
+				for (int j = 0; j < 4; j++) {
+					float t = temp_buffer[i_sample + j];
+					output_buffer_evens[i_sample + j] += t * gL_dry;
+					output_buffer_odds [i_sample + j] += t * gR_dry;
+					reverb_send_L      [i_sample + j] += t * gL_wet;
+					reverb_send_R      [i_sample + j] += t * gR_wet;
+				}
 
-			if (chan_wet > 0.001f) {
-				float32_t snd_L[4];
-				float32_t snd_R[4];
-				arm_scale_f32(block, avg_pan * chan_wet, snd_L, 4);
-				arm_scale_f32(block, (1.0f - avg_pan) * chan_wet, snd_R, 4);
-				arm_add_f32(&reverb_send_L[i_sample], snd_L, &reverb_send_L[i_sample], 4);
-				arm_add_f32(&reverb_send_R[i_sample], snd_R, &reverb_send_R[i_sample], 4);
+				avg_level += lvl_step;
+				avg_pan   += pan_step;
 			}
+		} else {
+			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
+				float gL = avg_level * avg_pan;
+				float gL_dry = gL * chan_dry;
+				float gR_dry = (avg_level - gL) * chan_dry;
 
-			interpolated_level += level_inc * 4;
-			interpolated_pan += pan_inc * 4;
+				for (int j = 0; j < 4; j++) {
+					float t = temp_buffer[i_sample + j];
+					output_buffer_evens[i_sample + j] += t * gL_dry;
+					output_buffer_odds [i_sample + j] += t * gR_dry;
+				}
+
+				avg_level += lvl_step;
+				avg_pan   += pan_step;
+			}
 		}
 	}
 
@@ -353,27 +379,45 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	// Apply EQ after soft clipping
 	// eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
 
-	// Apply Reverb (wavetable channels only; send levels per channel; Plaits channels excluded)
-	// The send bus accumulates temp_buffer × avg_level × avg_pan × chan_wet,
-	// so its range is ±32768 × 4095 per channel. We normalise to ±1.0 by
-	// dividing by that product. The user pregain slider then drives the
-	// signal into the tanh soft-clipper before the reverb tank.
-	if (oscout_status) {
+	// Apply Reverb (wavetable channels only; send levels per channel).
+	// The send bus accumulates temp_buffer × (level/4095) × pan × wet
+	// already in the unified ±1.0 float scale, so the reverb input
+	// soft-clipper, the tank itself, and the user-controlled output
+	// level all operate directly on that range with no extra
+	// normalisation passes.
+	/* Skip the entire reverb pipeline when no channel is sending.
+	 * Reverb_Process + the input saturator + the output add account
+	 * for ~80 µs of audio ISR; with reverb fully off (chan_send=0
+	 * everywhere) that work has zero acoustic effect — the tank just
+	 * processes silence into silence — and starves PWM_OUTS_TIM for no
+	 * reason.  Note: when the user dials reverb back in the tank starts
+	 * cold (zeroed state) since we haven't been advancing it, but the
+	 * tank's ~1 s decay means it builds up imperceptibly. */
+	if (oscout_status && any_reverb_active) {
 		Reverb_SetParams(params.reverb_time, params.reverb_diffusion, params.reverb_lp);
-		const float send_norm = 1.0f / (32768.0f * 4095.0f);
-		arm_scale_f32(reverb_send_L, send_norm, reverb_send_L, MONO_BUFSZ);
-		arm_scale_f32(reverb_send_R, send_norm, reverb_send_R, MONO_BUFSZ);
 
-		// Apply user-controlled input drive, then soft-clip with tanh.
-		// input_gain > 1 overdrives into tanh for saturation character.
-		// After tanh the signal is bounded to ±1.0; the fixed tank
-		// input_gain (2.0) keeps the tank within ±8.0 FORMAT_12_BIT headroom.
-		{
-			float ig = params.reverb_input_gain;
-			if (ig < 0.0f) ig = 0.0f;
+		/* Input drive + soft-clip: replace tanhf(x*ig)/ig with the
+		 * stmlib SoftLimit Padé approximation
+		 *     y = x*(27 + x²) / (27 + 9x²)
+		 * which is monotonic, has the same -1..+1 bound and the same
+		 * tanh-like shape near zero, but costs ~3 mul + 1 div instead
+		 * of a full tanhf (~50–60 cycles).  Hard-clamp at |x*ig|>3 so
+		 * the approximation never extrapolates past its useful range. */
+		float ig = params.reverb_input_gain;
+		if (ig < 0.0f) ig = 0.0f;
+		if (ig > 0.0f) {
+			float inv_ig = 1.0f / ig;
 			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-				reverb_send_L[i_sample] = tanhf(reverb_send_L[i_sample] * ig)/ig;
-				reverb_send_R[i_sample] = tanhf(reverb_send_R[i_sample] * ig)/ig;
+				float yL = reverb_send_L[i_sample] * ig;
+				float yR = reverb_send_R[i_sample] * ig;
+				if      (yL >  3.0f) yL =  1.0f;
+				else if (yL < -3.0f) yL = -1.0f;
+				else                 yL = yL * (27.0f + yL*yL) / (27.0f + 9.0f*yL*yL);
+				if      (yR >  3.0f) yR =  1.0f;
+				else if (yR < -3.0f) yR = -1.0f;
+				else                 yR = yR * (27.0f + yR*yR) / (27.0f + 9.0f*yR*yR);
+				reverb_send_L[i_sample] = yL * inv_ig;
+				reverb_send_R[i_sample] = yR * inv_ig;
 			}
 		}
 
@@ -385,13 +429,11 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			if (reverb_dur > diag_reverb_peak_cycles)
 				diag_reverb_peak_cycles = reverb_dur;
 		}
-		// Output scaling: undo the input normalization, then apply the
-		// user-controlled output level [0, 2].
+
 		float out_level = params.reverb_output_level;
 		if (out_level < 0.0f) out_level = 0.0f;
-		const float send_denorm = 32768.0f * 4095.0f * out_level;
-		arm_scale_f32(reverb_send_L, send_denorm, reverb_send_L, MONO_BUFSZ);
-		arm_scale_f32(reverb_send_R, send_denorm, reverb_send_R, MONO_BUFSZ);
+		arm_scale_f32(reverb_send_L, out_level, reverb_send_L, MONO_BUFSZ);
+		arm_scale_f32(reverb_send_R, out_level, reverb_send_R, MONO_BUFSZ);
 		arm_add_f32(output_buffer_evens, reverb_send_L, output_buffer_evens, MONO_BUFSZ);
 		arm_add_f32(output_buffer_odds, reverb_send_R, output_buffer_odds, MONO_BUFSZ);
 	}
@@ -417,15 +459,22 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	// as a regular audio jack the rest of the time.
 	uint8_t fsk_out_active = diag_log_enabled
 	                      && (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE);
+
+	/* Convert the unified ±1.0 float bus into the integer scale that
+	 * compress() and the SAI codec expect.  master_gain is the user-
+	 * adjustable headroom trim (default 1/48); the 32768×4095 factor
+	 * preserves the same nominal output level we used to get when the
+	 * mix accumulator held ±32768 × (level/4095) per channel. */
+	const float dac_scale = system_settings.master_gain * (32768.0f * 4095.0f);
 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
 	{
 		outL = 0; outR = 0;
 		if (oscout_status) {
-			outL = (int32_t)(output_buffer_evens[i_sample] * system_settings.master_gain);
-			outR = (int32_t)(output_buffer_odds[i_sample] * system_settings.master_gain);
+			outL = (int32_t)(output_buffer_evens[i_sample] * dac_scale);
+			outR = (int32_t)(output_buffer_odds[i_sample] * dac_scale);
 		}
 		if (audiomon_status) {
-			int32_t mon_smpl = (int32_t)(audio_in_buffer[i_sample] * 8388608.0f);
+			int32_t mon_smpl = audio_in_raw[i_sample];
 			outL += mon_smpl;
 			outR += mon_smpl;
 		}
@@ -436,10 +485,6 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 			*dst++ = compress(outR);
 		}
 	}
-
-	if (audio_in_sum < AUDIO_GATE_THRESHOLD) {
-		if (++audio_gate_ctr >= AUDIO_GATE_DEBOUNCE_LENGTH) { audio_in_gate = 1; audio_gate_ctr = 0; }
-	} else audio_in_gate = 0;
 
 	/* ── Temporary: commit audio ISR peak duration. ── */
 	{
@@ -578,8 +623,6 @@ void update_oscillators(void){
 	combine_transpose_spread();
 	compute_transpositions();
 	update_transpose_cv();
-
-	read_ext_trigs();
 
 	check_reverb_edit_entry_exit();
 
@@ -770,15 +813,6 @@ void update_oscillators(void){
 		}
 	}
 
-	/* The advance-cycle pass that used to live here has been moved
-	 * into the audio ISR (process_audio_block_codec), where it now
-	 * runs synchronously on every audio buffer wrap — matching the
-	 * JS reference (one integration step per audio cycle boundary)
-	 * and removing the OSC_TIM round-robin starvation that previously
-	 * exposed the streaming-LPF group-delay step.  OSC_TIM still owns
-	 * the trigger fast-path (which is what produces the `seed_cache`
-	 * reads) — but advance is no longer the OSC_TIM's responsibility. */
-
 	{
 		uint32_t chanloop_dur = DWT->CYCCNT - chanloop_start;
 		if (chanloop_dur > diag_osc_chanloop_peak_cycles)
@@ -830,19 +864,13 @@ void init_wt_osc(void) {
 			wt_osc.rhd_inv[i][j]			= 0;
 		}
 
-		wt_osc.coherence_dc_I[i] = 0.0f;
-		wt_osc.coherence_dc_Q[i] = 0.0f;
-		wt_osc.coherence_env[i] = 0.0f;
 		wt_osc.plaits_last_cv_input[i] = 0.0f;
 		wt_osc.plaits_refractory_timer[i] = 0;
 
-		// Init Halo state — the legacy halo_state struct is kept
-		// only as a parameter container for led_cont reads + the
-		// triggerPending flag; the active physics engine lives in the
-		// cpp-class voice array, initialised once below the per-channel
-		// loop.  halo_init still primes mc[][][] with a sine
-		// wave so the legacy buffer remains valid for any unported
-		// path that might still read it (currently none in production).
+		// Init Halo state — the active physics engine lives in the
+		// cpp-class voice array (halo_init_all below).  The o_halo
+		// struct is kept as a parameter container for led_cont reads
+		// and the triggerPending flag.
 		halo_init(&wt_osc.halo_state[i], wt_osc.mc[wt_osc.buffer_sel[i]][i]);
 		memcpy(wt_osc.mc[wt_osc.buffer_sel[i] ^ 1][i],
 		       wt_osc.mc[wt_osc.buffer_sel[i]][i],
@@ -869,9 +897,9 @@ void init_wt_osc(void) {
 	}
 
 	/* Initialise the active streaming-physics engine.  Each voice
-	 * starts with a sine seed and default damping/noise params,
-	 * matching the legacy halo_init defaults, so the engine
-	 * is audible from cycle zero before any encoder/CV writes. */
+	 * starts with a sine seed and default damping/noise params so
+	 * the engine is audible from cycle zero before any encoder/CV
+	 * writes. */
 	halo_init_all();
 
 	Shim_LPG_Init();
