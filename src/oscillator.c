@@ -65,7 +65,12 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
-		float level = drum_chan[chan].level;
+		/* accent_gain folds Grids' accent flag into the same smoothed
+		 * level ramp below -- it only steps at a trigger, but the
+		 * existing per-block interpolation already exists to avoid
+		 * zipper noise on slider moves, so an accent's gain change
+		 * rides it for free instead of clicking. */
+		float level = drum_chan[chan].level * drum_chan[chan].accent_gain;
 		level_inc = (level - prev_level[chan]) / MONO_BUFSZ;
 		interpolated_level = prev_level[chan];
 		prev_level[chan] = level;
@@ -74,8 +79,14 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 
 		/* Drums are mono per channel and panned by channel parity so a
 		 * kit spreads across the stereo pair without needing the old
-		 * per-channel pan control. */
-		float pan = (chan & 1) ? 0.33f : 0.66f;
+		 * per-channel pan control. Open hat borrows closed hat's parity
+		 * for this rather than its own -- they're one physical cymbal
+		 * (they already choke each other, see fire() in drum_ui.c) and
+		 * should sit in the same place in the stereo field. Kick stays
+		 * dead center regardless of parity -- it anchors the kit and
+		 * needs to hit evenly in both ears, not lean to one side. */
+		uint8_t pan_chan = (chan == DRUM_CAT_OPEN_HAT) ? DRUM_CAT_CLOSED_HAT : chan;
+		float pan = (chan == DRUM_CAT_KICK) ? 0.5f : ((pan_chan & 1) ? 0.33f : 0.66f);
 
 		float g = interpolated_level;
 		const float g_step = level_inc * 4.0f;

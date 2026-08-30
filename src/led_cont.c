@@ -351,6 +351,17 @@ void update_button_leds(void){
 					}
 				}
 
+				else if (drum_global_edit_mode) {
+					/* Every channel button pulses the same way while a
+					 * knob edit hits all of them at once -- there's no
+					 * single "selected" channel to distinguish here.
+					 * Slow pulse via the existing flash clock so it
+					 * reads as a distinct mode, not just "all selected". */
+					brightness = drum_trig_flash[i] ? F_MAX_BRIGHTNESS
+					           : (led_cont.flash_state ? 0.5f : 0.15f);
+					set_rgb_color_brightness(&led_cont.button[i], ledc_WHITE, brightness);
+				}
+
 				else { //no ongoing_display
 
 					/* Drum play: full brightness while the channel is
@@ -376,7 +387,16 @@ void update_button_leds(void){
 					color = (system_settings.selbus_can_save == SELBUS_SAVE_ENABLED) ? ledc_MED_RED : ledc_DIM_RED;
 					set_rgb_color(&led_cont.button[butm_LFOMODE_BUTTON], color);
 				}
-				else 
+				else if (i == butm_LFOVCA_BUTTON) {
+					/* This button doubles as the pattern-engine toggle
+					 * (read_pattern_engine_button() in drum_ui.c), so its
+					 * own LED is the natural place for a steady reminder
+					 * of which mode is active -- same palette as the
+					 * brief whole-ring flash on the moment it's pressed
+					 * (see display_drum_engine()). */
+					set_rgb_color(&led_cont.button[i], (drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? ledc_GOLD : ledc_AQUA);
+				}
+				else
 				{
 					if (!calc_params.keymode_pressed)
 					{
@@ -662,6 +682,10 @@ void calculate_led_ring(void){
 				display_drum_preset();
 				break;
 
+			case ONGOING_DISPLAY_DRUM_ENGINE:
+				display_drum_engine();
+				break;
+
 			default:
 				display_drum_pattern();
 				break;
@@ -673,16 +697,42 @@ void calculate_led_ring(void){
  * ring position i is step i for i<n, and stays off for i>=n (e.g. an
  * 8-step pattern lights only 8 of the 18 LEDs -- no stretching to fill
  * the ring).  Active steps lit dim, playhead bright.  Inner ring = one
- * LED per channel, lit while that channel is flashing from a hit. */
+ * LED per channel, lit while that channel is flashing from a hit.
+ * In Grids mode a Grids-driven channel gets its own outer-ring view
+ * instead (32 steps mapped proportionally onto the 18 LEDs); Crash/
+ * Other, which have no Grids data, keep the euclidean view in both
+ * modes. */
 void display_drum_pattern(void)
 {
 	const EuclidChannelState *e = &drum_chan[drum_selected_chan].euclid;
+	int8_t grids_part = (drum_pattern_engine == PATTERN_ENGINE_GRIDS)
+	                  ? drum_chan_grids_part(drum_selected_chan) : -1;
 	uint8_t i;
 
 	for (i = 0; i < NUM_LED_OUTRING; i++) {
 		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
 		float bri = 0.0f;
 		enum ledColors color = ledc_AQUA;
+
+		/* Grids' 32 steps don't fit the 18-LED ring one-per-step, so
+		 * each LED stands for the step it lands on proportionally,
+		 * with brightness from that step's interpolated level rather
+		 * than a binary on/off. */
+		if (grids_part >= 0) {
+			uint8_t step = (uint8_t)((uint16_t)i * GRIDS_NUM_STEPS / NUM_LED_OUTRING);
+			uint8_t playhead = (uint8_t)((uint16_t)grids_state.step * NUM_LED_OUTRING / GRIDS_NUM_STEPS);
+
+			if (i == playhead) {
+				bri = F_MAX_BRIGHTNESS;
+				color = ledc_WHITE;
+			} else {
+				uint8_t level = grids_read_map((uint8_t)grids_part, step, grids_x, grids_y);
+				bri = F_MAX_BRIGHTNESS * (0.02f + 0.23f * (level / 255.0f));
+			}
+
+			set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+			continue;
+		}
 
 		if (i < e->n) {
 			if (i == e->current_step) {
@@ -732,6 +782,7 @@ void display_drum_param(void)
 			value = (d->clock_divmult_id - LFO_MIN_DIVMULT_ID) / (float)(LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
 			color = ledc_MED_GREEN;
 			break;
+		case DRUM_PARAM_DISP_HUMANIZE: value = d->humanize; color = ledc_CORAL; break;
 		default:                    value = d->filter; color = ledc_AQUA;  break;
 	}
 
@@ -804,6 +855,29 @@ void start_ongoing_display_drum_preset(enum drumPresetDisplay activity)
 	led_cont.ongoing_display              = ONGOING_DISPLAY_DRUM_PRESET;
 	led_cont.ongoing_drum_preset_activity = activity;
 	led_cont.ongoing_timeout              = DRUM_PRESET_DISPLAY_TIMER_LIMIT;
+}
+
+/* Brief whole-ring flash confirming the kit-wide pattern algorithm just
+ * changed: aqua (the colour the euclidean ring already uses) for
+ * euclidean, gold for Grids. No parameter to read off it -- it exists
+ * purely so a press of an otherwise silent button is visibly
+ * acknowledged. */
+void display_drum_engine(void)
+{
+	enum ledColors color = (drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? ledc_GOLD : ledc_AQUA;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, F_MAX_BRIGHTNESS);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_engine(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_ENGINE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
 void turn_outring_off(void)
@@ -1458,6 +1532,11 @@ void update_ongoing_display_timers(void){
 	 * every turn and on every load/save, so it only actually counts
 	 * down once the user stops touching the PRESET encoder. */
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_PRESET)
+		tick_down = 1;
+
+	/* One-shot flash on the mode-toggle press, so it always times out
+	 * on its own -- nothing re-arms it while the button is held. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_ENGINE)
 		tick_down = 1;
 
 	if (!tick_down)

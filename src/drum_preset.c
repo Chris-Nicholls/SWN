@@ -38,11 +38,19 @@ typedef struct __attribute__((packed)) {
 	float	decay;
 	float	other;
 	float	clock_divmult_id;
+	uint8_t	density;		/* Grids-mode pattern density, unused by euclidean channels */
 } DrumChanPreset;
 
 typedef struct __attribute__((packed)) {
 	uint32_t		magic;
 	DrumChanPreset	chan[NUM_CHANNELS];
+
+	/* Kit-wide pattern engine and, for Grids, its shared map position
+	 * and chaos amount. */
+	uint8_t			pattern_engine;
+	uint8_t			grids_x;
+	uint8_t			grids_y;
+	uint8_t			grids_chaos;
 } DrumKitPreset;
 
 static uint8_t			selected_slot = 0;
@@ -81,7 +89,13 @@ static void save_slot(uint8_t slot)
 		p->decay            = d->decay;
 		p->other            = d->other;
 		p->clock_divmult_id = d->clock_divmult_id;
+		p->density          = d->density;
 	}
+
+	kit.pattern_engine = (uint8_t)drum_pattern_engine;
+	kit.grids_x        = grids_x;
+	kit.grids_y        = grids_y;
+	kit.grids_chaos    = grids_chaos;
 
 	sFLASH_read_buffer(sector_buf, DRUM_PRESET_SECTOR_ADDR, sizeof(sector_buf));
 	memcpy(sector_buf + (uint32_t)slot * DRUM_PRESET_SLOT_SIZE, &kit, sizeof(kit));
@@ -126,6 +140,7 @@ static uint8_t load_slot(uint8_t slot)
 		d->clock_divmult_id = p->clock_divmult_id;
 		d->clock_rate       = calc_divmult_amount(d->clock_divmult_id);
 		d->step_phase       = 0.0f;
+		d->density          = p->density;
 
 		if (d->ops) {
 			d->ops->init(d->state);
@@ -134,6 +149,12 @@ static uint8_t load_slot(uint8_t slot)
 			d->ops->set_other(d->state, d->other);
 		}
 	}
+
+	drum_pattern_engine = (kit.pattern_engine == PATTERN_ENGINE_GRIDS)
+	                    ? PATTERN_ENGINE_GRIDS : PATTERN_ENGINE_EUCLID;
+	grids_x     = kit.grids_x;
+	grids_y     = kit.grids_y;
+	grids_chaos = kit.grids_chaos;
 
 	return 1;
 }
