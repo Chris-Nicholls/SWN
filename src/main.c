@@ -67,6 +67,7 @@
 #include "drivers/flashram_spidma.h"
 #include "sel_bus.h"
 #include "drum_ui.h"
+#include "drum_preset.h"
 
 
 
@@ -209,7 +210,12 @@ int main(void)
 		exit_led_adjust_mode();
 	}
 
-	init_preset_manager();
+	/* The old preset_manager saves/loads o_params/o_lfos, the pre-drum-
+	 * station synth-voice blob -- superseded by drum_preset.c's kit
+	 * slots, which use the same PRESET encoder/pushbutton. Not calling
+	 * init_preset_manager() here avoids both systems fighting over the
+	 * same encoder queue in the main loop below. */
+	init_drum_preset();
 
 	//Show Firmware version
 	display_firmware_version();
@@ -282,7 +288,7 @@ int main(void)
 		DIAG_TIME(diag_ml_oscparam_peak_cycles,  update_osc_param_lock());
 		DIAG_TIME(diag_ml_selbusbtn_peak_cycles, read_selbus_buttons());
 		DIAG_TIME(diag_ml_uimode_peak_cycles,    check_ui_mode_requests());
-		DIAG_TIME(diag_ml_loadsave_peak_cycles,  read_load_save_encoder());
+		DIAG_TIME(diag_ml_loadsave_peak_cycles,  read_drum_preset_ui());
 		DIAG_TIME(diag_ml_selbusev_peak_cycles,  check_sel_bus_event());
 
 		if (ui_mode == VOCT_CALIBRATE) process_voct_calibrate_mode();
