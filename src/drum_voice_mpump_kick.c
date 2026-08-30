@@ -12,6 +12,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "drum_fast_math.h"
 #include "drum_voice.h"
 #include "drum_shared_filter.h"
 
@@ -27,6 +28,7 @@ typedef struct {
 
 	float base_f;
 	float sweep_f;
+	float sweep_depth;
 	float s_rate;
 } KickState;
 
@@ -47,6 +49,7 @@ static void kick_trigger(void *state_v, float pitch)
 	st->base_f  = 45.0f * r;
 	st->sweep_f = (80.0f + 170.0f * sweep_depth) * r;
 	st->s_rate  = (20.0f + 70.0f * sweep_rate) / fmaxf(decay, 0.5f);
+	st->sweep_depth = st->sweep_f / st->s_rate;
 
 	float n_seconds = 0.6f * decay;
 	if (n_seconds > 2.0f) n_seconds = 2.0f;
@@ -57,10 +60,10 @@ static void kick_trigger(void *state_v, float pitch)
 static void kick_render(void *state_v, float *out, int n)
 {
 	KickState *st = (KickState *)state_v;
-	const float sr = DRUM_VOICE_SAMPLE_RATE;
+	const float inv_sr = 1.0f / DRUM_VOICE_SAMPLE_RATE;
 	const float click_f1 = 2000.0f;   /* click_tune fixed at python default (0 semitones) */
 	const float click_f2 = 5000.0f;
-	float decay = st->decay;
+	const float inv_decay = 1.0f / st->decay;
 
 	for (int i = 0; i < n; i++) {
 		if (st->sample_idx >= st->n_samples) {
@@ -68,18 +71,18 @@ static void kick_render(void *state_v, float *out, int n)
 			continue;
 		}
 
-		float t = (float)st->sample_idx / sr;
+		float t = (float)st->sample_idx * inv_sr;
 
-		float phase = 2.0f * (float)M_PI *
-			(st->base_f * t + (st->sweep_f / st->s_rate) * (1.0f - expf(-t * st->s_rate)));
-		float body_attack = expf(-t * 200.0f);
-		float body_tail   = expf(-t * (5.0f / decay));
-		float body = sinf(phase) * (body_attack * 0.55f + body_tail * 0.12f) * 0.95f;
+		float turns = st->base_f * t +
+			st->sweep_depth * (1.0f - drum_fast_expf(-t * st->s_rate));
+		float body_attack = drum_fast_expf(-t * 200.0f);
+		float body_tail   = drum_fast_expf(-t * (5.0f * inv_decay));
+		float body = drum_fast_sin_turns(turns) * (body_attack * 0.55f + body_tail * 0.12f) * 0.95f;
 
-		float sub = sinf(2.0f * (float)M_PI * 50.0f * st->pitch_ratio * t) * expf(-t * (5.0f / decay)) * 0.4f;
+		float sub = drum_fast_sin_turns(50.0f * st->pitch_ratio * t) * body_tail * 0.4f;
 
-		float click = (sinf(2.0f * (float)M_PI * click_f1 * t) + sinf(2.0f * (float)M_PI * click_f2 * t)) *
-			0.5f * expf(-t * 2000.0f) * st->click_amt;
+		float click = (drum_fast_sin_turns(click_f1 * t) + drum_fast_sin_turns(click_f2 * t)) *
+			0.5f * drum_fast_expf(-t * 2000.0f) * st->click_amt;
 
 		out[i] = body + sub + click;
 		st->sample_idx++;

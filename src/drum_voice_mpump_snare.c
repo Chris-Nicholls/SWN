@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "drum_fast_math.h"
 #include "drum_voice.h"
 #include "drum_shared_filter.h"
 
@@ -94,8 +95,8 @@ static void snare_trigger(void *state_v, float pitch)
 static void snare_render(void *state_v, float *out, int n)
 {
 	SnareState *st = (SnareState *)state_v;
-	const float sr = DRUM_VOICE_SAMPLE_RATE;
-	float decay = st->decay;
+	const float inv_sr = 1.0f / DRUM_VOICE_SAMPLE_RATE;
+	const float inv_decay = 1.0f / st->decay;
 	float tone_level  = 1.0f - st->noise_mix;
 	float noise_level = st->noise_mix;
 
@@ -105,17 +106,17 @@ static void snare_render(void *state_v, float *out, int n)
 			continue;
 		}
 
-		float t = (float)st->sample_idx / sr;
+		float t = (float)st->sample_idx * inv_sr;
 
 		float raw_noise = xorshift_uniform(&st->rng);
 		float shaped = biquad_process1(&st->noise_bp, raw_noise);
 
-		float pitch_env = 1.0f + 0.5f * expf(-t * 60.0f);
-		float body = sinf(2.0f * (float)M_PI * 185.0f * st->pitch_ratio * pitch_env * t) *
-			expf(-t * (18.0f / decay)) * tone_level;
-		float low = sinf(2.0f * (float)M_PI * 110.0f * st->pitch_ratio * t) *
-			expf(-t * (22.0f / decay)) * (tone_level * 0.2f);
-		float noise_env = expf(-t * (14.0f / decay));
+		float pitch_env = 1.0f + 0.5f * drum_fast_expf(-t * 60.0f);
+		float body = drum_fast_sin_turns(185.0f * st->pitch_ratio * pitch_env * t) *
+			drum_fast_expf(-t * (18.0f * inv_decay)) * tone_level;
+		float low = drum_fast_sin_turns(110.0f * st->pitch_ratio * t) *
+			drum_fast_expf(-t * (22.0f * inv_decay)) * (tone_level * 0.2f);
+		float noise_env = drum_fast_expf(-t * (14.0f * inv_decay));
 		float noise = (raw_noise * 0.45f + shaped * 0.55f) * noise_env * noise_level;
 
 		out[i] = body + low + noise;

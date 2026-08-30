@@ -74,3 +74,8 @@ app/cpp_test/out/sine_1500Hz_high_damp_wraps.csv
 app/cpp_test/out/sine_1500Hz_high_damp.wav
 app/__pycache__/chord_model.cpython-314.pyc
 app/__pycache__/streamlit_app.cpython-314.pyc
+
+# drum_prototype C++ test harness build artifacts (regenerable via `make run`)
+drum_prototype/cpp_test_drums*/build/
+drum_prototype/cpp_test_drums*/out/
+drum_prototype/cpp_test_drums*/drumtest*
