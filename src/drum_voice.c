@@ -38,6 +38,13 @@ const DrumVoiceEntry kDrumVoiceRegistry[] = {
 	{ &drum_voice_roller_crash,      "roller crash",   DRUM_CAT_CRASH      },
 	{ &drum_voice_roller_perc,       "roller perc",    DRUM_CAT_OTHER      },
 	{ &drum_voice_roller_rimshot,    "roller rim",     DRUM_CAT_OTHER      },
+	{ &drum_voice_plaits_kick,       "plaits kick",    DRUM_CAT_KICK       },
+	{ &drum_voice_plaits_snare,      "plaits snare",   DRUM_CAT_SNARE      },
+	/* Same voice under both hat categories: on the 808 circuit closed
+	 * and open hats are one generator at two decay settings, so it is
+	 * worth reaching from either channel's shape cycle. */
+	{ &drum_voice_plaits_hihat,      "plaits chat",    DRUM_CAT_CLOSED_HAT },
+	{ &drum_voice_plaits_hihat,      "plaits ohat",    DRUM_CAT_OPEN_HAT   },
 };
 
 const uint8_t kNumDrumVoices = sizeof(kDrumVoiceRegistry) / sizeof(kDrumVoiceRegistry[0]);

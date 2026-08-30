@@ -65,6 +65,11 @@ extern const DrumVoiceOps drum_voice_roller_crash;
 extern const DrumVoiceOps drum_voice_roller_perc;
 extern const DrumVoiceOps drum_voice_roller_rimshot;
 
+/* Plaits (Mutable Instruments) drum engines. */
+extern const DrumVoiceOps drum_voice_plaits_kick;
+extern const DrumVoiceOps drum_voice_plaits_snare;
+extern const DrumVoiceOps drum_voice_plaits_hihat;
+
 /* Fixed per-channel roles, one category per channel (A=Kick .. F=Other)
  * -- see the "grouped by type" mapping in drum_ui.c's kMvpKit/category
  * table. LFO shape cycles a channel through only its own category's

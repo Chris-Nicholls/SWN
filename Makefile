@@ -46,6 +46,17 @@ SOURCES  += src/plaits/resources.cc
 ARCH_CFLAGS += -DINCLUDE_PLAITS_ENGINES
 endif
 
+# Plaits' purpose-built drum engines are always built: they back the
+# drum_voice_plaits_* voices in the drum-station registry, and are tiny
+# compared to the full INCLUDE_PLAITS_ENGINES melodic set above.
+# (The hi-hat is a header-only template, driven directly by
+# src/drum_voice_plaits_hihat.cpp -- no hi_hat_engine.cc needed.)
+# resources.cc is pulled in for lut_sine, which the drum models' sine
+# oscillator indexes; --gc-sections drops the rest of its tables.
+SOURCES  += src/plaits/dsp/engine/bass_drum_engine.cc
+SOURCES  += src/plaits/dsp/engine/snare_drum_engine.cc
+SOURCES  += src/plaits/resources.cc
+
 # stmlib is always needed (LPG uses stmlib DSP utilities)
 SOURCES  += $(wildcard src/stmlib/dsp/*.cc)
 SOURCES  += $(wildcard src/stmlib/utils/*.cc)
