@@ -101,7 +101,18 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 	uint8_t fsk_out_active = diag_log_enabled
 	                      && (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE);
 
-	const float dac_scale = system_settings.master_gain * (32768.0f * 4095.0f);
+	/* Drum voices were each individually gain-trimmed to avoid clipping
+	 * on their own, then further attenuated by the per-channel level
+	 * (default 0.8, not 1.0) and by the constant-sum pan law above
+	 * (~0.74x power for a split channel) -- the combined result sits
+	 * well under the full-scale level master_gain was calibrated for,
+	 * so the whole kit reads quiet even before a single voice is close
+	 * to clipping. compress() above is a soft asymptotic limiter, not a
+	 * hard clip, so it's safe to make up most of that headroom here;
+	 * re-tune by ear if a very dense multi-channel pattern audibly
+	 * pumps against the limiter. */
+	#define DRUM_MIX_MAKEUP_GAIN	1.8f
+	const float dac_scale = system_settings.master_gain * DRUM_MIX_MAKEUP_GAIN * (32768.0f * 4095.0f);
 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
 	{
 		outL = (int32_t)(output_buffer_evens[i_sample] * dac_scale);

@@ -46,6 +46,19 @@ static int euclid_clampi(int v, int lo, int hi)
     return v;
 }
 
+/* Rotation is a position on a circle of n steps, not a bounded value --
+ * clamping it would stick at 0/n-1 instead of letting continuous
+ * turning cycle through every position. */
+static int euclid_wrapi(int v, int n)
+{
+    if (n <= 0)
+        return 0;
+    v %= n;
+    if (v < 0)
+        v += n;
+    return v;
+}
+
 static void euclid_build(int level, const int *counts, const int *remainders, int *pattern, int *len)
 {
     if (level == -1) {
@@ -151,7 +164,7 @@ void euclid_set_n(EuclidChannelState *st, int n)
 {
     st->n = euclid_clampi(n, 1, EUCLID_MAX_STEPS);
     st->k = euclid_clampi(st->k, 0, st->n);
-    st->rotation = euclid_clampi(st->rotation, 0, st->n - 1);
+    st->rotation = euclid_wrapi(st->rotation, st->n);
     if (st->current_step >= st->n)
         st->current_step = st->current_step % st->n;
     euclid_recompute(st);
@@ -165,7 +178,7 @@ void euclid_set_k(EuclidChannelState *st, int k)
 
 void euclid_set_rotation(EuclidChannelState *st, int rotation)
 {
-    st->rotation = euclid_clampi(rotation, 0, st->n - 1);
+    st->rotation = euclid_wrapi(rotation, st->n);
     euclid_recompute(st);
 }
 

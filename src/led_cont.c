@@ -46,6 +46,7 @@
 #include "ui_modes.h"
 #include "key_combos.h"
 #include "drum_ui.h"
+#include "drum_preset.h"
 
 #include "drivers/leds_pwm.h"
 #include "quantz_scales.h"
@@ -653,6 +654,14 @@ void calculate_led_ring(void){
 				display_cpu_usage();
 				break;
 
+			case ONGOING_DISPLAY_DRUM_PARAM:
+				display_drum_param();
+				break;
+
+			case ONGOING_DISPLAY_DRUM_PRESET:
+				display_drum_preset();
+				break;
+
 			default:
 				display_drum_pattern();
 				break;
@@ -660,10 +669,11 @@ void calculate_led_ring(void){
 	}
 }
 
-/* Outer ring = the selected channel's euclidean pattern: `n` steps
- * mapped 1:1 onto ring positions from 0, active steps lit dim, playhead
- * bright.  Inner ring = one LED per channel, lit while that channel is
- * flashing from a hit. */
+/* Outer ring = the selected channel's euclidean pattern, 1 LED per step:
+ * ring position i is step i for i<n, and stays off for i>=n (e.g. an
+ * 8-step pattern lights only 8 of the 18 LEDs -- no stretching to fill
+ * the ring).  Active steps lit dim, playhead bright.  Inner ring = one
+ * LED per channel, lit while that channel is flashing from a hit. */
 void display_drum_pattern(void)
 {
 	const EuclidChannelState *e = &drum_chan[drum_selected_chan].euclid;
@@ -672,19 +682,20 @@ void display_drum_pattern(void)
 	for (i = 0; i < NUM_LED_OUTRING; i++) {
 		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
 		float bri = 0.0f;
+		enum ledColors color = ledc_AQUA;
 
 		if (i < e->n) {
-			if (i == e->current_step)
+			if (i == e->current_step) {
 				bri = F_MAX_BRIGHTNESS;
-			else if (euclid_step_active(e, i))
+				color = ledc_WHITE;
+			} else if (euclid_step_active(e, i)) {
 				bri = F_MAX_BRIGHTNESS * 0.25f;
-			else
+			} else {
 				bri = F_MAX_BRIGHTNESS * 0.02f;
+			}
 		}
 
-		set_rgb_color_brightness(&led_cont.outring[j],
-		                         (i == e->current_step) ? ledc_WHITE : ledc_AQUA,
-		                         bri);
+		set_rgb_color_brightness(&led_cont.outring[j], color, bri);
 	}
 
 	for (i = 0; i < NUM_LED_INRING; i++) {
@@ -696,6 +707,103 @@ void display_drum_pattern(void)
 		                         (i == drum_selected_chan) ? ledc_WHITE : ledc_AQUA,
 		                         bri);
 	}
+}
+
+/* Outer ring bar-graph for whichever of filter/decay/other is being
+ * turned: floor(value*18) LEDs solid, the next one partially lit for
+ * sub-step resolution, colour-coded per param so Depth/Latitude/
+ * Longitude are visually distinct at a glance. */
+void display_drum_param(void)
+{
+	const o_drum_chan *d = &drum_chan[drum_selected_chan];
+	float value;
+	enum ledColors color;
+	uint8_t i;
+
+	switch (led_cont.ongoing_drum_param) {
+		case DRUM_PARAM_DISP_DECAY: value = d->decay; color = ledc_YELLOW; break;
+		case DRUM_PARAM_DISP_OTHER: value = d->other; color = ledc_PURPLE; break;
+		case DRUM_PARAM_DISP_SPEED:
+			/* clock_divmult_id ranges LFO_MIN_DIVMULT_ID..LFO_MAX_DIVMULT_ID,
+			 * not 0..1 like the other three -- normalize it so the same
+			 * bar-graph code works unchanged. Unity (LFO_UNITY_DIVMULT_ID)
+			 * lands well left of center since the multiply range above it
+			 * is much wider than the divide range below it. */
+			value = (d->clock_divmult_id - LFO_MIN_DIVMULT_ID) / (float)(LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
+			color = ledc_MED_GREEN;
+			break;
+		default:                    value = d->filter; color = ledc_AQUA;  break;
+	}
+
+	float lit_f = _CLAMP_F(value, 0.0f, 1.0f) * NUM_LED_OUTRING;
+	uint8_t lit_full = (uint8_t)lit_f;
+	float   lit_frac = lit_f - (float)lit_full;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+		float bri;
+
+		if (i < lit_full)
+			bri = F_MAX_BRIGHTNESS;
+		else if (i == lit_full)
+			bri = F_MAX_BRIGHTNESS * lit_frac;
+		else
+			bri = 0.0f;
+
+		set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+	}
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_param(enum drumParamDisplay which)
+{
+	led_cont.ongoing_display     = ONGOING_DISPLAY_DRUM_PARAM;
+	led_cont.ongoing_drum_param  = which;
+	led_cont.ongoing_timeout     = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Outer ring = preset slots, one LED per slot (DRUM_PRESET_NUM_SLOTS=16
+ * fits directly onto the 18-LED ring with 2 spare, unlit positions):
+ * filled slots dim yellow, the selected slot bright -- white while just
+ * browsing, green right after a load, red right after a save. */
+void display_drum_preset(void)
+{
+	uint8_t selected = drum_preset_selected_slot();
+	uint8_t i;
+
+	enum ledColors hover_color;
+	switch (led_cont.ongoing_drum_preset_activity) {
+		case DRUM_PRESET_DISP_LOADED: hover_color = ledc_MED_GREEN; break;
+		case DRUM_PRESET_DISP_SAVED:  hover_color = ledc_RED;       break;
+		default:                      hover_color = ledc_WHITE;     break;
+	}
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+		float bri = 0.0f;
+		enum ledColors color = ledc_YELLOW;
+
+		if (i == selected) {
+			bri = F_MAX_BRIGHTNESS;
+			color = hover_color;
+		} else if (i < DRUM_PRESET_NUM_SLOTS && drum_preset_slot_filled(i)) {
+			bri = F_MAX_BRIGHTNESS * 0.2f;
+		}
+
+		set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+	}
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], hover_color, 0.0f);
+}
+
+void start_ongoing_display_drum_preset(enum drumPresetDisplay activity)
+{
+	led_cont.ongoing_display              = ONGOING_DISPLAY_DRUM_PRESET;
+	led_cont.ongoing_drum_preset_activity = activity;
+	led_cont.ongoing_timeout              = DRUM_PRESET_DISPLAY_TIMER_LIMIT;
 }
 
 void turn_outring_off(void)
@@ -1337,6 +1445,19 @@ void update_ongoing_display_timers(void){
 		tick_down = 1;
 
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_UNISON && !rotary_pressed(rotm_TRANSPOSE))
+		tick_down = 1;
+
+	/* Unconditional: start_ongoing_display_drum_param() re-arms the full
+	 * timeout on every encoder tick, so sustained turning keeps this
+	 * alive on its own; ticking down unconditionally just lets it fade
+	 * out shortly after the user stops. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_PARAM)
+		tick_down = 1;
+
+	/* Same idiom: start_ongoing_display_drum_preset() re-arms this on
+	 * every turn and on every load/save, so it only actually counts
+	 * down once the user stops touching the PRESET encoder. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_PRESET)
 		tick_down = 1;
 
 	if (!tick_down)

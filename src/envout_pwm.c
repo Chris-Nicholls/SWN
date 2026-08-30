@@ -37,6 +37,7 @@
 #include "lfo_wavetable_bank.h"
 #include "oscillator.h"
 #include "ui_modes.h"
+#include "drum_ui.h"
 
 extern o_params 	params;
 extern o_lfos 		lfos;
@@ -228,29 +229,20 @@ void update_envout_pwm(void){
 	prev_pwm_cycles = now_cycles;
 
 	for (j=0;j<NUM_CHANNELS;j++)
-	{		
-		envout_buf = lfos.preload[j];
-
-		// GLOBAL TRIGGER DETECTION (Runs for all modes)
-		// Detects rising edge crossing 50%
-		if (envout_buf <= PWM_MAX/2)
-			lfos.trig_armed[j]=1;
-		
-		else if ((envout_buf > PWM_MAX/2) && lfos.trig_armed[j])
-		{
-			lfos.trigout[j] = 1;
-			
-			lfos.trig_armed[j]++;
-			if (lfos.trig_armed[j] == TRIG_DURATION)
-				lfos.trig_armed[j] = 0;
-		}
-		else{
-			lfos.trigout[j]=0;
+	{
+		/* ENV OUT jacks are gate outputs for the drum station: full
+		 * scale for DRUM_GATE_TICKS after that channel fires (set in
+		 * drum_ui.c's fire(), called from OSC_TIM), rather than the
+		 * old LFO/LPG waveform. */
+		if (drum_gate_ticks[j] > 0) {
+			drum_gate_ticks[j]--;
+			envout_buf = PWM_MAX;
+		} else {
+			envout_buf = 0;
 		}
 
 		lfos.envout_pwm[j] = envout_buf;
 		lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-		lfos.envout_pwm[j] *= lfos.gain[j];
 	}
 
 	//ENVOUTs A,B are higher res (12 bits)

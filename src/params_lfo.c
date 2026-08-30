@@ -298,8 +298,15 @@ void update_lfo_params(void)
 {
 	apply_lfo_reset();
 	read_LFO_phase();
-	read_LFO_shape();
-	read_LFO_speed_gain();
+	/* read_LFO_shape() and read_LFO_speed_gain() used to live here,
+	 * popping pec_LFOSHAPE/pec_LFOSPEED at 7.2 kHz (this runs off
+	 * PWM_OUTS_TIM) -- they raced drum_ui.c's own, much-lower-rate
+	 * reads of the same queues (main loop) and always won, so the
+	 * drum engine's per-channel voice-cycle and clock divide/multiply
+	 * never actually saw a turn. Their own side effects
+	 * (lfos.shape[]/lfos.gain[]/lfos.lpg_decay[]/lfos.divmult_id[])
+	 * were also live in the background; none of that is read by the
+	 * drum engine, so removed rather than reconciled. */
 	read_lfo_cv();
 }
 
