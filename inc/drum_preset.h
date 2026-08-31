@@ -31,3 +31,11 @@ void	read_drum_preset_ui(void);
 
 uint8_t	drum_preset_selected_slot(void);
 uint8_t	drum_preset_slot_filled(uint8_t slot);
+
+/* Main-loop poll: watches drum_chan[]/grids_x/y/chaos/engine for any
+ * change and, DRUM_AUTOSAVE_DEBOUNCE_MS after the last one settles,
+ * writes it to its own dedicated flash sector -- independent of, and
+ * not shown on, the 16 numbered slots above. init_drum_preset() loads
+ * this back at boot so the module resumes exactly where it was left,
+ * whether or not that state was ever explicitly saved to a slot. */
+void	update_drum_autosave(void);

@@ -289,6 +289,7 @@ int main(void)
 		DIAG_TIME(diag_ml_selbusbtn_peak_cycles, read_selbus_buttons());
 		DIAG_TIME(diag_ml_uimode_peak_cycles,    check_ui_mode_requests());
 		DIAG_TIME(diag_ml_loadsave_peak_cycles,  read_drum_preset_ui());
+		update_drum_autosave();
 		DIAG_TIME(diag_ml_selbusev_peak_cycles,  check_sel_bus_event());
 
 		if (ui_mode == VOCT_CALIBRATE) process_voct_calibrate_mode();
