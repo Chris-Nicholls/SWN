@@ -1,14 +1,13 @@
 TODOs:
-- A way to reset the sequences to the first beat
-- Saving and loading presets doesn't seem to work 
-- UI feedback for grids x/y params - no way to tell where we are right now 
-- figure out what to do with CV ins 
-- crash sounds should be on the open hi hat too 
-  - What can we do with the crash slot that's better? 
-- UI feedback for humanize setting 
-- Clock multiplier shold apply to grids mode too 
-- Euclidean sliders should not be linear. More space near the bottom of the range. 
-- UI feedback for chaos setting 
-- top buttons probably don't need to flash
-- How can we add ghost notes? 
-- Clearer UI for which notes are selected in grids mode. It's quite unclear right now 
+- [ ] figure out what to do with CV ins
+- [x] crash sounds should be on the open hi hat too
+  - Crash voices (mpump/roller) retagged DRUM_CAT_OPEN_HAT instead of a dedicated crash category, which no longer exists. Channels E and F are both DRUM_CAT_OTHER now (explicit kChannelCategory table, since channel index no longer maps 1:1 onto category).
+- [x] Clock multiplier should apply to grids mode too
+  - Added a single shared grids_clock_rate (mirrors grids_x/y/chaos), adjustable via LFO speed whenever Grids mode is active, regardless of selected channel. Also fixed the same "burst instead of spread" issue the euclidean per-channel rate already had for multiply.
+- [x] channel buttons don't need to flash
+  - Removed the flash-on-trigger from the channel A-F buttons (both normal and global-edit-mode display). Left the inner-ring per-channel hit indicator alone -- that's a different LED group, not "channel buttons".
+- [ ] How can we add ghost notes?
+- [ ] Clearer UI for which notes are selected in grids mode. It's quite unclear right now
+  - The new X/Y/chaos bar-graph feedback helps locate the controls, but doesn't show which of the 32 steps are actually active -- still open. 
+- [x] When settings are changed manually, we should auto-save them after a short delay. At startup, load the last used settings (not necessarily a preset)
+  - New dedicated autosave record in flash (sector 16, separate from the 16 numbered preset slots): drum_preset.c polls a snapshot of drum_chan[]/grids state every main-loop tick, and 2s after the last detected change writes it out. init_drum_preset() loads it back at boot before anything else runs, so the module always resumes exactly where it was left, preset or not.
