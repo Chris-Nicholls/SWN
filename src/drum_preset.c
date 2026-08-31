@@ -114,6 +114,17 @@ static void kit_to_live_state(const DrumKitPreset *kit)
 		const DrumChanPreset *p = &kit->chan[c];
 
 		d->ops = (p->voice_index == 0xFF) ? NULL : drum_voice_registry_lookup(p->voice_index);
+		/* Same guard init_drum_ui()/the LFOSHAPE voice-cycle path both
+		 * have and this was missing: refuse to bind a voice whose state
+		 * doesn't fit DRUM_VOICE_STATE_BYTES rather than letting
+		 * ops->init() below write past the end of d->state and corrupt
+		 * whatever's next in drum_chan[] (the following channel's own
+		 * `ops` pointer, first). None of today's registry entries
+		 * actually exceed the budget, but a corrupt/stale flash record
+		 * has no other bounds check on voice_index's *size*, only its
+		 * range (drum_voice_registry_lookup() already clamps that). */
+		if (d->ops && d->ops->state_size > DRUM_VOICE_STATE_BYTES)
+			d->ops = NULL;
 
 		/* n/k/rotation/pattern are read from OSC_TIM -- hold it off
 		 * while rewriting them as a group, same idiom as drum_ui.c's
