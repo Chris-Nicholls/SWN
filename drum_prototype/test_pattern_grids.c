@@ -94,7 +94,13 @@ int main(void)
     {
         GridsState st;
         grids_init(&st);
-        check_eq("init starts at step 0", st.step, 0);
+        /* grids_advance() increments before its step is evaluated, so
+         * init parks one step *before* 0 -- the first advance anywhere
+         * (here or in firmware) wraps exactly onto step 0 instead of
+         * skipping straight to step 1. See grids_init()'s comment. */
+        check_eq("init parks one step before 0", st.step, GRIDS_NUM_STEPS - 1);
+        grids_advance(&st);
+        check_eq("first advance after init lands on step 0", st.step, 0);
 
         for (int i = 0; i < GRIDS_NUM_STEPS; i++)
             grids_advance(&st);

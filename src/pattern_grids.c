@@ -417,7 +417,15 @@ static uint8_t xorshift_byte(uint32_t *s)
 
 void grids_init(GridsState *st)
 {
-	st->step = 0;
+	/* grids_advance() increments *before* the step it leaves behind is
+	 * ever evaluated, so landing directly on 0 here would mean the very
+	 * first advance moves straight to step 1 -- permanently skipping
+	 * step 0 and playing every step one slot early. Parking one step
+	 * before 0 instead means the first advance wraps exactly onto it,
+	 * same trick the Euclid engine's own resync uses (see
+	 * reset_all_patterns() in drum_ui.c, which resets grids_state.step
+	 * this same way for exactly this reason). */
+	st->step = GRIDS_NUM_STEPS - 1;
 	st->rng  = 0x2545F491u;	/* nonzero xorshift seed */
 	for (uint8_t i = 0; i < GRIDS_NUM_PARTS; i++)
 		st->jitter[i] = 0;

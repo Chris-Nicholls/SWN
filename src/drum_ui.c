@@ -838,17 +838,44 @@ static void schedule_pattern_hit(uint8_t c, float base_gain)
  * is more useful for a drum station. Doesn't fire anything -- it just
  * repositions; the next clock tick advances (and triggers) normally
  * from step 0. */
-static void reset_all_patterns(uint16_t *bar_tick)
+static void reset_all_patterns(volatile uint16_t *bar_tick)
 {
 	*bar_tick = 0;
-	grids_state.step = 0;
+
+	/* Both engines advance-then-evaluate (grids_advance()/euclid_advance()
+	 * both increment their step counter before it's read), so landing
+	 * directly on step 0 here would mean the very next advance actually
+	 * evaluates step 1 -- permanently skipping step 0 and playing every
+	 * step one slot early. Parking one step *before* 0 instead, exactly
+	 * like the per-channel do_resync path below already does for
+	 * Euclid, means the very next advance (this same tick, via the
+	 * drain check below) wraps onto 0 correctly. Without this, Grids
+	 * channels stayed one step early forever (nothing else ever
+	 * resyncs them); Euclid channels self-corrected at their own next
+	 * bar boundary, but played one step early for however long that
+	 * took to arrive. */
+	grids_state.step = GRIDS_NUM_STEPS - 1;
+
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
-		drum_chan[c].euclid.current_step = 0;
-		drum_chan[c].step_phase = 0.0f;
+		o_drum_chan *d = &drum_chan[c];
+
+		d->euclid.current_step = d->euclid.n - 1;
+		d->step_phase = 1.0f;
+
+		/* Also resync the divided-clock countdown here, the same way
+		 * the do_resync path recomputes it after firing -- otherwise a
+		 * channel slower than 1x keeps counting down from wherever it
+		 * happened to be, and fires a second, phantom resync of its
+		 * own some bars later on top of this one. */
+		int bars_per_cycle = (d->clock_rate > 0.0f)
+			? (int)(1.0f / d->clock_rate + 0.5f) : 1;
+		if (bars_per_cycle < 1)
+			bars_per_cycle = 1;
+		d->bars_until_resync = (uint8_t)(bars_per_cycle - 1);
 	}
 }
 
-static void read_reset_trigger(uint16_t *bar_tick)
+static void read_reset_trigger(volatile uint16_t *bar_tick)
 {
 	static uint8_t prev_reset_high = 0;
 	uint8_t reset_high = analog_jack_plugged(LFO_CV) && (analog[LFO_CV].bracketed_val > 2048);
