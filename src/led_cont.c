@@ -357,23 +357,17 @@ void update_button_leds(void){
 					 * single "selected" channel to distinguish here.
 					 * Slow pulse via the existing flash clock so it
 					 * reads as a distinct mode, not just "all selected". */
-					brightness = drum_trig_flash[i] ? F_MAX_BRIGHTNESS
-					           : (led_cont.flash_state ? 0.5f : 0.15f);
+					brightness = led_cont.flash_state ? 0.5f : 0.15f;
 					set_rgb_color_brightness(&led_cont.button[i], ledc_WHITE, brightness);
 				}
 
 				else { //no ongoing_display
 
-					/* Drum play: full brightness while the channel is
-					 * flashing from a hit, a steady mid glow for the
-					 * edit-focus channel, dim otherwise. */
-					if (drum_trig_flash[i])
-						brightness = F_MAX_BRIGHTNESS;
-					else if (i == drum_selected_chan)
-						brightness = 0.35f;
-					else
-						brightness = 0.08f;
-
+					/* Drum play: a steady mid glow for the edit-focus
+					 * channel, dim otherwise. No flash-on-hit -- with
+					 * six channels firing independently this read as
+					 * distracting noise more than useful feedback. */
+					brightness = (i == drum_selected_chan) ? 0.35f : 0.08f;
 					set_rgb_color_by_array(&led_cont.button[i], CH_COLOR_MAP[i], brightness);
 				}
 			}
