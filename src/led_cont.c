@@ -794,7 +794,15 @@ void display_drum_param(void)
 			break;
 		case DRUM_PARAM_DISP_HUMANIZE: value = d->humanize; color = ledc_CORAL; break;
 		case DRUM_PARAM_DISP_GHOST:  value = d->ghost_amount;      color = ledc_LIGHT_GREEN; break;
-		case DRUM_PARAM_DISP_CHAOS:  value = (float)pattern_chaos / 255.0f; color = ledc_RED;    break;
+		case DRUM_PARAM_DISP_CHAOS:
+			/* Grids has one shared chaos; Euclid's is per-channel --
+			 * see chaos_amount's doc comment in drum_ui.h. */
+			value = (float)((drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? pattern_chaos : d->chaos_amount) / 255.0f;
+			color = ledc_RED;
+			break;
+		case DRUM_PARAM_DISP_FILTER_RANDOM: value = d->filter_random; color = ledc_DEEP_BLUE;  break;
+		case DRUM_PARAM_DISP_DECAY_RANDOM:  value = d->decay_random;  color = ledc_BUTTERCUP;  break;
+		case DRUM_PARAM_DISP_OTHER_RANDOM:  value = d->other_random;  color = ledc_BRIGHTPINK; break;
 		case DRUM_PARAM_DISP_GRIDS_X:     value = (float)grids_x     / 255.0f; color = ledc_BLUE;   break;
 		case DRUM_PARAM_DISP_GRIDS_Y:     value = (float)grids_y     / 255.0f; color = ledc_FUSHIA;  break;
 		default:                    value = d->filter; color = ledc_AQUA;  break;

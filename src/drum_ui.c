@@ -416,6 +416,21 @@ static void apply_other_delta(uint8_t c, float delta)
 	if (dc->ops) dc->ops->set_other(dc->state, dc->other);
 }
 
+static void apply_filter_random_delta(uint8_t c, float delta)
+{
+	drum_chan[c].filter_random = _CLAMP_F(drum_chan[c].filter_random + delta, 0.0f, 1.0f);
+}
+
+static void apply_decay_random_delta(uint8_t c, float delta)
+{
+	drum_chan[c].decay_random = _CLAMP_F(drum_chan[c].decay_random + delta, 0.0f, 1.0f);
+}
+
+static void apply_other_random_delta(uint8_t c, float delta)
+{
+	drum_chan[c].other_random = _CLAMP_F(drum_chan[c].other_random + delta, 0.0f, 1.0f);
+}
+
 static void apply_pitch_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
@@ -439,6 +454,12 @@ static void apply_ghost_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
 	dc->ghost_amount = _CLAMP_F(dc->ghost_amount + delta, 0.0f, 1.0f);
+}
+
+static void apply_chaos_delta(uint8_t c, float delta)
+{
+	o_drum_chan *dc = &drum_chan[c];
+	dc->chaos_amount = (uint8_t)_CLAMP_I32((int32_t)dc->chaos_amount + (int32_t)delta, 0, 255);
 }
 
 /* Runs `apply` on every channel if global edit mode is active, else on
@@ -465,16 +486,42 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER);
 	}
 
+	/* Push+turn on DEPTH (sec_DISPERSION, dead in the old wavetable UI)
+	 * -- how much random bipolar offset gets added to filter on each
+	 * hit (see apply_random_offsets() in drum_render_channel()). */
+	enc = pop_encoder_q(sec_DISPERSION);
+	if (enc) {
+		apply_to_selected_or_all(apply_filter_random_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER_RANDOM);
+	}
+
 	enc = pop_encoder_q(pec_LATITUDE);
 	if (enc) {
 		apply_to_selected_or_all(apply_decay_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_DECAY);
 	}
 
+	/* Push+turn on LATITUDE (sec_DISPPATT) -- same idea, for decay.
+	 * Used to be ghost-note amount; that moved to OCT push+turn below
+	 * to make room for all three params to get this symmetrically. */
+	enc = pop_encoder_q(sec_DISPPATT);
+	if (enc) {
+		apply_to_selected_or_all(apply_decay_random_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_DECAY_RANDOM);
+	}
+
 	enc = pop_encoder_q(pec_LONGITUDE);
 	if (enc) {
 		apply_to_selected_or_all(apply_other_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_OTHER);
+	}
+
+	/* Push+turn on LONGITUDE (sec_WTSEL_SPREAD, dead in the old
+	 * wavetable UI) -- same idea, for other. */
+	enc = pop_encoder_q(sec_WTSEL_SPREAD);
+	if (enc) {
+		apply_to_selected_or_all(apply_other_random_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_OTHER_RANDOM);
 	}
 
 	enc = pop_encoder_q(pec_TRANSPOSE);
@@ -490,14 +537,6 @@ static void read_voice_encoders(void)
 	if (enc) {
 		apply_to_selected_or_all(apply_humanize_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_HUMANIZE);
-	}
-
-	/* Push+turn on LATITUDE (sec_DISPPATT, dead in the old wavetable UI)
-	 * -- ghost-note amount, same shape as humanize above. */
-	enc = pop_encoder_q(sec_DISPPATT);
-	if (enc) {
-		apply_to_selected_or_all(apply_ghost_delta, (float)enc * DRUM_PARAM_STEP);
-		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
 	}
 
 	/* Clock divide/multiply. FINE used to fine-scale this; FINE is now
@@ -518,13 +557,30 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_SPEED);
 	}
 
-	/* Plain turn on OCT (fully dead otherwise) -- shared chaos amount,
-	 * same value/control in both pattern engines now. See the doc
-	 * comment on `pattern_chaos` in drum_ui.h. */
+	/* Plain turn on OCT (fully dead otherwise) -- chaos amount. Grids
+	 * mode edits the one shared pattern_chaos (its parts have no other
+	 * per-channel identity); Euclid mode edits the selected channel's
+	 * own chaos_amount instead, same selected-vs-global convention as
+	 * every other per-channel knob here, since each Euclid channel
+	 * already has its own independent pattern. */
 	enc = pop_encoder_q(pec_OCT);
 	if (enc) {
-		pattern_chaos = (uint8_t)_CLAMP_I32((int32_t)pattern_chaos + enc * DRUM_CHAOS_STEP, 0, 255);
+		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
+			pattern_chaos = (uint8_t)_CLAMP_I32((int32_t)pattern_chaos + enc * DRUM_CHAOS_STEP, 0, 255);
+		} else {
+			apply_to_selected_or_all(apply_chaos_delta, (float)(enc * DRUM_CHAOS_STEP));
+		}
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_CHAOS);
+	}
+
+	/* Push+turn on OCT (sec_SCALE, dead in the old wavetable UI) --
+	 * ghost-note amount, same shape as humanize above. Paired with
+	 * chaos on the same physical encoder since both are "pattern
+	 * variation" controls. */
+	enc = pop_encoder_q(sec_SCALE);
+	if (enc) {
+		apply_to_selected_or_all(apply_ghost_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
 	}
 
 	/* Voice selection deliberately ignores global edit mode -- "same
@@ -801,6 +857,21 @@ static float humanize_rand01(void)
 	return (float)(humanize_rng >> 8) / (float)0x00FFFFFFu;
 }
 
+/* Rerolls a channel's ghost_pattern for its next bar (Euclid) or lap
+ * (Grids): each of the low `num_bits` bits is independently set with
+ * probability `ghost_amount`. Called once per bar/lap rather than once
+ * per step so the ghost layer holds still as a recognizable pattern of
+ * its own instead of resampling to something different every time the
+ * pattern loops. */
+static uint32_t reroll_ghost_pattern(float ghost_amount, uint8_t num_bits)
+{
+	uint32_t pattern = 0;
+	for (uint8_t i = 0; i < num_bits; i++)
+		if (humanize_rand01() < ghost_amount)
+			pattern |= (1u << i);
+	return pattern;
+}
+
 /* A pattern-triggered hit (never a CV-triggered one -- that already has
  * real-world timing) goes through here instead of calling fire()
  * directly. `base_gain` is whatever the pattern engine already decided
@@ -1000,13 +1071,19 @@ void update_drum_triggers(void)
 			 * advances needs its own trigger evaluation or the
 			 * in-between steps would be silently skipped. */
 			if (grids_advanced) {
+				/* New lap: reroll which steps are ghost hits before
+				 * evaluating step 0 below, so this lap's ghost layer
+				 * (and step 0 itself) is settled up front. */
+				if (grids_state.step == 0)
+					d->ghost_pattern = reroll_ghost_pattern(d->ghost_amount, GRIDS_NUM_STEPS);
+
 				pattern_hit = grids_step_active(&grids_state, (uint8_t)grids_part, grids_state.step,
 				                                grids_x, grids_y, d->density, pattern_chaos, &out_level);
 				/* Ghost: an extra quiet hit on a step Grids itself
 				 * didn't fire -- chaos is already baked into
 				 * grids_step_active() above, so it doesn't need a
 				 * separate roll here the way Euclid does below. */
-				if (!pattern_hit && d->ghost_amount > 0.0f && humanize_rand01() < d->ghost_amount)
+				if (!pattern_hit && ((d->ghost_pattern >> grids_state.step) & 1u))
 					ghost_hit = 1;
 			}
 
@@ -1054,6 +1131,15 @@ void update_drum_triggers(void)
 				 * explicit-fire path to double-count against). */
 				d->euclid.current_step = d->euclid.n - 1;
 				d->step_phase = 1.0f;
+
+				/* This channel's own pattern is restarting -- reroll
+				 * which steps are ghost hits for the lap about to
+				 * begin, same as Grids does on its own lap wrap. Tied
+				 * to do_resync (this channel's own loop boundary), not
+				 * the shared bar_start, so a slowed-down channel's
+				 * ghost layer holds for its whole (possibly
+				 * multi-bar) loop rather than reshuffling mid-pattern. */
+				d->ghost_pattern = reroll_ghost_pattern(d->ghost_amount, (uint8_t)d->euclid.n);
 			} else {
 				d->step_phase += (d->euclid.n / (float)DRUM_BAR_TICKS) * d->clock_rate;
 				/* A sustained clock_rate faster than this channel can
@@ -1084,15 +1170,19 @@ void update_drum_triggers(void)
 			 * go silent, a silent one can fire (at DRUM_UNACCENT_GAIN,
 			 * not the ghost gain -- this is meant to read as "the
 			 * pattern itself varied", not a soft ornament on top of
-			 * it, which is ghost's job below). */
-			if (pattern_chaos > 0 && humanize_rand01() < (float)pattern_chaos / 255.0f) {
+			 * it, which is ghost's job below). Per-channel, unlike
+			 * Grids' one shared pattern_chaos -- see chaos_amount's
+			 * doc comment in drum_ui.h. */
+			if (d->chaos_amount > 0 && humanize_rand01() < (float)d->chaos_amount / 255.0f) {
 				pattern_hit = !pattern_hit;
 				chaos_flip = 1;
 			}
 
 			/* Ghost: an extra quiet hit on a step that still isn't
-			 * firing after the chaos flip above. */
-			if (!pattern_hit && d->ghost_amount > 0.0f && humanize_rand01() < d->ghost_amount)
+			 * firing after the chaos flip above -- from the stable,
+			 * once-per-lap ghost_pattern rolled in do_resync above,
+			 * not a fresh roll every single step. */
+			if (!pattern_hit && ((d->ghost_pattern >> d->euclid.current_step) & 1u))
 				ghost_hit = 1;
 		}
 
@@ -1120,6 +1210,43 @@ void update_drum_triggers(void)
 
 /* ── Audio ─────────────────────────────────────────────────────────────── */
 
+/* Own RNG, separate from humanize_rng: everything below runs in the
+ * audio ISR, not OSC_TIM, so sharing mutable RNG state across two
+ * different interrupt contexts without locking would race. */
+static uint32_t render_rng = 0xB5297A4Du;
+
+static float render_rand01(void)
+{
+	render_rng ^= render_rng << 13;
+	render_rng ^= render_rng >> 17;
+	render_rng ^= render_rng << 5;
+	return (float)(render_rng >> 8) / (float)0x00FFFFFFu;
+}
+
+/* Rerolls a fresh bipolar offset (-amount..+amount) for each of filter/
+ * decay/other that has a nonzero *_random amount, on top of that
+ * param's own base value -- one new roll per hit, not held between
+ * hits. Called right before ops->trigger() below. */
+static void apply_random_offsets(uint8_t c)
+{
+	o_drum_chan *d = &drum_chan[c];
+	if (!d->ops)
+		return;
+
+	if (d->filter_random > 0.0f) {
+		float offset = (render_rand01() * 2.0f - 1.0f) * d->filter_random;
+		d->ops->set_filter(d->state, _CLAMP_F(d->filter + offset, 0.0f, 1.0f));
+	}
+	if (d->decay_random > 0.0f) {
+		float offset = (render_rand01() * 2.0f - 1.0f) * d->decay_random;
+		d->ops->set_decay(d->state, _CLAMP_F(d->decay + offset, 0.0f, 1.0f));
+	}
+	if (d->other_random > 0.0f) {
+		float offset = (render_rand01() * 2.0f - 1.0f) * d->other_random;
+		d->ops->set_other(d->state, _CLAMP_F(d->other + offset, 0.0f, 1.0f));
+	}
+}
+
 void drum_render_channel(uint8_t chan, float *out, int n)
 {
 	o_drum_chan *d = &drum_chan[chan];
@@ -1141,6 +1268,7 @@ void drum_render_channel(uint8_t chan, float *out, int n)
 
 	if (d->trigger_pending) {
 		d->trigger_pending = 0;
+		apply_random_offsets(chan);
 		d->ops->trigger(d->state, d->pitch);
 	}
 

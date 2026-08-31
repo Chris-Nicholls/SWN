@@ -17,11 +17,13 @@
  *     channel's voice within its own fixed category (see
  *     kDrumVoiceRegistry in drum_voice.h), all always acting on the
  *     selected channel (never global).
- *   - Latitude push+turn -> ghost-note amount; OCT turn -> shared
- *     chaos amount (either engine); LFOMODE press -> cycle the
- *     selected channel's CV-jack mode (trigger/density/filter); FINE
- *     held -> record that channel's filter/decay/other performance,
- *     released -> loop it (see read_automation() in drum_ui.c).
+ *   - Depth/Latitude/Longitude push+turn -> that same param's own random
+ *     offset amount, rerolled bipolar on every hit; OCT push+turn ->
+ *     ghost-note amount; OCT turn -> chaos (Grids: shared; Euclid:
+ *     per-channel); LFOMODE press -> cycle the selected channel's
+ *     CV-jack mode (trigger/density/filter); FINE held -> record that
+ *     channel's filter/decay/other performance, released -> loop it
+ *     (see read_automation() in drum_ui.c).
  * Channel roles are fixed by category, one per channel (A=Kick,
  * B=Snare, C=Closed HH, D=Open HH, E=Other, F=Other). The closed-hat
  * channel firing always chokes (instantly silences) the open-hat
@@ -91,13 +93,29 @@ typedef struct o_drum_chan {
 	 * long since decayed to silence, so there's no audible seam. */
 	float				accent_gain;
 
-	/* 0..1, from rotm_LATITUDE push+turn (sec_DISPPATT). Probability,
-	 * rolled once per evaluated step, of an *extra* quiet hit on a step
-	 * that wasn't otherwise going to fire -- a classic ghost note,
-	 * layered on top of the real pattern rather than softening it. See
-	 * update_drum_triggers() for where it's rolled and DRUM_GHOST_GAIN
-	 * for the gain it fires at. */
+	/* 0..1, from rotm_LATITUDE push+turn (sec_DISPPATT). Per-step
+	 * probability that a step gets included in ghost_pattern below --
+	 * a classic ghost note, layered on top of the real pattern rather
+	 * than softening it. See DRUM_GHOST_GAIN for the gain it fires at. */
 	float				ghost_amount;
+
+	/* Which steps are ghost hits this bar/lap -- bit i set means step i
+	 * (Euclid: 0..n-1; Grids: 0..31, this channel's own copy even
+	 * though the step position itself is shared) fires a ghost hit if
+	 * it wasn't already a real one. Rerolled once per bar (Euclid) or
+	 * lap (Grids) from ghost_amount rather than fresh every single
+	 * step, so the ghost layer reads as a stable pattern of its own
+	 * instead of a different random sprinkle every time round. See
+	 * update_drum_triggers(). */
+	uint32_t			ghost_pattern;
+
+	/* 0..255, from OCT turn while in Euclid mode (same control, scale,
+	 * and step size as the shared pattern_chaos it stands in for --
+	 * see read_voice_encoders()). Grids-driven channels keep reading
+	 * the one shared pattern_chaos instead; per-channel chaos is only
+	 * meaningful for Euclid, where each channel already has its own
+	 * independent pattern. */
+	uint8_t				chaos_amount;
 
 	/* 0..1, from rotm_TRANSPOSE push+turn (sec_OSC_SPREAD). Applied to
 	 * every pattern-triggered hit (both engines; not CV-triggered
@@ -116,6 +134,16 @@ typedef struct o_drum_chan {
 	float				filter;			// 0..1, rotm_DEPTH
 	float				decay;			// 0..1, rotm_LATITUDE
 	float				other;			// 0..1, rotm_LONGITUDE
+
+	/* 0..1, from each of DEPTH/LATITUDE/LONGITUDE's own push+turn
+	 * (sec_DISPERSION/sec_DISPPATT/sec_WTSEL_SPREAD respectively, all
+	 * dead in the old wavetable UI). How much random bipolar offset
+	 * (-amount..+amount) gets added to that param's own base value
+	 * every time this channel fires -- a fresh reroll per hit, not
+	 * held between hits. See apply_random_offsets() in drum_ui.c. */
+	float				filter_random;
+	float				decay_random;
+	float				other_random;
 
 	/* Per-channel clock divide/multiply, from rotm_LFOSPEED acting on
 	 * the selected channel only (not global). clock_divmult_id indexes
@@ -217,14 +245,13 @@ extern GridsState	grids_state;
 extern uint8_t		grids_x;
 extern uint8_t		grids_y;
 
-/* Shared perturbation amount, 0..255, edited via a plain turn of the
- * OCT encoder (rotm_OCT/pec_OCT -- otherwise fully dead) regardless of
- * pattern engine. In Grids mode it's threaded straight into
- * grids_step_active()'s own chaos parameter (unchanged from before);
- * in Euclid mode it symmetrically flips a step's fire decision (an
- * active step can go silent, a silent one can fire) -- see
- * update_drum_triggers() in drum_ui.c. Not Grids-specific any more,
- * hence the engine-neutral name. */
+/* Shared perturbation amount, 0..255, for Grids only -- edited via a
+ * plain turn of the OCT encoder (rotm_OCT/pec_OCT -- otherwise fully
+ * dead) while in Grids mode, threaded straight into
+ * grids_step_active()'s own chaos parameter. The same OCT turn edits
+ * each channel's own o_drum_chan.chaos_amount instead while in Euclid
+ * mode, since each Euclid channel already has its own independent
+ * pattern -- see update_drum_triggers() in drum_ui.c. */
 extern uint8_t		pattern_chaos;
 
 /* Shared clock divide/multiply for Grids' one stepper -- see the

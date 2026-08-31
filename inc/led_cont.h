@@ -72,8 +72,11 @@ enum drumParamDisplay{
 	DRUM_PARAM_DISP_OTHER,	// rotm_LONGITUDE
 	DRUM_PARAM_DISP_SPEED,	// rotm_LFOSPEED -- clock_divmult_id, not a plain 0..1
 	DRUM_PARAM_DISP_HUMANIZE,	// rotm_TRANSPOSE push+turn (sec_OSC_SPREAD)
-	DRUM_PARAM_DISP_GHOST,	// rotm_LATITUDE push+turn (sec_DISPPATT)
-	DRUM_PARAM_DISP_CHAOS,	// rotm_OCT turn -- shared, either pattern engine
+	DRUM_PARAM_DISP_GHOST,	// rotm_OCT push+turn (sec_SCALE)
+	DRUM_PARAM_DISP_CHAOS,	// rotm_OCT turn -- Grids-shared or Euclid-per-channel
+	DRUM_PARAM_DISP_FILTER_RANDOM,	// rotm_DEPTH push+turn (sec_DISPERSION)
+	DRUM_PARAM_DISP_DECAY_RANDOM,	// rotm_LATITUDE push+turn (sec_DISPPATT)
+	DRUM_PARAM_DISP_OTHER_RANDOM,	// rotm_LONGITUDE push+turn (sec_WTSEL_SPREAD)
 	DRUM_PARAM_DISP_GRIDS_X,	// browse-encoder turn, Grids mode
 	DRUM_PARAM_DISP_GRIDS_Y,	// browse-encoder push+turn, Grids mode
 };
