@@ -205,6 +205,18 @@ void init_drum_ui(void);
 /* Main-loop poll: sliders, channel buttons, parameter/pattern encoders. */
 void read_drum_ui(void);
 
+/* Call after loading a preset: suspends every channel's slider (k or
+ * Grids density) until the user physically moves it back to
+ * (approximately) match the just-loaded value, so it can't instantly
+ * overwrite what was just loaded. See read_channel_sliders() in
+ * drum_ui.c for why this is needed at all. */
+void drum_ui_request_slider_pickup(void);
+
+/* True while channel c's slider LED should read as "not showing the
+ * real value" (see drum_ui_request_slider_pickup()) -- led_cont.c
+ * pulses it instead of the usual behaviour while this holds. */
+uint8_t drum_ui_slider_pickup_pending(uint8_t chan);
+
 /* OSC_TIM: advances every channel's pattern on each master-clock step and
  * arms triggers (or takes them from a plugged CV jack instead). */
 void update_drum_triggers(void);

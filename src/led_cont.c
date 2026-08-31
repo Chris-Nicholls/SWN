@@ -472,7 +472,6 @@ void update_encoder_leds(void){
 void update_mono_leds(void){
 	uint8_t i;
 	static uint32_t slider_pwm=0;
-	float exp;
 
 	// SLIDERS
 
@@ -496,16 +495,23 @@ void update_mono_leds(void){
 			}
 		}
 		else{
+			/* Software-PWM breathing pulse (~1.4s period) for any
+			 * slider currently in "pickup" -- drum_ui.c is ignoring it
+			 * until it's physically moved back to match a just-loaded
+			 * preset's k/density, so its LED doesn't show the real
+			 * value right now (see drum_ui_request_slider_pickup()).
+			 * Non-pending sliders stay dark: this loop used to dim
+			 * them by the old EQ-level system, which no longer means
+			 * anything post-drum-station and would otherwise just
+			 * sit here doing nothing useful. */
+			uint32_t phase_ms = (HAL_GetTick() / TICKS_PER_MS) % 1400;
+			float tri = (phase_ms < 700) ? (float)phase_ms / 700.0f
+			                              : (float)(1400 - phase_ms) / 700.0f;
+			uint32_t pulse_threshold = (uint32_t)(tri * 32.0f);
+
 			for (i=0;i<NUM_CHANNELS;i++) {
-				uint32_t level = (uint32_t)calc_params.level[i];
-
-				if (calc_params.adjusting_pan_state[i] == pan_CACHED_LEVEL && cached_param_flash_state())
-					level = level < 3000 ? 4095 : 0;
-
-				exp = exp_1voct_10_41V[level] * system_settings.global_brightness;
-				if ((level > 50) && (exp > (slider_pwm*43))){
+				if (drum_ui_slider_pickup_pending(i) && slider_pwm < pulse_threshold)
 					mono_led_on(i);
-				}
 			}
 		}
 	}

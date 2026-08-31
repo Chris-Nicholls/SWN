@@ -227,6 +227,37 @@ static int slider_to_level_hysteretic(float slider01, int current, int num_level
 	return target;
 }
 
+/* After a preset load, a slider sitting anywhere other than the
+ * loaded k/density's own position would otherwise instantly overwrite
+ * it on the very next call below -- this runs every main-loop tick and
+ * has no way to tell "the user just moved this" apart from "we just
+ * loaded a different value than wherever this physical slider happens
+ * to sit", so the loaded pattern density snapped back to the slider
+ * position within a few milliseconds of loading. This is almost
+ * certainly why loading a preset looked like it did nothing.
+ *
+ * Fix: a "soft takeover" per channel, the standard answer to this on
+ * any hardware controller with absolute (non-motorized) faders --
+ * after a load, a channel's slider is ignored until the user actually
+ * moves it back to (approximately) the loaded value, then normal
+ * absolute control resumes. Set by drum_preset.c after a load. */
+static uint8_t slider_pickup_pending[NUM_CHANNELS];
+
+void drum_ui_request_slider_pickup(void)
+{
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++)
+		slider_pickup_pending[c] = 1;
+}
+
+/* For the slider LED: true while channel c's slider is being ignored
+ * (see above), i.e. while its LED does *not* reflect the channel's
+ * real k/density -- the physical slider hasn't been moved to catch up
+ * with a just-loaded preset yet. */
+uint8_t drum_ui_slider_pickup_pending(uint8_t chan)
+{
+	return (chan < NUM_CHANNELS) ? slider_pickup_pending[chan] : 0;
+}
+
 static void read_channel_sliders(void)
 {
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
@@ -242,6 +273,15 @@ static void read_channel_sliders(void)
 			 * the hysteresis margin below means something (a margin on
 			 * a 256-level range would be sub-single-bit). */
 			uint8_t current_detent = (uint8_t)(((uint16_t)drum_chan[c].density * DRUM_DENSITY_DETENTS + 127u) / 255u);
+
+			if (slider_pickup_pending[c]) {
+				int raw_detent = (int)(slider01 * (float)DRUM_DENSITY_DETENTS + 0.5f);
+				if (raw_detent == (int)current_detent)
+					slider_pickup_pending[c] = 0;
+				else
+					continue;
+			}
+
 			int target_detent = slider_to_level_hysteretic(slider01, current_detent, DRUM_DENSITY_DETENTS);
 			uint8_t target_density = (uint8_t)(((uint32_t)target_detent * 255u) / DRUM_DENSITY_DETENTS);
 			if (target_density != drum_chan[c].density) {
@@ -251,7 +291,23 @@ static void read_channel_sliders(void)
 			continue;
 		}
 
-		int target_k = slider_to_level_hysteretic(slider01, e->k, e->n);
+		/* Squared rather than linear: low k values (near the bottom of
+		 * the slider's travel) then span more of the slider's physical
+		 * range, giving finer control over sparse patterns, at the
+		 * cost of coarser control approaching a fully-active one --
+		 * the more usable tradeoff for a density control, where "how
+		 * sparse" matters more than "how dense". */
+		float k_slider01 = slider01 * slider01;
+
+		if (slider_pickup_pending[c]) {
+			int raw_k = (int)(k_slider01 * (float)e->n + 0.5f);
+			if (raw_k == e->k)
+				slider_pickup_pending[c] = 0;
+			else
+				continue;
+		}
+
+		int target_k = slider_to_level_hysteretic(k_slider01, e->k, e->n);
 
 		if (target_k != e->k) {
 			__disable_irq();
