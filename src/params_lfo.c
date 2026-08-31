@@ -306,8 +306,12 @@ void update_lfo_params(void)
 	 * never actually saw a turn. Their own side effects
 	 * (lfos.shape[]/lfos.gain[]/lfos.lpg_decay[]/lfos.divmult_id[])
 	 * were also live in the background; none of that is read by the
-	 * drum engine, so removed rather than reconciled. */
-	read_lfo_cv();
+	 * drum engine, so removed rather than reconciled.
+	 *
+	 * read_lfo_cv() (Global VCA ducking off the LFO CV jack) used to
+	 * live here too -- that jack is now the pattern-reset trigger
+	 * instead (see read_reset_trigger() in drum_ui.c), so the two uses
+	 * would have fought over the same physical input. */
 }
 
 

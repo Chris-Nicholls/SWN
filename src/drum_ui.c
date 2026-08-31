@@ -473,6 +473,13 @@ static void read_pattern_encoder(void)
  * used to belong to has no call site left), so it toggles the kit-wide
  * pattern algorithm. Edge-triggered, not level: holding it must not
  * flip back and forth. */
+/* Set here (main loop), consumed and cleared in update_drum_triggers()
+ * (OSC_TIM) -- same producer/consumer split as trigger_pending/
+ * choke_pending, since the reset it triggers touches current_step/
+ * step_phase/grids_state.step, which only OSC_TIM is otherwise allowed
+ * to write. */
+static volatile uint8_t pattern_resync_pending = 0;
+
 static void read_pattern_engine_button(void)
 {
 	static uint8_t prev_pressed = 0;
@@ -482,6 +489,14 @@ static void read_pattern_engine_button(void)
 		drum_pattern_engine = (drum_pattern_engine == PATTERN_ENGINE_EUCLID)
 		                    ? PATTERN_ENGINE_GRIDS : PATTERN_ENGINE_EUCLID;
 		start_ongoing_display_drum_engine();
+		/* Whichever engine is now active resumes its channels from
+		 * wherever they last were, which can be anywhere -- while
+		 * they were inactive, the master clock (and the two Other channels,
+		 * always euclidean regardless of mode) kept moving without
+		 * them. Force everything back to a synced downbeat rather
+		 * than let the just-switched-to channels start out of phase
+		 * with the ones that never stopped. */
+		pattern_resync_pending = 1;
 	}
 	prev_pressed = now;
 }
@@ -552,6 +567,36 @@ static void schedule_pattern_hit(uint8_t c, float base_gain)
 		fire(c);
 }
 
+/* LFO CV in as a hard pattern reset: on a rising edge past half scale,
+ * every channel jumps straight to step 0 (Grids' shared step included)
+ * and the shared bar counter restarts with it, so the whole kit's
+ * patterns realign to the first beat together. This used to be a
+ * "Global VCA" ducking input (see the removed read_lfo_cv() call in
+ * params_lfo.c's update_lfo_params()) -- a continuous duck level and an
+ * edge-triggered reset can't both live on the same jack, and the reset
+ * is more useful for a drum station. Doesn't fire anything -- it just
+ * repositions; the next clock tick advances (and triggers) normally
+ * from step 0. */
+static void reset_all_patterns(uint16_t *bar_tick)
+{
+	*bar_tick = 0;
+	grids_state.step = 0;
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		drum_chan[c].euclid.current_step = 0;
+		drum_chan[c].step_phase = 0.0f;
+	}
+}
+
+static void read_reset_trigger(uint16_t *bar_tick)
+{
+	static uint8_t prev_reset_high = 0;
+	uint8_t reset_high = analog_jack_plugged(LFO_CV) && (analog[LFO_CV].bracketed_val > 2048);
+
+	if (reset_high && !prev_reset_high)
+		reset_all_patterns(bar_tick);
+	prev_reset_high = reset_high;
+}
+
 void update_drum_triggers(void)
 {
 	static float	prev_clk_pos = 0.0f;
@@ -584,6 +629,13 @@ void update_drum_triggers(void)
 	float clk_pos = lfos.cycle_pos[GLO_CLK];
 	uint8_t clk_tick = (clk_pos < prev_clk_pos);
 	prev_clk_pos = clk_pos;
+
+	read_reset_trigger(&bar_tick);
+
+	if (pattern_resync_pending) {
+		pattern_resync_pending = 0;
+		reset_all_patterns(&bar_tick);
+	}
 
 	/* If a clock cable is plugged in but has gone quiet, read_ext_clk()
 	 * clears lfos.use_ext_clock after its own timeout (2x the last
