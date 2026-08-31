@@ -18,7 +18,7 @@
  *     kDrumVoiceRegistry in drum_voice.h), all always acting on the
  *     selected channel (never global).
  * Channel roles are fixed by category, one per channel (A=Kick,
- * B=Snare, C=Closed HH, D=Open HH, E=Crash, F=Other). The closed-hat
+ * B=Snare, C=Closed HH, D=Open HH, E=Other, F=Other). The closed-hat
  * channel firing always chokes (instantly silences) the open-hat
  * channel, same as a real hi-hat's two sounds sharing one cymbal.
  * All six channels' patterns share one fixed bar length (DRUM_BAR_TICKS
@@ -154,7 +154,7 @@ extern uint8_t		drum_global_edit_mode;
 
 /* Which pattern algorithm drives the kit, toggled kit-wide by
  * butm_LFOVCA_BUTTON. Grids only has kick/snare/hihat data, so it can
- * only drive channels 0..3 (see drum_chan_grids_part()); Crash and
+ * only drive channels 0..3 (see drum_chan_grids_part()); the two Other
  * Other stay euclidean in either mode. */
 enum DrumPatternEngine {
 	PATTERN_ENGINE_EUCLID,

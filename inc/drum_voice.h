@@ -70,18 +70,20 @@ extern const DrumVoiceOps drum_voice_plaits_kick;
 extern const DrumVoiceOps drum_voice_plaits_snare;
 extern const DrumVoiceOps drum_voice_plaits_hihat;
 
-/* Fixed per-channel roles, one category per channel (A=Kick .. F=Other)
- * -- see the "grouped by type" mapping in drum_ui.c's kMvpKit/category
- * table. LFO shape cycles a channel through only its own category's
- * voices, so it always stays "a kick" (etc.) no matter how far you
- * turn it. DRUM_CAT_OTHER is the catch-all for anything that isn't
- * one of the other five (rimshot, tom, cowbell, clap, ride, perc). */
+/* Fixed per-channel roles -- see kChannelCategory in drum_ui.c for the
+ * channel -> category mapping (channels E and F both map to
+ * DRUM_CAT_OTHER, so it's an explicit table, not a 1:1 cast). LFO shape
+ * cycles a channel through only its own category's voices, so it
+ * always stays "a kick" (etc.) no matter how far you turn it.
+ * DRUM_CAT_OTHER is the catch-all for anything that isn't one of the
+ * other four (rimshot, tom, cowbell, clap, ride, perc, crash). Crash
+ * voices are tagged DRUM_CAT_OPEN_HAT, not a category of their own --
+ * they read as more hat-like than a distinct instrument. */
 typedef enum DrumVoiceCategory {
 	DRUM_CAT_KICK,
 	DRUM_CAT_SNARE,
 	DRUM_CAT_CLOSED_HAT,
 	DRUM_CAT_OPEN_HAT,
-	DRUM_CAT_CRASH,
 	DRUM_CAT_OTHER,
 	NUM_DRUM_CATEGORIES,
 } DrumVoiceCategory;

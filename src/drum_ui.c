@@ -51,34 +51,45 @@ volatile uint8_t drum_gate_ticks[NUM_CHANNELS];
  * instead of rotating the selected channel's pattern. */
 static int8_t drum_held_chan = -1;
 
-/* Each channel has a fixed role (category), one per DrumVoiceCategory,
- * in enum order -- channel c's category is literally (DrumVoiceCategory)c
- * (NUM_CHANNELS == NUM_DRUM_CATEGORIES == 6, by design). rotm_LFOSHAPE
- * cycles a channel through only its own category's registry entries
- * (see read_voice_encoders()), so a channel is always "a kick" (etc.)
- * no matter how far you turn it. This table is just the factory-
- * default pick within each category. */
-static const DrumVoiceOps *const kMvpKit[NUM_CHANNELS] = {
-	&drum_voice_mpump_kick,			/* DRUM_CAT_KICK */
-	&drum_voice_mpump_snare,		/* DRUM_CAT_SNARE */
-	&drum_voice_mpump_closed_hat,	/* DRUM_CAT_CLOSED_HAT */
-	&drum_voice_mpump_open_hat,		/* DRUM_CAT_OPEN_HAT */
-	&drum_voice_mpump_crash,		/* DRUM_CAT_CRASH */
-	&drum_voice_mpump_cowbell,		/* DRUM_CAT_OTHER */
+/* Each channel has a fixed role (category), but it's no longer a 1:1
+ * cast onto DrumVoiceCategory: channels E and F both map to
+ * DRUM_CAT_OTHER (crash voices moved into DRUM_CAT_OPEN_HAT instead --
+ * they read as more hat-like than a distinct instrument, so there's no
+ * dedicated crash category any more), hence an explicit table rather
+ * than `(DrumVoiceCategory)c`. rotm_LFOSHAPE cycles a channel through
+ * only its own category's registry entries (see read_voice_encoders()),
+ * so a channel is always "a kick" (etc.) no matter how far you turn it. */
+static const DrumVoiceCategory kChannelCategory[NUM_CHANNELS] = {
+	DRUM_CAT_KICK,
+	DRUM_CAT_SNARE,
+	DRUM_CAT_CLOSED_HAT,
+	DRUM_CAT_OPEN_HAT,
+	DRUM_CAT_OTHER,
+	DRUM_CAT_OTHER,
 };
 
-/* Channel roles are fixed by category (channel c IS category c, see
- * kMvpKit), so this is a plain table, not a per-voice lookup. Grids
- * authors only three parts; both hi-hat channels read the one hihat
- * part (their densities stay independent, so open/closed still thin
- * out separately), and Crash/Other have no Grids data at all. */
+/* Factory-default voice pick within each channel's category. */
+static const DrumVoiceOps *const kMvpKit[NUM_CHANNELS] = {
+	&drum_voice_plaits_kick,		/* DRUM_CAT_KICK */
+	&drum_voice_plaits_snare,		/* DRUM_CAT_SNARE */
+	&drum_voice_plaits_hihat,		/* DRUM_CAT_CLOSED_HAT */
+	&drum_voice_mpump_open_hat,		/* DRUM_CAT_OPEN_HAT */
+	&drum_voice_mpump_rimshot,		/* DRUM_CAT_OTHER (channel E) */
+	&drum_voice_mpump_cowbell,		/* DRUM_CAT_OTHER (channel F) */
+};
+
+/* Channel -> Grids part, a plain table rather than a per-voice lookup:
+ * Grids authors only three parts, and both hi-hat channels read the
+ * one hihat part (their densities stay independent, so open/closed
+ * still thin out separately). Channels E and F (both DRUM_CAT_OTHER)
+ * have no Grids data. */
 static const int8_t kChanGridsPart[NUM_CHANNELS] = {
-	0,	/* DRUM_CAT_KICK       -> Grids kick */
-	1,	/* DRUM_CAT_SNARE      -> Grids snare */
-	2,	/* DRUM_CAT_CLOSED_HAT -> Grids hihat */
-	2,	/* DRUM_CAT_OPEN_HAT   -> Grids hihat, shared */
-	-1,	/* DRUM_CAT_CRASH      -> always euclidean */
-	-1,	/* DRUM_CAT_OTHER      -> always euclidean */
+	0,	/* Kick  -> Grids kick */
+	1,	/* Snare -> Grids snare */
+	2,	/* Closed HH -> Grids hihat */
+	2,	/* Open HH   -> Grids hihat, shared */
+	-1,	/* Other (E) -> always euclidean */
+	-1,	/* Other (F) -> always euclidean */
 };
 
 int8_t drum_chan_grids_part(uint8_t c)
@@ -273,7 +284,7 @@ static void read_channel_sliders(void)
 		float slider01 = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
 
 		/* Grids has no k -- the same slider becomes that part's
-		 * density threshold instead. Crash/Other have no Grids data,
+		 * density threshold instead. The two Other channels have no Grids data,
 		 * so they keep driving k in either mode. */
 		if (chan_is_grids_driven(c)) {
 			/* Quantized to DRUM_DENSITY_DETENTS steps rather than the
@@ -468,8 +479,7 @@ static void read_voice_encoders(void)
 	 * position in each channel's own category" isn't a coherent action
 	 * across channels with different categories, unlike a plain knob
 	 * delta. Cycle the selected channel through its own category's voices only
-	 * (see kMvpKit's comment -- channel c's category is fixed at
-	 * (DrumVoiceCategory)c), so a channel is always "a kick" (etc.) no
+	 * (see kChannelCategory), so a channel is always "a kick" (etc.) no
 	 * matter how far this gets turned. Re-init rather than carry over
 	 * DSP state across a voice swap -- the old voice's envelope/
 	 * oscillator phase means nothing to the new one -- then re-push
@@ -477,7 +487,7 @@ static void read_voice_encoders(void)
 	 * voice's own defaults. */
 	enc = pop_encoder_q(pec_LFOSHAPE);
 	if (enc) {
-		DrumVoiceCategory cat = (DrumVoiceCategory)drum_selected_chan;
+		DrumVoiceCategory cat = kChannelCategory[drum_selected_chan];
 		const DrumVoiceOps *new_ops = cycle_voice_in_category(cat, d->ops, enc);
 		if (new_ops && new_ops->state_size <= DRUM_VOICE_STATE_BYTES) {
 			d->ops = new_ops;
