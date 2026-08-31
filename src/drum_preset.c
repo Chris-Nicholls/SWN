@@ -98,7 +98,7 @@ static void kit_from_live_state(DrumKitPreset *kit)
 	kit->pattern_engine = (uint8_t)drum_pattern_engine;
 	kit->grids_x        = grids_x;
 	kit->grids_y        = grids_y;
-	kit->grids_chaos    = grids_chaos;
+	kit->grids_chaos    = pattern_chaos;
 	kit->grids_clock_divmult_id = grids_clock_divmult_id;
 }
 
@@ -146,7 +146,7 @@ static void kit_to_live_state(const DrumKitPreset *kit)
 	                    ? PATTERN_ENGINE_GRIDS : PATTERN_ENGINE_EUCLID;
 	grids_x     = kit->grids_x;
 	grids_y     = kit->grids_y;
-	grids_chaos = kit->grids_chaos;
+	pattern_chaos = kit->grids_chaos;
 	grids_clock_divmult_id = kit->grids_clock_divmult_id;
 	grids_clock_rate       = calc_divmult_amount(grids_clock_divmult_id);
 

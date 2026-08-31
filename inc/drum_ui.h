@@ -17,6 +17,11 @@
  *     channel's voice within its own fixed category (see
  *     kDrumVoiceRegistry in drum_voice.h), all always acting on the
  *     selected channel (never global).
+ *   - Latitude push+turn -> ghost-note amount; OCT turn -> shared
+ *     chaos amount (either engine); LFOMODE press -> cycle the
+ *     selected channel's CV-jack mode (trigger/density/filter); FINE
+ *     held -> record that channel's filter/decay/other performance,
+ *     released -> loop it (see read_automation() in drum_ui.c).
  * Channel roles are fixed by category, one per channel (A=Kick,
  * B=Snare, C=Closed HH, D=Open HH, E=Other, F=Other). The closed-hat
  * channel firing always chokes (instantly silences) the open-hat
@@ -86,6 +91,14 @@ typedef struct o_drum_chan {
 	 * long since decayed to silence, so there's no audible seam. */
 	float				accent_gain;
 
+	/* 0..1, from rotm_LATITUDE push+turn (sec_DISPPATT). Probability,
+	 * rolled once per evaluated step, of an *extra* quiet hit on a step
+	 * that wasn't otherwise going to fire -- a classic ghost note,
+	 * layered on top of the real pattern rather than softening it. See
+	 * update_drum_triggers() for where it's rolled and DRUM_GHOST_GAIN
+	 * for the gain it fires at. */
+	float				ghost_amount;
+
 	/* 0..1, from rotm_TRANSPOSE push+turn (sec_OSC_SPREAD). Applied to
 	 * every pattern-triggered hit (both engines; not CV-triggered
 	 * hits, which already have real-world timing): a bit of random
@@ -136,8 +149,42 @@ typedef struct o_drum_chan {
 	 * so silencing it has to go through this same flag handoff. */
 	volatile uint8_t	choke_pending;
 
+	/* Which of trigger/density-mod/filter-mod this channel's own CV
+	 * jack (A_VOCT+c) is currently doing -- cycled by butm_LFOMODE_BUTTON.
+	 * See update_drum_triggers() (trigger), read_channel_sliders()
+	 * (density), and read_cv_filter_mod() (filter) in drum_ui.c. */
+	uint8_t				cv_mode;
+
+	/* Automation transport for this channel's filter/decay/other, driven
+	 * by holding FINE (see read_automation() in drum_ui.c): OFF while
+	 * under manual knob control, RECORD while FINE is held (sampling the
+	 * live knob values into the lanes below once per bar_tick), PLAY
+	 * once FINE is released (looping the last recording, linearly
+	 * interpolated between its DRUM_BAR_TICKS points). Turning
+	 * Depth/Latitude/Longitude manually while PLAY-ing cancels back to
+	 * OFF -- see apply_filter_delta() etc. Not saved with presets/
+	 * autosave in v1; lost on power-cycle, same as any other live
+	 * performance loop. */
+	uint8_t				automation_state;
+	float				automation_filter[DRUM_BAR_TICKS];
+	float				automation_decay[DRUM_BAR_TICKS];
+	float				automation_other[DRUM_BAR_TICKS];
+
 	uint8_t				state[DRUM_VOICE_STATE_BYTES] __attribute__((aligned(8)));
 } o_drum_chan;
+
+enum ChannelCvMode {
+	CV_MODE_TRIGGER,	/* today's only behavior: rising edge fires a hit, bypassing the pattern */
+	CV_MODE_DENSITY,	/* feeds read_channel_sliders()'s density/k input instead of the physical slider */
+	CV_MODE_FILTER,		/* modulates filter cutoff on top of the manual knob position */
+	NUM_CV_MODES,
+};
+
+enum DrumAutomationState {
+	AUTOMATION_OFF,
+	AUTOMATION_RECORD,
+	AUTOMATION_PLAY,
+};
 
 extern o_drum_chan	drum_chan[NUM_CHANNELS];
 extern uint8_t		drum_selected_chan;
@@ -164,12 +211,21 @@ enum DrumPatternEngine {
 extern enum DrumPatternEngine	drum_pattern_engine;
 
 /* One shared 32-step position for the whole kit (Grids has no
- * per-channel step count), plus its shared X/Y map position and chaos
- * amount, all 0..255. */
+ * per-channel step count), plus its shared X/Y map position, all
+ * 0..255. */
 extern GridsState	grids_state;
 extern uint8_t		grids_x;
 extern uint8_t		grids_y;
-extern uint8_t		grids_chaos;
+
+/* Shared perturbation amount, 0..255, edited via a plain turn of the
+ * OCT encoder (rotm_OCT/pec_OCT -- otherwise fully dead) regardless of
+ * pattern engine. In Grids mode it's threaded straight into
+ * grids_step_active()'s own chaos parameter (unchanged from before);
+ * in Euclid mode it symmetrically flips a step's fire decision (an
+ * active step can go silent, a silent one can fire) -- see
+ * update_drum_triggers() in drum_ui.c. Not Grids-specific any more,
+ * hence the engine-neutral name. */
+extern uint8_t		pattern_chaos;
 
 /* Shared clock divide/multiply for Grids' one stepper -- see the
  * comment on its definition in drum_ui.c. Same LFO_DIVMULTS[] scale as

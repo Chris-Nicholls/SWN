@@ -686,6 +686,10 @@ void calculate_led_ring(void){
 				display_drum_engine();
 				break;
 
+			case ONGOING_DISPLAY_DRUM_CV_MODE:
+				display_drum_cv_mode();
+				break;
+
 			default:
 				display_drum_pattern();
 				break;
@@ -789,9 +793,10 @@ void display_drum_param(void)
 			color = ledc_MED_GREEN;
 			break;
 		case DRUM_PARAM_DISP_HUMANIZE: value = d->humanize; color = ledc_CORAL; break;
+		case DRUM_PARAM_DISP_GHOST:  value = d->ghost_amount;      color = ledc_LIGHT_GREEN; break;
+		case DRUM_PARAM_DISP_CHAOS:  value = (float)pattern_chaos / 255.0f; color = ledc_RED;    break;
 		case DRUM_PARAM_DISP_GRIDS_X:     value = (float)grids_x     / 255.0f; color = ledc_BLUE;   break;
 		case DRUM_PARAM_DISP_GRIDS_Y:     value = (float)grids_y     / 255.0f; color = ledc_FUSHIA;  break;
-		case DRUM_PARAM_DISP_GRIDS_CHAOS: value = (float)grids_chaos / 255.0f; color = ledc_RED;    break;
 		default:                    value = d->filter; color = ledc_AQUA;  break;
 	}
 
@@ -886,6 +891,34 @@ void display_drum_engine(void)
 void start_ongoing_display_drum_engine(void)
 {
 	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_ENGINE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Brief whole-ring flash confirming the selected channel's CV-jack mode
+ * just cycled -- same one-shot idiom as display_drum_engine(), one
+ * colour per mode so it's at least distinguishable at a glance even
+ * without reading the mode off anywhere else. */
+void display_drum_cv_mode(void)
+{
+	enum ledColors color;
+	uint8_t i;
+
+	switch (drum_chan[drum_selected_chan].cv_mode) {
+		case CV_MODE_DENSITY: color = ledc_BLUE; break;
+		case CV_MODE_FILTER:  color = ledc_AQUA; break;
+		default:              color = ledc_WHITE; break;	/* CV_MODE_TRIGGER */
+	}
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, F_MAX_BRIGHTNESS);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_cv_mode(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_CV_MODE;
 	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
@@ -1546,6 +1579,10 @@ void update_ongoing_display_timers(void){
 	/* One-shot flash on the mode-toggle press, so it always times out
 	 * on its own -- nothing re-arms it while the button is held. */
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_ENGINE)
+		tick_down = 1;
+
+	/* Same one-shot idiom for the CV-mode-cycle flash. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_CV_MODE)
 		tick_down = 1;
 
 	if (!tick_down)

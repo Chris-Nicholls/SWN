@@ -24,9 +24,9 @@ uint8_t		drum_global_edit_mode = 0;
 enum DrumPatternEngine	drum_pattern_engine = PATTERN_ENGINE_EUCLID;
 
 GridsState	grids_state;
-uint8_t		grids_x     = 128;
-uint8_t		grids_y     = 128;
-uint8_t		grids_chaos = 0;	/* off by default: the map alone is already musical */
+uint8_t		grids_x       = 128;
+uint8_t		grids_y       = 128;
+uint8_t		pattern_chaos = 0;	/* off by default: the map/pattern alone is already musical */
 
 /* Clock divide/multiply for Grids' one shared stepper -- unlike the
  * euclidean per-channel clock_rate, this is a single value shared by
@@ -104,12 +104,15 @@ static uint8_t chan_is_grids_driven(uint8_t c)
 }
 
 #define DRUM_CV_TRIG_THRESHOLD	0.2f
-#define DRUM_ACCENT_GAIN		1.0f	/* Grids-accented hit (level > GRIDS_ACCENT_LEVEL): full loudness */
-#define DRUM_UNACCENT_GAIN		0.6f	/* everything else: pulled back rather than boosted, so accents can't newly clip */
+#define DRUM_ACCENT_GAIN		1.0f	/* accented hit (Grids level > GRIDS_ACCENT_LEVEL, or Euclid's own downbeat): full loudness */
+#define DRUM_UNACCENT_GAIN		0.6f	/* everything else real: pulled back rather than boosted, so accents can't newly clip */
+#define DRUM_GHOST_GAIN			0.25f	/* extra hit ghost_amount inserts on an otherwise-silent step -- quieter than any real hit */
 #define DRUM_DENSITY_DETENTS	32u		/* slider -> Grids density resolution, see read_channel_sliders() */
 #define DRUM_GRIDS_XY_STEP		6		/* encoder clicks are coarse: ~42 turns spans the whole map */
+#define DRUM_CHAOS_STEP			6		/* same coarseness as DRUM_GRIDS_XY_STEP, one shared 0..255 range */
 #define DRUM_PARAM_STEP			0.02f
 #define DRUM_PITCH_STEP			1.0f	/* one semitone per encoder click */
+#define DRUM_CV_FILTER_MOD_RANGE	0.5f	/* +/- this much filter, bipolar around the manual knob position, at full-scale CV */
 /* LED update runs at 60 Hz, so 4 ticks is a ~66 ms visible blip. */
 #define DRUM_FLASH_TICKS		4
 
@@ -281,7 +284,18 @@ static void read_channel_sliders(void)
 {
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
 		EuclidChannelState *e = &drum_chan[c].euclid;
-		float slider01 = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+
+		/* CV_MODE_DENSITY feeds this exact same density/k input from
+		 * that channel's own CV jack instead of its physical slider --
+		 * everything below (hysteresis, pickup, the squared k curve)
+		 * is unchanged either way. Falls back to the physical slider
+		 * if nothing's actually patched, so picking this mode with an
+		 * empty jack doesn't just freeze the channel. */
+		float slider01;
+		if (drum_chan[c].cv_mode == CV_MODE_DENSITY && analog_jack_plugged(A_VOCT + c))
+			slider01 = _CLAMP_F(analog[A_VOCT + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+		else
+			slider01 = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
 
 		/* Grids has no k -- the same slider becomes that part's
 		 * density threshold instead. The two Other channels have no Grids data,
@@ -363,12 +377,25 @@ static void read_channel_buttons(void)
 	drum_held_chan = held;
 }
 
+/* Manually touching a knob always wins over a looping automation
+ * playback on that same channel -- same "the real control wins"
+ * precedent as the slider-pickup fix and CV-density mode. Doesn't apply
+ * while RECORD is armed (FINE held): that's the manual knob turning
+ * itself being captured, not something to cancel. */
+static void cancel_automation_if_playing(uint8_t c)
+{
+	o_drum_chan *dc = &drum_chan[c];
+	if (dc->automation_state == AUTOMATION_PLAY)
+		dc->automation_state = AUTOMATION_OFF;
+}
+
 /* Applies `delta` to *one* channel's filter, re-pushing to its voice.
  * Broken out so the DEPTH handler below can hit either just the
  * selected channel or (in global edit mode) all six identically. */
 static void apply_filter_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_playing(c);
 	dc->filter = _CLAMP_F(dc->filter + delta, 0.0f, 1.0f);
 	if (dc->ops) dc->ops->set_filter(dc->state, dc->filter);
 }
@@ -376,6 +403,7 @@ static void apply_filter_delta(uint8_t c, float delta)
 static void apply_decay_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_playing(c);
 	dc->decay = _CLAMP_F(dc->decay + delta, 0.0f, 1.0f);
 	if (dc->ops) dc->ops->set_decay(dc->state, dc->decay);
 }
@@ -383,6 +411,7 @@ static void apply_decay_delta(uint8_t c, float delta)
 static void apply_other_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_playing(c);
 	dc->other = _CLAMP_F(dc->other + delta, 0.0f, 1.0f);
 	if (dc->ops) dc->ops->set_other(dc->state, dc->other);
 }
@@ -404,6 +433,12 @@ static void apply_humanize_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
 	dc->humanize = _CLAMP_F(dc->humanize + delta, 0.0f, 1.0f);
+}
+
+static void apply_ghost_delta(uint8_t c, float delta)
+{
+	o_drum_chan *dc = &drum_chan[c];
+	dc->ghost_amount = _CLAMP_F(dc->ghost_amount + delta, 0.0f, 1.0f);
 }
 
 /* Runs `apply` on every channel if global edit mode is active, else on
@@ -457,22 +492,39 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_HUMANIZE);
 	}
 
-	/* Clock divide/multiply. FINE gives fractional crossfade between
-	 * ratios, matching that control's feel elsewhere on the panel. In
-	 * Grids mode this is one shared rate for the whole stepper --
-	 * unconditional on selected channel, same as x/y/chaos -- since all
-	 * four Grids-driven channels read the one grids_state.step; in
-	 * Euclid mode it stays per-channel (global-edit-mode-aware). */
+	/* Push+turn on LATITUDE (sec_DISPPATT, dead in the old wavetable UI)
+	 * -- ghost-note amount, same shape as humanize above. */
+	enc = pop_encoder_q(sec_DISPPATT);
+	if (enc) {
+		apply_to_selected_or_all(apply_ghost_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
+	}
+
+	/* Clock divide/multiply. FINE used to fine-scale this; FINE is now
+	 * dedicated entirely to automation record/play (see
+	 * read_automation()), so this always uses its one coarse step now.
+	 * In Grids mode this is one shared rate for the whole stepper --
+	 * unconditional on selected channel, same as x/y -- since all four
+	 * Grids-driven channels read the one grids_state.step; in Euclid
+	 * mode it stays per-channel (global-edit-mode-aware). */
 	enc = pop_encoder_q(pec_LFOSPEED);
 	if (enc) {
-		float step = switch_pressed(FINE_BUTTON) ? (float)enc * F_SCALING_FINE_LFO_SPEED : (float)enc;
 		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
-			grids_clock_divmult_id = _CLAMP_F(grids_clock_divmult_id + step, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
+			grids_clock_divmult_id = _CLAMP_F(grids_clock_divmult_id + (float)enc, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
 			grids_clock_rate = calc_divmult_amount(grids_clock_divmult_id);
 		} else {
-			apply_to_selected_or_all(apply_clock_rate_delta, step);
+			apply_to_selected_or_all(apply_clock_rate_delta, (float)enc);
 		}
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_SPEED);
+	}
+
+	/* Plain turn on OCT (fully dead otherwise) -- shared chaos amount,
+	 * same value/control in both pattern engines now. See the doc
+	 * comment on `pattern_chaos` in drum_ui.h. */
+	enc = pop_encoder_q(pec_OCT);
+	if (enc) {
+		pattern_chaos = (uint8_t)_CLAMP_I32((int32_t)pattern_chaos + enc * DRUM_CHAOS_STEP, 0, 255);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_CHAOS);
 	}
 
 	/* Voice selection deliberately ignores global edit mode -- "same
@@ -516,9 +568,6 @@ static void read_pattern_encoder(void)
 			if (drum_held_chan >= 0) {
 				o_drum_chan *held = &drum_chan[drum_held_chan];
 				held->level = _CLAMP_F(held->level + (float)enc * DRUM_PARAM_STEP, 0.0f, 1.0f);
-			} else if (switch_pressed(FINE_BUTTON)) {
-				grids_chaos = (uint8_t)_CLAMP_I32((int32_t)grids_chaos + enc * DRUM_GRIDS_XY_STEP, 0, 255);
-				start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_CHAOS);
 			} else {
 				grids_x = (uint8_t)_CLAMP_I32((int32_t)grids_x + enc * DRUM_GRIDS_XY_STEP, 0, 255);
 				start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_X);
@@ -587,6 +636,129 @@ static void read_pattern_engine_button(void)
 	prev_pressed = now;
 }
 
+/* butm_LFOMODE_BUTTON is otherwise fully dead on the drum station --
+ * cycles the selected channel's CV-jack mode (or every channel's, in
+ * global edit mode, same selected-vs-global convention as the knob
+ * handlers above). Edge-triggered for the same reason the pattern-
+ * engine button above is. */
+static void read_cv_mode_button(void)
+{
+	static uint8_t prev_pressed = 0;
+	uint8_t now = (button_pressed(butm_LFOMODE_BUTTON) != RELEASED);
+
+	if (now && !prev_pressed) {
+		if (drum_global_edit_mode) {
+			for (uint8_t c = 0; c < NUM_CHANNELS; c++)
+				drum_chan[c].cv_mode = (drum_chan[c].cv_mode + 1) % NUM_CV_MODES;
+		} else {
+			o_drum_chan *d = &drum_chan[drum_selected_chan];
+			d->cv_mode = (d->cv_mode + 1) % NUM_CV_MODES;
+		}
+		start_ongoing_display_drum_cv_mode();
+	}
+	prev_pressed = now;
+}
+
+/* CV_MODE_FILTER: adds the patched CV (bipolar around the manual knob
+ * position, so it can sweep the filter both ways rather than only ever
+ * opening it further) on top of `filter` and re-pushes every tick --
+ * unlike the encoder-driven filter/decay/other above, this has to run
+ * continuously rather than only on a change, since the CV itself can be
+ * moving every tick. Cheap: set_filter() is a coefficient recompute,
+ * not audio-rate work. Leaves `filter` itself untouched so the manual
+ * knob position underneath is never clobbered -- switching back to
+ * CV_MODE_TRIGGER/DENSITY (or unpatching) just drops the modulation and
+ * resumes exactly at the knob's own value. */
+static void read_cv_filter_mod(void)
+{
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		o_drum_chan *d = &drum_chan[c];
+		if (d->cv_mode != CV_MODE_FILTER || !d->ops)
+			continue;
+
+		float mod = 0.0f;
+		if (analog_jack_plugged(A_VOCT + c)) {
+			float cv01 = _CLAMP_F(analog[A_VOCT + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+			mod = (cv01 - 0.5f) * 2.0f * DRUM_CV_FILTER_MOD_RANGE;
+		}
+
+		d->ops->set_filter(d->state, _CLAMP_F(d->filter + mod, 0.0f, 1.0f));
+	}
+}
+
+/* Bar-tick and the master clock's fractional progress through the
+ * current tick, both written once per OSC_TIM tick in
+ * update_drum_triggers() below and read (loosely -- a stale-by-one-tick
+ * read is imperceptible here) by read_automation() on the main loop to
+ * index/interpolate the automation lanes. */
+static volatile uint16_t g_bar_tick  = 0;
+static volatile float    g_clk_frac  = 0.0f;
+
+/* FINE dedicated entirely to automation record/play for filter/decay/
+ * other, one lane per channel, one bar long (DRUM_BAR_TICKS points,
+ * linearly interpolated between them). Holding FINE arms/continues
+ * RECORD on the selected channel (or every channel, in global edit
+ * mode) -- sampling live knob values once per bar_tick, wrapping and
+ * overwriting continuously, so a hold of any length just keeps the
+ * most recent lap. Releasing commits and starts PLAY, looping forever
+ * until a manual knob edit cancels it (see cancel_automation_if_playing())
+ * or FINE is held again for a fresh take. Playback always runs for
+ * every channel regardless of selection, so switching which channel is
+ * selected mid-loop doesn't stall one that's already playing. */
+/* Guards against exactly the bug that caused a boot crash: a
+ * momentary power-on glitch on FINE's GPIO read as a "press" for a
+ * tick or two arms RECORD, and the instant it clears (still within
+ * the same boot sequence, no user anywhere near the panel) the old
+ * code committed straight to PLAY -- which then pushed a bogus
+ * (all-zero, since the lanes are freshly memset) value into that
+ * channel's voice on every single tick forever. Requiring a real,
+ * sustained hold before a take counts as valid closes that off, and
+ * is also just better behavior on its own terms: a "recording" a
+ * few milliseconds long was never a usable loop anyway. */
+#define AUTOMATION_MIN_RECORD_MS	200u
+
+static void read_automation(void)
+{
+	static uint32_t record_start_ms[NUM_CHANNELS];
+
+	uint8_t fine_held = switch_pressed(FINE_BUTTON);
+	uint32_t now_ms = HAL_GetTick() / TICKS_PER_MS;
+	uint16_t tick = g_bar_tick;
+	uint16_t next = (tick + 1) % DRUM_BAR_TICKS;
+	float frac = g_clk_frac;
+
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		o_drum_chan *d = &drum_chan[c];
+		uint8_t recording = fine_held && (drum_global_edit_mode || c == drum_selected_chan);
+
+		if (recording) {
+			if (d->automation_state != AUTOMATION_RECORD)
+				record_start_ms[c] = now_ms;
+			d->automation_state = AUTOMATION_RECORD;
+			d->automation_filter[tick] = d->filter;
+			d->automation_decay[tick]  = d->decay;
+			d->automation_other[tick]  = d->other;
+			continue;
+		}
+
+		if (d->automation_state == AUTOMATION_RECORD) {
+			d->automation_state = ((now_ms - record_start_ms[c]) >= AUTOMATION_MIN_RECORD_MS)
+			                     ? AUTOMATION_PLAY : AUTOMATION_OFF;
+		}
+
+		if (d->automation_state != AUTOMATION_PLAY || !d->ops)
+			continue;
+
+		d->filter = _CLAMP_F(d->automation_filter[tick] + (d->automation_filter[next] - d->automation_filter[tick]) * frac, 0.0f, 1.0f);
+		d->decay  = _CLAMP_F(d->automation_decay[tick]  + (d->automation_decay[next]  - d->automation_decay[tick])  * frac, 0.0f, 1.0f);
+		d->other  = _CLAMP_F(d->automation_other[tick]  + (d->automation_other[next]  - d->automation_other[tick])  * frac, 0.0f, 1.0f);
+
+		d->ops->set_filter(d->state, d->filter);
+		d->ops->set_decay(d->state, d->decay);
+		d->ops->set_other(d->state, d->other);
+	}
+}
+
 void read_drum_ui(void)
 {
 	read_channel_sliders();
@@ -594,6 +766,9 @@ void read_drum_ui(void)
 	read_voice_encoders();
 	read_pattern_encoder();
 	read_pattern_engine_button();
+	read_cv_mode_button();
+	read_cv_filter_mod();
+	read_automation();
 }
 
 /* ── Clock / trigger ─────────────────────────────────────────────────── */
@@ -687,7 +862,6 @@ void update_drum_triggers(void)
 {
 	static float	prev_clk_pos = 0.0f;
 	static uint8_t	prev_cv_high[NUM_CHANNELS];
-	static uint16_t	bar_tick = 0;	/* 0..DRUM_BAR_TICKS-1, shared by every channel */
 
 	/* The global clock's cycle position is advanced by update_lfos() off
 	 * the recovered external/internal clock; a wrap back to ~0 is one
@@ -715,12 +889,13 @@ void update_drum_triggers(void)
 	float clk_pos = lfos.cycle_pos[GLO_CLK];
 	uint8_t clk_tick = (clk_pos < prev_clk_pos);
 	prev_clk_pos = clk_pos;
+	g_clk_frac = clk_pos;	/* read by read_automation() on the main loop for lane interpolation */
 
-	read_reset_trigger(&bar_tick);
+	read_reset_trigger(&g_bar_tick);
 
 	if (pattern_resync_pending) {
 		pattern_resync_pending = 0;
-		reset_all_patterns(&bar_tick);
+		reset_all_patterns(&g_bar_tick);
 	}
 
 	/* If a clock cable is plugged in but has gone quiet, read_ext_clk()
@@ -734,7 +909,7 @@ void update_drum_triggers(void)
 	uint8_t clock_present = !jack_plugged(CLK_SENSE) || lfos.use_ext_clock;
 	uint8_t clk_step = clk_tick && clock_present;
 
-	uint8_t bar_start = clk_step && (bar_tick == 0);
+	uint8_t bar_start = clk_step && (g_bar_tick == 0);
 
 	/* Grids shares one 32-step position across all its parts, so it
 	 * advances once here rather than per-channel -- none of the
@@ -771,16 +946,21 @@ void update_drum_triggers(void)
 
 		uint8_t cv_high = 0;
 
-		/* A plugged CV jack takes over as this channel's trigger source,
-		 * but the pattern keeps advancing underneath so unplugging drops
-		 * back in sync rather than at a stale step. */
-		uint8_t cv_override = analog_jack_plugged(A_VOCT + c);
+		/* A plugged CV jack takes over as this channel's trigger source
+		 * only in CV_MODE_TRIGGER -- CV_MODE_DENSITY/FILTER are read
+		 * elsewhere (read_channel_sliders()/read_cv_filter_mod(), main
+		 * loop) and leave the pattern engine driving triggers normally
+		 * here. Either way the pattern keeps advancing underneath, so
+		 * switching mode or unplugging drops back in sync rather than
+		 * at a stale step. */
+		uint8_t cv_override = (d->cv_mode == CV_MODE_TRIGGER) && analog_jack_plugged(A_VOCT + c);
 		if (cv_override) {
 			float cv = analog[A_VOCT + c].lpf_val / 4095.0f;
 			cv_high = (cv > DRUM_CV_TRIG_THRESHOLD);
 		}
 
 		uint8_t pattern_hit = 0;
+		uint8_t ghost_hit = 0;
 		int8_t grids_part = (drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? drum_chan_grids_part(c) : -1;
 
 		if (grids_part >= 0) {
@@ -792,9 +972,16 @@ void update_drum_triggers(void)
 			 * subsequent OSC_TIM ticks, see above), and each of those
 			 * advances needs its own trigger evaluation or the
 			 * in-between steps would be silently skipped. */
-			if (grids_advanced)
+			if (grids_advanced) {
 				pattern_hit = grids_step_active(&grids_state, (uint8_t)grids_part, grids_state.step,
-				                                grids_x, grids_y, d->density, grids_chaos, &out_level);
+				                                grids_x, grids_y, d->density, pattern_chaos, &out_level);
+				/* Ghost: an extra quiet hit on a step Grids itself
+				 * didn't fire -- chaos is already baked into
+				 * grids_step_active() above, so it doesn't need a
+				 * separate roll here the way Euclid does below. */
+				if (!pattern_hit && d->ghost_amount > 0.0f && humanize_rand01() < d->ghost_amount)
+					ghost_hit = 1;
+			}
 
 			if (cv_override) {
 				/* CV bypasses Grids entirely -- no level to derive an
@@ -807,6 +994,8 @@ void update_drum_triggers(void)
 			} else if (pattern_hit) {
 				float base_gain = (out_level > GRIDS_ACCENT_LEVEL) ? DRUM_ACCENT_GAIN : DRUM_UNACCENT_GAIN;
 				schedule_pattern_hit(c, base_gain);
+			} else if (ghost_hit) {
+				schedule_pattern_hit(c, DRUM_GHOST_GAIN);
 			}
 
 			prev_cv_high[c] = cv_high;
@@ -856,24 +1045,50 @@ void update_drum_triggers(void)
 		 * a flag, not a counter) instead of the intended rapid-fire
 		 * notes. Spreading the drain across the ~1.8kHz ticks between
 		 * master-clock pulses gives them real, if tight, spacing. */
+		uint8_t chaos_flip = 0;
+
 		if (d->step_phase >= 1.0f) {
 			d->step_phase -= 1.0f;
-			if (euclid_advance(&d->euclid))
-				pattern_hit = 1;
+			pattern_hit = euclid_advance(&d->euclid);
+
+			/* Chaos: symmetric flip of this step's fire decision --
+			 * borrowed from Grids, where a chaos-perturbed level can
+			 * land either side of its threshold. An active step can
+			 * go silent, a silent one can fire (at DRUM_UNACCENT_GAIN,
+			 * not the ghost gain -- this is meant to read as "the
+			 * pattern itself varied", not a soft ornament on top of
+			 * it, which is ghost's job below). */
+			if (pattern_chaos > 0 && humanize_rand01() < (float)pattern_chaos / 255.0f) {
+				pattern_hit = !pattern_hit;
+				chaos_flip = 1;
+			}
+
+			/* Ghost: an extra quiet hit on a step that still isn't
+			 * firing after the chaos flip above. */
+			if (!pattern_hit && d->ghost_amount > 0.0f && humanize_rand01() < d->ghost_amount)
+				ghost_hit = 1;
 		}
 
 		if (cv_override) {
 			if (cv_high && !prev_cv_high[c])
 				fire(c);
 		} else if (pattern_hit) {
-			schedule_pattern_hit(c, 1.0f);
+			/* Euclid's own accent: the first step of the pattern
+			 * (current_step wraps to 0 right after euclid_advance())
+			 * reads as the downbeat and fires loud, same binary split
+			 * Grids already has -- everything else, including a
+			 * chaos-flipped-on step, fires normal. */
+			float base_gain = (!chaos_flip && d->euclid.current_step == 0) ? DRUM_ACCENT_GAIN : DRUM_UNACCENT_GAIN;
+			schedule_pattern_hit(c, base_gain);
+		} else if (ghost_hit) {
+			schedule_pattern_hit(c, DRUM_GHOST_GAIN);
 		}
 
 		prev_cv_high[c] = cv_high;
 	}
 
 	if (clk_step)
-		bar_tick = (bar_tick + 1) % DRUM_BAR_TICKS;
+		g_bar_tick = (g_bar_tick + 1) % DRUM_BAR_TICKS;
 }
 
 /* ── Audio ─────────────────────────────────────────────────────────────── */

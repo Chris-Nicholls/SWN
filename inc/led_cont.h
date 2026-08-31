@@ -59,6 +59,7 @@ enum ongoingDisplays{
 	ONGOING_DISPLAY_DRUM_PARAM,
 	ONGOING_DISPLAY_DRUM_PRESET,
 	ONGOING_DISPLAY_DRUM_ENGINE,
+	ONGOING_DISPLAY_DRUM_CV_MODE,
 
 	NUM_ONGOING_DISPLAYS
 };
@@ -71,9 +72,10 @@ enum drumParamDisplay{
 	DRUM_PARAM_DISP_OTHER,	// rotm_LONGITUDE
 	DRUM_PARAM_DISP_SPEED,	// rotm_LFOSPEED -- clock_divmult_id, not a plain 0..1
 	DRUM_PARAM_DISP_HUMANIZE,	// rotm_TRANSPOSE push+turn (sec_OSC_SPREAD)
+	DRUM_PARAM_DISP_GHOST,	// rotm_LATITUDE push+turn (sec_DISPPATT)
+	DRUM_PARAM_DISP_CHAOS,	// rotm_OCT turn -- shared, either pattern engine
 	DRUM_PARAM_DISP_GRIDS_X,	// browse-encoder turn, Grids mode
 	DRUM_PARAM_DISP_GRIDS_Y,	// browse-encoder push+turn, Grids mode
-	DRUM_PARAM_DISP_GRIDS_CHAOS,	// FINE + browse-encoder turn, Grids mode
 };
 
 /* What display_drum_preset() is showing right now; stored in
@@ -144,6 +146,8 @@ void 		display_drum_preset(void);
 void 		start_ongoing_display_drum_preset(enum drumPresetDisplay activity);
 void 		display_drum_engine(void);
 void 		start_ongoing_display_drum_engine(void);
+void 		display_drum_cv_mode(void);
+void 		start_ongoing_display_drum_cv_mode(void);
 void 		display_wt_seed_pos(void);
 void 		display_transpose(void);
 void 		display_finetune(void);
