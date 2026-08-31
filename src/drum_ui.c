@@ -28,6 +28,14 @@ uint8_t		grids_x     = 128;
 uint8_t		grids_y     = 128;
 uint8_t		grids_chaos = 0;	/* off by default: the map alone is already musical */
 
+/* Clock divide/multiply for Grids' one shared stepper -- unlike the
+ * euclidean per-channel clock_rate, this is a single value shared by
+ * every Grids-driven channel, same as x/y/chaos, since they all read
+ * one grids_state.step position rather than having their own. */
+float		grids_clock_divmult_id = LFO_UNITY_DIVMULT_ID;
+float		grids_clock_rate       = 1.0f;
+static float	grids_step_phase       = 0.0f;
+
 /* Counts down in LED-update ticks; non-zero means "this channel just hit"
  * and its button LED is flashed. Written from OSC_TIM, read/decremented
  * by led_cont.c. */
@@ -438,14 +446,21 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_HUMANIZE);
 	}
 
-	/* Clock divide/multiply -- global-edit-mode-aware like the others
-	 * above, but otherwise still per-channel by default: FINE gives
-	 * fractional crossfade between ratios, matching that control's
-	 * feel elsewhere on the panel. */
+	/* Clock divide/multiply. FINE gives fractional crossfade between
+	 * ratios, matching that control's feel elsewhere on the panel. In
+	 * Grids mode this is one shared rate for the whole stepper --
+	 * unconditional on selected channel, same as x/y/chaos -- since all
+	 * four Grids-driven channels read the one grids_state.step; in
+	 * Euclid mode it stays per-channel (global-edit-mode-aware). */
 	enc = pop_encoder_q(pec_LFOSPEED);
 	if (enc) {
 		float step = switch_pressed(FINE_BUTTON) ? (float)enc * F_SCALING_FINE_LFO_SPEED : (float)enc;
-		apply_to_selected_or_all(apply_clock_rate_delta, step);
+		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
+			grids_clock_divmult_id = _CLAMP_F(grids_clock_divmult_id + step, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
+			grids_clock_rate = calc_divmult_amount(grids_clock_divmult_id);
+		} else {
+			apply_to_selected_or_all(apply_clock_rate_delta, step);
+		}
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_SPEED);
 	}
 
@@ -491,13 +506,18 @@ static void read_pattern_encoder(void)
 			if (drum_held_chan >= 0) {
 				o_drum_chan *held = &drum_chan[drum_held_chan];
 				held->level = _CLAMP_F(held->level + (float)enc * DRUM_PARAM_STEP, 0.0f, 1.0f);
-			} else if (switch_pressed(FINE_BUTTON))
+			} else if (switch_pressed(FINE_BUTTON)) {
 				grids_chaos = (uint8_t)_CLAMP_I32((int32_t)grids_chaos + enc * DRUM_GRIDS_XY_STEP, 0, 255);
-			else
+				start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_CHAOS);
+			} else {
 				grids_x = (uint8_t)_CLAMP_I32((int32_t)grids_x + enc * DRUM_GRIDS_XY_STEP, 0, 255);
+				start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_X);
+			}
 		}
-		if (enc2)
+		if (enc2) {
 			grids_y = (uint8_t)_CLAMP_I32((int32_t)grids_y + enc2 * DRUM_GRIDS_XY_STEP, 0, 255);
+			start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_Y);
+		}
 		return;
 	}
 
@@ -706,12 +726,26 @@ void update_drum_triggers(void)
 
 	uint8_t bar_start = clk_step && (bar_tick == 0);
 
-	/* Grids ticks 1:1 with the master clock and shares one 32-step
-	 * position across all its parts, so it advances once here rather
-	 * than per-channel -- none of the euclidean bar-sync/step_phase
-	 * machinery below applies to it. */
-	if (clk_step && drum_pattern_engine == PATTERN_ENGINE_GRIDS)
-		grids_advance(&grids_state);
+	/* Grids shares one 32-step position across all its parts, so it
+	 * advances once here rather than per-channel -- none of the
+	 * euclidean bar-sync machinery below applies to it. It does share
+	 * the same fractional step_phase/drain-one-per-tick technique as
+	 * the euclidean channels though (grids_clock_rate, shared like x/y
+	 * rather than per-channel), for the same reason: bursting several
+	 * due steps in the same instant would collapse into one hit. */
+	uint8_t grids_advanced = 0;
+	if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
+		if (clk_step) {
+			grids_step_phase += grids_clock_rate;
+			if (grids_step_phase > 64.0f)
+				grids_step_phase = 64.0f;
+		}
+		if (grids_step_phase >= 1.0f) {
+			grids_step_phase -= 1.0f;
+			grids_advance(&grids_state);
+			grids_advanced = 1;
+		}
+	}
 
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
 		o_drum_chan *d = &drum_chan[c];
@@ -742,7 +776,13 @@ void update_drum_triggers(void)
 		if (grids_part >= 0) {
 			uint8_t out_level = 0;
 
-			if (clk_step)
+			/* grids_advanced, not clk_step -- at a multiplied
+			 * grids_clock_rate the shared stepper can advance more
+			 * than once per master-clock tick (spread across
+			 * subsequent OSC_TIM ticks, see above), and each of those
+			 * advances needs its own trigger evaluation or the
+			 * in-between steps would be silently skipped. */
+			if (grids_advanced)
 				pattern_hit = grids_step_active(&grids_state, (uint8_t)grids_part, grids_state.step,
 				                                grids_x, grids_y, d->density, grids_chaos, &out_level);
 

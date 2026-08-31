@@ -71,6 +71,9 @@ enum drumParamDisplay{
 	DRUM_PARAM_DISP_OTHER,	// rotm_LONGITUDE
 	DRUM_PARAM_DISP_SPEED,	// rotm_LFOSPEED -- clock_divmult_id, not a plain 0..1
 	DRUM_PARAM_DISP_HUMANIZE,	// rotm_TRANSPOSE push+turn (sec_OSC_SPREAD)
+	DRUM_PARAM_DISP_GRIDS_X,	// browse-encoder turn, Grids mode
+	DRUM_PARAM_DISP_GRIDS_Y,	// browse-encoder push+turn, Grids mode
+	DRUM_PARAM_DISP_GRIDS_CHAOS,	// FINE + browse-encoder turn, Grids mode
 };
 
 /* What display_drum_preset() is showing right now; stored in

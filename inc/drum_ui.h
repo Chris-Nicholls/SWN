@@ -171,6 +171,12 @@ extern uint8_t		grids_x;
 extern uint8_t		grids_y;
 extern uint8_t		grids_chaos;
 
+/* Shared clock divide/multiply for Grids' one stepper -- see the
+ * comment on its definition in drum_ui.c. Same LFO_DIVMULTS[] scale as
+ * the per-channel euclidean clock_divmult_id/clock_rate. */
+extern float		grids_clock_divmult_id;
+extern float		grids_clock_rate;
+
 /* Grids part (0=kick, 1=snare, 2=hihat) driving channel `c`, or -1 if
  * that channel has no Grids data and always stays euclidean. Both hat
  * channels share the one hihat part; their densities stay independent. */

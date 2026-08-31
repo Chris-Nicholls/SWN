@@ -784,11 +784,20 @@ void display_drum_param(void)
 			 * not 0..1 like the other three -- normalize it so the same
 			 * bar-graph code works unchanged. Unity (LFO_UNITY_DIVMULT_ID)
 			 * lands well left of center since the multiply range above it
-			 * is much wider than the divide range below it. */
-			value = (d->clock_divmult_id - LFO_MIN_DIVMULT_ID) / (float)(LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
+			 * is much wider than the divide range below it. Grids mode
+			 * shows the one shared rate instead of the selected channel's
+			 * own (which isn't what's actually being turned there). */
+			{
+				float divmult_id = (drum_pattern_engine == PATTERN_ENGINE_GRIDS)
+				                  ? grids_clock_divmult_id : d->clock_divmult_id;
+				value = (divmult_id - LFO_MIN_DIVMULT_ID) / (float)(LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
+			}
 			color = ledc_MED_GREEN;
 			break;
 		case DRUM_PARAM_DISP_HUMANIZE: value = d->humanize; color = ledc_CORAL; break;
+		case DRUM_PARAM_DISP_GRIDS_X:     value = (float)grids_x     / 255.0f; color = ledc_BLUE;   break;
+		case DRUM_PARAM_DISP_GRIDS_Y:     value = (float)grids_y     / 255.0f; color = ledc_FUSHIA;  break;
+		case DRUM_PARAM_DISP_GRIDS_CHAOS: value = (float)grids_chaos / 255.0f; color = ledc_RED;    break;
 		default:                    value = d->filter; color = ledc_AQUA;  break;
 	}
 
