@@ -181,7 +181,18 @@ LFLAGS =  -Wl,-Map,build/main.map,--cref \
 # build/src/analog_conditioning.o: OPTFLAG = -O0
 # build/src/UI_conditioning.o: OPTFLAG = -O0
 # build/src/quantz_scales.o: OPTFLAG = -O0
-# build/src/led_cont.o: OPTFLAG = -O0
+
+# Not a performance concern (LED-ring refresh only needs to keep up with a
+# 60Hz redraw), and needed as a workaround: -Ofast -flto -fwhole-program
+# together miscompile display_drum_param() in a way that hard-faults on
+# boot -- confirmed by bisecting the drum-station's chaos/ghost/randomization
+# feature work down to this file specifically (every other file at full
+# -Ofast, this one alone dropped to -O0 fixes it outright), and ruled out
+# jump-table codegen as the specific mechanism (rewriting the switch as an
+# equivalent if-else chain made no difference). Root GCC-internals cause
+# not identified; this is the same escape hatch a previous run into this
+# already apparently used, going by the line having existed here already.
+build/src/led_cont.o: OPTFLAG = -O0
 # build/src/ui_modes.o: OPTFLAG = -O0
 
 
