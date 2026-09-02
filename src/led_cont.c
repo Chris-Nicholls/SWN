@@ -266,7 +266,25 @@ void update_button_leds(void){
 
 			if (i<NUM_CHANNELS){
 
-				if(led_cont.ongoing_display){
+				if (drum_ui_performance_mode()) {
+					/* Performance mode: buttons show mute state instead
+					 * of selection -- lit for "will sound", dark for
+					 * "muted". Takes priority over any lingering
+					 * ongoing_display/global-edit-mode overlay below,
+					 * since none of what drives those is reachable here
+					 * anyway (read_drum_ui() locks all of it out while
+					 * this switch is flipped). A pending FINE+press
+					 * toggle (queued for the next bar boundary) blinks
+					 * between its current and target state, so a cued
+					 * change reads differently from one that already
+					 * landed. */
+					uint8_t muted = drum_chan[i].muted;
+					if (drum_ui_mute_pending(i) && led_cont.flash_state)
+						muted = !muted;
+					set_rgb_color_by_array(&led_cont.button[i], CH_COLOR_MAP[i], muted ? 0.03f : 0.5f);
+				}
+
+				else if(led_cont.ongoing_display){
 
 					if (params.osc_param_lock[i] && lock_flash_state())
 						lock_brightness = 0;

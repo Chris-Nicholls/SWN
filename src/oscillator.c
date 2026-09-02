@@ -69,8 +69,12 @@ void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict_
 		 * level ramp below -- it only steps at a trigger, but the
 		 * existing per-block interpolation already exists to avoid
 		 * zipper noise on slider moves, so an accent's gain change
-		 * rides it for free instead of clicking. */
-		float level = drum_chan[chan].level * drum_chan[chan].accent_gain;
+		 * rides it for free instead of clicking. Performance-mode mute
+		 * (see drum_ui_performance_mode()) rides the same ramp for the
+		 * same reason -- a mute toggle is otherwise just as abrupt a
+		 * gain step as an accent is. */
+		float level = drum_chan[chan].level * drum_chan[chan].accent_gain
+		            * (drum_chan[chan].muted ? 0.0f : 1.0f);
 		level_inc = (level - prev_level[chan]) / MONO_BUFSZ;
 		interpolated_level = prev_level[chan];
 		prev_level[chan] = level;

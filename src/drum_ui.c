@@ -51,6 +51,23 @@ volatile uint8_t drum_gate_ticks[NUM_CHANNELS];
  * instead of rotating the selected channel's pattern. */
 static int8_t drum_held_chan = -1;
 
+/* A FINE+press mute toggle queued in performance mode, one per channel.
+ * Set here (main loop, read_performance_controls()), consumed and
+ * cleared in update_drum_triggers() (OSC_TIM) at the next bar boundary
+ * -- same producer/consumer split as pattern_resync_pending below,
+ * since bar_start is only computed on the OSC_TIM side. */
+static volatile uint8_t mute_toggle_pending[NUM_CHANNELS];
+
+uint8_t drum_ui_mute_pending(uint8_t chan)
+{
+	return (chan < NUM_CHANNELS) ? mute_toggle_pending[chan] : 0;
+}
+
+uint8_t drum_ui_performance_mode(void)
+{
+	return switch_pressed(VOCTSW) != RELEASED;
+}
+
 /* Each channel has a fixed role (category), but it's no longer a 1:1
  * cast onto DrumVoiceCategory: channels E and F both map to
  * DRUM_CAT_OTHER (crash voices moved into DRUM_CAT_OPEN_HAT instead --
@@ -388,6 +405,35 @@ static void read_channel_buttons(void)
 		prev_pressed[c] = now;
 	}
 	drum_held_chan = held;
+}
+
+/* Performance mode (VOCTSW -- see drum_ui_performance_mode()'s doc
+ * comment): sliders drive level directly (no detents/hysteresis
+ * needed, unlike k/density -- level is already a plain continuous
+ * knob) and channel buttons mute instead of selecting. A plain press
+ * toggles immediately; FINE+press instead queues the toggle for the
+ * next bar boundary (mute_toggle_pending, applied in
+ * update_drum_triggers()), so a change can be cued up without landing
+ * off-beat. Entirely separate from read_channel_buttons()/
+ * read_channel_sliders() above -- read_drum_ui() calls one set or the
+ * other, never both. */
+static void read_performance_controls(void)
+{
+	static uint8_t prev_pressed[NUM_CHANNELS];
+	uint8_t fine_held = switch_pressed(FINE_BUTTON);
+
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		drum_chan[c].level = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+
+		uint8_t now = (button_pressed(c) != RELEASED);
+		if (now && !prev_pressed[c]) {
+			if (fine_held)
+				mute_toggle_pending[c] = 1;
+			else
+				drum_chan[c].muted = !drum_chan[c].muted;
+		}
+		prev_pressed[c] = now;
+	}
 }
 
 /* Manually touching a knob always wins over a looping automation
@@ -830,6 +876,18 @@ static void read_automation(void)
 
 void read_drum_ui(void)
 {
+	/* Performance mode takes the sliders and buttons over entirely and
+	 * locks out everything else -- no density editing, voice browsing,
+	 * pattern-engine toggle, CV mode, or automation reachable until
+	 * VOCTSW flips back. Whichever pattern was already programmed in
+	 * edit mode just keeps playing underneath (update_drum_triggers()
+	 * isn't touched by this at all); this is a live mixing overlay, not
+	 * a pause. */
+	if (drum_ui_performance_mode()) {
+		read_performance_controls();
+		return;
+	}
+
 	read_channel_sliders();
 	read_channel_buttons();
 	read_voice_encoders();
@@ -1046,6 +1104,18 @@ void update_drum_triggers(void)
 	uint8_t clk_step = clk_tick && clock_present;
 
 	uint8_t bar_start = clk_step && (g_bar_tick == 0);
+
+	if (bar_start) {
+		/* A FINE+press mute toggle cued in performance mode lands here,
+		 * on the beat, rather than the instant it was pressed -- see
+		 * read_performance_controls(). */
+		for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+			if (mute_toggle_pending[c]) {
+				mute_toggle_pending[c] = 0;
+				drum_chan[c].muted = !drum_chan[c].muted;
+			}
+		}
+	}
 
 	/* Grids shares one 32-step position across all its parts, so it
 	 * advances once here rather than per-channel -- none of the

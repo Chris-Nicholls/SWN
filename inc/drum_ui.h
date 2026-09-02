@@ -198,6 +198,14 @@ typedef struct o_drum_chan {
 	float				automation_decay[DRUM_BAR_TICKS];
 	float				automation_other[DRUM_BAR_TICKS];
 
+	/* Performance mode only (VOCTSW -- see drum_ui_performance_mode()):
+	 * this channel's mute. A plain channel-button press toggles it
+	 * immediately; FINE+press instead queues the toggle for the next
+	 * bar boundary, applied in update_drum_triggers(). Not saved with
+	 * presets/autosave -- always starts unmuted on boot, same as
+	 * automation above. */
+	uint8_t				muted;
+
 	uint8_t				state[DRUM_VOICE_STATE_BYTES] __attribute__((aligned(8)));
 } o_drum_chan;
 
@@ -305,6 +313,24 @@ void drum_ui_request_slider_pickup(void);
  * real value" (see drum_ui_request_slider_pickup()) -- led_cont.c
  * pulses it instead of the usual behaviour while this holds. */
 uint8_t drum_ui_slider_pickup_pending(uint8_t chan);
+
+/* True while the panel's VCA/1V-oct switch (VOCTSW) is in its
+ * performance-mode position: sliders become channel volume and buttons
+ * become mutes (see read_performance_controls() in drum_ui.c) instead
+ * of density/select, and everything else -- knob edits, voice
+ * browsing, the pattern-engine toggle, CV mode, automation -- is
+ * unreachable until the switch flips back. Whichever pattern was
+ * already programmed in edit mode keeps playing underneath the whole
+ * time; this is a live mixing overlay, not a pause. Read live off the
+ * switch, not stored state, same as the FINE_BUTTON checks elsewhere. */
+uint8_t drum_ui_performance_mode(void);
+
+/* True while channel c has a FINE+press mute toggle queued for the
+ * next bar boundary (performance mode only) -- led_cont.c blinks the
+ * channel button between its current and pending state while this
+ * holds, so a cued change reads differently from one that already
+ * landed. */
+uint8_t drum_ui_mute_pending(uint8_t chan);
 
 /* OSC_TIM: advances every channel's pattern on each master-clock step and
  * arms triggers (or takes them from a plugged CV jack instead). */
