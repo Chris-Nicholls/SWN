@@ -73,9 +73,22 @@ static const DrumVoiceOps *const kMvpKit[NUM_CHANNELS] = {
 	&drum_voice_plaits_kick,		/* DRUM_CAT_KICK */
 	&drum_voice_plaits_snare,		/* DRUM_CAT_SNARE */
 	&drum_voice_plaits_hihat,		/* DRUM_CAT_CLOSED_HAT */
-	&drum_voice_mpump_open_hat,		/* DRUM_CAT_OPEN_HAT */
+	&drum_voice_plaits_hihat,		/* DRUM_CAT_OPEN_HAT -- same generator as closed, see the registry's own comment on this pairing */
 	&drum_voice_mpump_rimshot,		/* DRUM_CAT_OTHER (channel E) */
 	&drum_voice_mpump_cowbell,		/* DRUM_CAT_OTHER (channel F) */
+};
+
+/* Factory-default decay, per channel -- every other default is uniform
+ * (see init_drum_ui() below) but a closed hat reading as "closed" and
+ * an open hat reading as "open" is mostly about decay length, so this
+ * one gets its own per-channel table rather than one shared constant. */
+static const float kDefaultDecay[NUM_CHANNELS] = {
+	0.5f,	/* Kick */
+	0.5f,	/* Snare */
+	0.15f,	/* Closed HH -- short/tight by default */
+	0.5f,	/* Open HH -- unchanged */
+	0.5f,	/* Other (E) */
+	0.5f,	/* Other (F) */
 };
 
 /* Channel -> Grids part, a plain table rather than a per-voice lookup:
@@ -193,7 +206,7 @@ void init_drum_ui(void)
 		d->level  = 0.8f;
 		d->pitch  = 0.0f;
 		d->filter = 1.0f;
-		d->decay  = 0.5f;
+		d->decay  = kDefaultDecay[c];
 		d->other  = 0.5f;
 
 		d->clock_divmult_id = LFO_UNITY_DIVMULT_ID;
