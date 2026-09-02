@@ -203,19 +203,21 @@ void init_led_cont(void)
 
 void update_display_at_encoder_press(void)
 {
-	if (rotary_pressed(rotm_TRANSPOSE))
-	{
-		if (switch_pressed(FINE_BUTTON))
-			start_ongoing_display_finetune();
-		else
-			start_ongoing_display_transpose();
-	}
-
-	if (rotary_pressed(rotm_OCT) && !switch_pressed(FINE_BUTTON) && (led_cont.ongoing_display != ONGOING_DISPLAY_SCALE))
-		start_ongoing_display_octave();
-
-	else if (rotary_pressed(rotm_OCT) && switch_pressed(FINE_BUTTON))
-		start_ongoing_display_scale();
+	/* TRANSPOSE-held and OCT-held used to show the wavetable engine's
+	 * transpose/finetune/octave/scale overlays -- but on drum-station,
+	 * both encoders are entirely owned by drum_ui.c's own push+turn
+	 * controls now (TRANSPOSE -> humanize, OCT -> chaos/ghost), which
+	 * arm their own ONGOING_DISPLAY_DRUM_PARAM overlay via
+	 * start_ongoing_display_drum_param() on every encoder tick. This
+	 * legacy code ran unconditionally alongside that, since it's keyed
+	 * off nothing but the raw button-held state -- it doesn't fire once
+	 * per turn like drum_ui's own display call, it fires every single
+	 * LED-update tick for as long as the button is held, so it kept
+	 * re-arming the wavetable-engine overlay (a solid red/green octave
+	 * gradient, or a per-channel-colour transpose ring) over whatever
+	 * drum_ui had just shown, drowning out humanize/ghost/chaos
+	 * feedback almost completely. Left removed rather than gated, since
+	 * these two encoders have no other job left to protect here. */
 
 	static uint8_t cpu_toggle_handled = 0;
 	if (rotary_pressed(rotm_LFOSPEED) == SHORT_PRESSED) {
