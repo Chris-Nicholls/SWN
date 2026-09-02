@@ -106,7 +106,7 @@ static uint8_t chan_is_grids_driven(uint8_t c)
 #define DRUM_CV_TRIG_THRESHOLD	0.2f
 #define DRUM_ACCENT_GAIN		1.0f	/* accented hit (Grids level > GRIDS_ACCENT_LEVEL, or Euclid's own downbeat): full loudness */
 #define DRUM_UNACCENT_GAIN		0.6f	/* everything else real: pulled back rather than boosted, so accents can't newly clip */
-#define DRUM_GHOST_GAIN			0.25f	/* extra hit ghost_amount inserts on an otherwise-silent step -- quieter than any real hit */
+#define DRUM_GHOST_GAIN			0.12f	/* extra hit ghost_amount inserts on an otherwise-silent step -- quieter than any real hit */
 #define DRUM_DENSITY_DETENTS	32u		/* slider -> Grids density resolution, see read_channel_sliders() */
 #define DRUM_GRIDS_XY_STEP		6		/* encoder clicks are coarse: ~42 turns spans the whole map */
 #define DRUM_CHAOS_STEP			6		/* same coarseness as DRUM_GRIDS_XY_STEP, one shared 0..255 range */
@@ -857,18 +857,29 @@ static float humanize_rand01(void)
 	return (float)(humanize_rng >> 8) / (float)0x00FFFFFFu;
 }
 
-/* Rerolls a channel's ghost_pattern for its next bar (Euclid) or lap
- * (Grids): each of the low `num_bits` bits is independently set with
- * probability `ghost_amount`. Called once per bar/lap rather than once
- * per step so the ghost layer holds still as a recognizable pattern of
- * its own instead of resampling to something different every time the
- * pattern loops. */
-static uint32_t reroll_ghost_pattern(float ghost_amount, uint8_t num_bits)
+/* How much of a channel's ghost_pattern turns over each time it's
+ * mutated -- see mutate_ghost_pattern() below. */
+#define DRUM_GHOST_MUTATE_CHANCE	0.15f
+
+/* Evolves a channel's existing ghost_pattern for its next bar (Euclid)
+ * or lap (Grids) rather than replacing it outright: each of the low
+ * `num_bits` bits has only a DRUM_GHOST_MUTATE_CHANCE chance of being
+ * touched at all, and only a touched bit gets re-rolled (set with
+ * probability `ghost_amount`, clear otherwise) -- the rest carry over
+ * unchanged. A full reroll every bar is indistinguishable from
+ * randomizing every hit fresh each time; this instead reads as one
+ * recognizable pattern that slowly drifts, a few steps at a time,
+ * bar over bar. */
+static uint32_t mutate_ghost_pattern(uint32_t pattern, float ghost_amount, uint8_t num_bits)
 {
-	uint32_t pattern = 0;
-	for (uint8_t i = 0; i < num_bits; i++)
+	for (uint8_t i = 0; i < num_bits; i++) {
+		if (humanize_rand01() >= DRUM_GHOST_MUTATE_CHANCE)
+			continue;
 		if (humanize_rand01() < ghost_amount)
 			pattern |= (1u << i);
+		else
+			pattern &= ~(1u << i);
+	}
 	return pattern;
 }
 
@@ -1087,12 +1098,12 @@ void update_drum_triggers(void)
 			if (grids_advanced) {
 				float density_frac = channel_density_frac(d, grids_part);
 
-				/* New lap: reroll which steps are ghost hits before
+				/* New lap: mutate which steps are ghost hits before
 				 * evaluating step 0 below, so this lap's ghost layer
 				 * (and step 0 itself) is settled up front. Scaled by
 				 * density_frac -- see its doc comment. */
 				if (grids_state.step == 0)
-					d->ghost_pattern = reroll_ghost_pattern(d->ghost_amount * density_frac, GRIDS_NUM_STEPS);
+					d->ghost_pattern = mutate_ghost_pattern(d->ghost_pattern, d->ghost_amount * density_frac, GRIDS_NUM_STEPS);
 
 				/* pattern_chaos itself scaled by density_frac too, same
 				 * reasoning as ghost above -- a near-empty pattern
@@ -1154,7 +1165,7 @@ void update_drum_triggers(void)
 				d->euclid.current_step = d->euclid.n - 1;
 				d->step_phase = 1.0f;
 
-				/* This channel's own pattern is restarting -- reroll
+				/* This channel's own pattern is restarting -- mutate
 				 * which steps are ghost hits for the lap about to
 				 * begin, same as Grids does on its own lap wrap. Tied
 				 * to do_resync (this channel's own loop boundary), not
@@ -1163,8 +1174,8 @@ void update_drum_triggers(void)
 				 * multi-bar) loop rather than reshuffling mid-pattern.
 				 * Scaled by this channel's own density (k/n) -- see
 				 * channel_density_frac()'s doc comment. */
-				d->ghost_pattern = reroll_ghost_pattern(
-					d->ghost_amount * channel_density_frac(d, -1), (uint8_t)d->euclid.n);
+				d->ghost_pattern = mutate_ghost_pattern(
+					d->ghost_pattern, d->ghost_amount * channel_density_frac(d, -1), (uint8_t)d->euclid.n);
 			} else {
 				d->step_phase += (d->euclid.n / (float)DRUM_BAR_TICKS) * d->clock_rate;
 				/* A sustained clock_rate faster than this channel can
