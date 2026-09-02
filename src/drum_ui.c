@@ -872,6 +872,20 @@ static uint32_t reroll_ghost_pattern(float ghost_amount, uint8_t num_bits)
 	return pattern;
 }
 
+/* 0..1: how densely packed this channel's own pattern currently is --
+ * k/n for Euclid, density/255 for Grids (grids_part >= 0 selects which).
+ * Both ghost and chaos scale their probability by this, so a channel
+ * with a sparse pattern sprouts proportionally fewer extra/flipped hits,
+ * and a fully silent one (k==0 or density==0) sprouts none at all --
+ * ghost/chaos are meant to vary a pattern that's there, not invent one
+ * out of nothing. */
+static float channel_density_frac(const o_drum_chan *d, int8_t grids_part)
+{
+	if (grids_part >= 0)
+		return (float)d->density / 255.0f;
+	return (d->euclid.n > 0) ? (float)d->euclid.k / (float)d->euclid.n : 0.0f;
+}
+
 /* A pattern-triggered hit (never a CV-triggered one -- that already has
  * real-world timing) goes through here instead of calling fire()
  * directly. `base_gain` is whatever the pattern engine already decided
@@ -1071,14 +1085,22 @@ void update_drum_triggers(void)
 			 * advances needs its own trigger evaluation or the
 			 * in-between steps would be silently skipped. */
 			if (grids_advanced) {
+				float density_frac = channel_density_frac(d, grids_part);
+
 				/* New lap: reroll which steps are ghost hits before
 				 * evaluating step 0 below, so this lap's ghost layer
-				 * (and step 0 itself) is settled up front. */
+				 * (and step 0 itself) is settled up front. Scaled by
+				 * density_frac -- see its doc comment. */
 				if (grids_state.step == 0)
-					d->ghost_pattern = reroll_ghost_pattern(d->ghost_amount, GRIDS_NUM_STEPS);
+					d->ghost_pattern = reroll_ghost_pattern(d->ghost_amount * density_frac, GRIDS_NUM_STEPS);
 
+				/* pattern_chaos itself scaled by density_frac too, same
+				 * reasoning as ghost above -- a near-empty pattern
+				 * shouldn't get proportionally the same chaos jitter as
+				 * a dense one. */
 				pattern_hit = grids_step_active(&grids_state, (uint8_t)grids_part, grids_state.step,
-				                                grids_x, grids_y, d->density, pattern_chaos, &out_level);
+				                                grids_x, grids_y, d->density,
+				                                (uint8_t)((float)pattern_chaos * density_frac), &out_level);
 				/* Ghost: an extra quiet hit on a step Grids itself
 				 * didn't fire -- chaos is already baked into
 				 * grids_step_active() above, so it doesn't need a
@@ -1138,8 +1160,11 @@ void update_drum_triggers(void)
 				 * to do_resync (this channel's own loop boundary), not
 				 * the shared bar_start, so a slowed-down channel's
 				 * ghost layer holds for its whole (possibly
-				 * multi-bar) loop rather than reshuffling mid-pattern. */
-				d->ghost_pattern = reroll_ghost_pattern(d->ghost_amount, (uint8_t)d->euclid.n);
+				 * multi-bar) loop rather than reshuffling mid-pattern.
+				 * Scaled by this channel's own density (k/n) -- see
+				 * channel_density_frac()'s doc comment. */
+				d->ghost_pattern = reroll_ghost_pattern(
+					d->ghost_amount * channel_density_frac(d, -1), (uint8_t)d->euclid.n);
 			} else {
 				d->step_phase += (d->euclid.n / (float)DRUM_BAR_TICKS) * d->clock_rate;
 				/* A sustained clock_rate faster than this channel can
@@ -1172,8 +1197,12 @@ void update_drum_triggers(void)
 			 * pattern itself varied", not a soft ornament on top of
 			 * it, which is ghost's job below). Per-channel, unlike
 			 * Grids' one shared pattern_chaos -- see chaos_amount's
-			 * doc comment in drum_ui.h. */
-			if (d->chaos_amount > 0 && humanize_rand01() < (float)d->chaos_amount / 255.0f) {
+			 * doc comment in drum_ui.h. Scaled by this channel's own
+			 * density (k/n), same reasoning as ghost -- a near-empty
+			 * pattern (k near 0) shouldn't flip nearly as often as a
+			 * dense one, and a fully silent one (k==0) never flips. */
+			if (d->chaos_amount > 0 &&
+			    humanize_rand01() < (float)d->chaos_amount / 255.0f * channel_density_frac(d, -1)) {
 				pattern_hit = !pattern_hit;
 				chaos_flip = 1;
 			}
