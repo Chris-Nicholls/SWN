@@ -25,7 +25,27 @@
  * which serializes an unrelated, pre-drum-station struct. */
 #define DRUM_PRESET_SECTOR_ADDR	0x0000F000u
 #define DRUM_PRESET_SLOT_SIZE	256u	/* 16 slots x 256B = one 4kB sector, exactly */
-#define DRUM_PRESET_MAGIC		0x444B3031u	/* "DK01" */
+
+/* Bump this ("DK01" -> "DK02" -> ...) every time DrumKitPreset's layout
+ * changes -- it's the only thing standing between an old, differently-
+ * shaped blob already sitting in flash and this build silently reading
+ * it under the new layout. grids_clock_divmult_id was appended to this
+ * struct without a bump (see the Grids-mode-frozen bug below): loading
+ * an autosave/slot written before that field existed left it reading
+ * whatever raw bytes happened to follow the old, shorter struct in
+ * flash -- on an erased/never-written sector that's 0xFFFFFFFF, which
+ * as a float is NaN. calc_divmult_amount(NaN) -> grids_clock_rate
+ * becomes NaN -> grids_step_phase += NaN poisons it permanently, and
+ * every `grids_step_phase >= 1.0f` compare against a NaN is false
+ * forever, so the shared Grids stepper never advances again: frozen
+ * playhead, total silence, no crash. Every other field kept its
+ * original offset (this one was appended at the end), which is why
+ * only Grids' clock froze and everything else kept working. Bumping
+ * this makes every existing slot and the autosave sector read back as
+ * "not present" (magic mismatch) on the next boot -- hard defaults
+ * take over instead of a differently-shaped blob, and everything
+ * re-saves cleanly under the new magic once you next touch a control. */
+#define DRUM_PRESET_MAGIC		0x444B3032u	/* "DK02" */
 
 /* Autosave lives in sector 16 (WT_SECTOR_START), otherwise unused now
  * that wavetable capture/editing is gone. Unlike the 16 rotating slots
