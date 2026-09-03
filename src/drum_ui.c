@@ -64,6 +64,17 @@ int8_t drum_ui_held_chan(void) { return drum_held_chan; }
  * action for a hold that was really a CV-routing gesture, not a tap. */
 static uint8_t held_chan_cv_assigned = 0;
 
+/* Holding a channel for this long *without* touching a knob (see
+ * held_chan_cv_assigned above) clears that channel's CV mode back to
+ * CV_MODE_TRIGGER -- the only way back now that routing a target is a
+ * plain "set", not a toggle (see assign_cv_target_if_held()). Tracked
+ * in ms (HAL_GetTick(), same clock read_automation() already uses)
+ * rather than a tick count, since read_drum_ui() runs off the variable-
+ * period main loop, not a fixed timer. */
+#define DRUM_CV_CLEAR_HOLD_MS	4000u
+static uint32_t held_chan_press_start_ms = 0;
+static uint8_t  held_chan_cv_cleared = 0;
+
 /* A FINE+press mute toggle queued in performance mode, one per channel.
  * Set here (main loop, read_performance_controls()), consumed and
  * cleared in update_drum_triggers() (OSC_TIM) at the next bar boundary
@@ -423,8 +434,11 @@ static void read_channel_buttons(void)
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
 		enum PressTypes level = button_pressed(c);
 
-		if (level != RELEASED && prev_press_level[c] == RELEASED)
+		if (level != RELEASED && prev_press_level[c] == RELEASED) {
 			held_chan_cv_assigned = 0;
+			held_chan_cv_cleared = 0;
+			held_chan_press_start_ms = HAL_GetTick() / TICKS_PER_MS;
+		}
 
 		if (level == RELEASED && prev_press_level[c] != RELEASED
 		    && !held_chan_cv_assigned && prev_press_level[c] < SHORT_PRESSED) {
@@ -445,6 +459,20 @@ static void read_channel_buttons(void)
 		prev_press_level[c] = level;
 	}
 	drum_held_chan = held;
+
+	/* DRUM_CV_CLEAR_HOLD_MS held with no knob touched (held_chan_cv_assigned
+	 * still clear) clears this channel's CV mode back to trigger -- see
+	 * that constant's doc comment. Checked live, not on release, so it
+	 * reads as an immediate "held long enough" moment rather than
+	 * something that only shows up once you let go. */
+	if (held >= 0 && !held_chan_cv_assigned && !held_chan_cv_cleared) {
+		uint32_t now_ms = HAL_GetTick() / TICKS_PER_MS;
+		if (now_ms - held_chan_press_start_ms >= DRUM_CV_CLEAR_HOLD_MS) {
+			drum_chan[held].cv_mode = CV_MODE_TRIGGER;
+			held_chan_cv_cleared = 1;
+			start_ongoing_display_drum_cv_mode();
+		}
+	}
 }
 
 /* Performance mode (VOCTSW -- see drum_ui_performance_mode()'s doc
@@ -615,24 +643,22 @@ static void apply_to_selected_or_all(void (*apply)(uint8_t, float), float delta)
 
 /* While a channel button is held, turning the DEPTH or LFOSPEED encoder
  * routes that held channel's CV jack to the corresponding modulation
- * target -- CV routing is chosen by touching the parameter you want it
- * to modulate, rather than cycling blindly through a fixed list. The
- * encoder still does its own normal job too (editing the selected
- * channel's value, same as always -- see apply_to_selected_or_all()
- * above), so held channel and selected channel can be two different
- * channels turning the same knob for two different reasons at once.
- * Turning the same encoder again while already routed to `new_mode`
- * toggles back to CV_MODE_TRIGGER instead -- the only way back to
- * trigger now that there's no dedicated cycle button (see
- * read_voice_select_button(), which took LFOMODE_BUTTON over for
- * sound-engine selection instead). No-op with no channel held. */
+ * target *instead of* editing the knob's value -- CV routing is chosen
+ * by touching the parameter you want it to modulate, and the hold is a
+ * dedicated "pick a target" gesture, not also a live edit (held channel
+ * and selected channel can be two different channels, and it would be
+ * surprising for turning a knob to route one channel's CV to also
+ * change another channel's sound). The only way back to
+ * CV_MODE_TRIGGER is holding the channel for DRUM_CV_CLEAR_HOLD_MS
+ * without touching a knob at all -- see read_channel_buttons(). No-op
+ * with no channel held (the caller falls through to its normal
+ * apply_to_selected_or_all() edit in that case). */
 static void assign_cv_target_if_held(uint8_t new_mode)
 {
 	if (drum_held_chan < 0)
 		return;
 
-	o_drum_chan *d = &drum_chan[drum_held_chan];
-	d->cv_mode = (d->cv_mode == new_mode) ? CV_MODE_TRIGGER : new_mode;
+	drum_chan[drum_held_chan].cv_mode = new_mode;
 	held_chan_cv_assigned = 1;
 	start_ongoing_display_drum_cv_mode();
 }
@@ -644,9 +670,12 @@ static void read_voice_encoders(void)
 
 	enc = pop_encoder_q(pec_DEPTH);
 	if (enc) {
-		apply_to_selected_or_all(apply_filter_delta, (float)enc * DRUM_PARAM_STEP);
-		start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER);
-		assign_cv_target_if_held(CV_MODE_FILTER);
+		if (drum_held_chan >= 0) {
+			assign_cv_target_if_held(CV_MODE_FILTER);
+		} else {
+			apply_to_selected_or_all(apply_filter_delta, (float)enc * DRUM_PARAM_STEP);
+			start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER);
+		}
 	}
 
 	/* Push+turn on DEPTH (sec_DISPERSION, dead in the old wavetable UI)
@@ -708,12 +737,15 @@ static void read_voice_encoders(void)
 	 * Grids density vs Euclid k per channel on its own (see
 	 * chan_is_grids_driven()), so this is safe to broadcast in global
 	 * edit mode even with a mix of Grids- and Euclid-driven channels
-	 * selected. Holding a channel while this turns also routes that
-	 * channel's CV jack to density -- see assign_cv_target_if_held(). */
+	 * selected. Holding a channel while this turns routes that
+	 * channel's CV jack to density instead -- see
+	 * assign_cv_target_if_held(). */
 	enc = pop_encoder_q(pec_LFOSPEED);
 	if (enc) {
-		apply_to_selected_or_all(apply_density_delta, (float)enc);
-		assign_cv_target_if_held(CV_MODE_DENSITY);
+		if (drum_held_chan >= 0)
+			assign_cv_target_if_held(CV_MODE_DENSITY);
+		else
+			apply_to_selected_or_all(apply_density_delta, (float)enc);
 	}
 
 	/* Push+turn on LFOSPEED (sec_LFOGAIN, dead until now) -- total step
