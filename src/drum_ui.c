@@ -1045,6 +1045,12 @@ static void schedule_pattern_hit(uint8_t c, float base_gain)
 		fire(c);
 }
 
+/* Below this, a channel's step_phase reads as "just fired" -- close
+ * enough to its last natural hit that forcing an immediate extra one
+ * right on top of it reads as a double-trigger rather than a clean
+ * resync. See reset_all_patterns() below. */
+#define DRUM_RESET_SOFT_MARGIN	0.15f
+
 /* LFO CV in as a hard pattern reset: on a rising edge past half scale,
  * every channel jumps straight to step 0 (Grids' shared step included)
  * and the shared bar counter restarts with it, so the whole kit's
@@ -1052,9 +1058,10 @@ static void schedule_pattern_hit(uint8_t c, float base_gain)
  * "Global VCA" ducking input (see the removed read_lfo_cv() call in
  * params_lfo.c's update_lfo_params()) -- a continuous duck level and an
  * edge-triggered reset can't both live on the same jack, and the reset
- * is more useful for a drum station. Doesn't fire anything -- it just
- * repositions; the next clock tick advances (and triggers) normally
- * from step 0. */
+ * is more useful for a drum station. Fires immediately, this same
+ * tick, for any channel not already close to its own next hit (see
+ * DRUM_RESET_SOFT_MARGIN below) -- it doesn't wait for the next clock
+ * tick to land on step 0. */
 static void reset_all_patterns(volatile uint16_t *bar_tick)
 {
 	*bar_tick = 0;
@@ -1077,7 +1084,18 @@ static void reset_all_patterns(volatile uint16_t *bar_tick)
 		o_drum_chan *d = &drum_chan[c];
 
 		d->euclid.current_step = d->euclid.n - 1;
-		d->step_phase = 1.0f;
+
+		/* current_step is realigned above either way, so this
+		 * channel's own next natural advance already wraps onto step
+		 * 0 correctly -- if a hit only just landed (step_phase still
+		 * near 0), a soft warp skips forcing a second one right now
+		 * and just lets that next natural advance do the resync
+		 * instead of cramming an extra hit in immediately. Anywhere
+		 * else in the cycle still gets the hard snap, since that's the
+		 * whole point of a reset -- realign now, not at the end of
+		 * whatever's currently in flight. */
+		if (d->step_phase >= DRUM_RESET_SOFT_MARGIN)
+			d->step_phase = 1.0f;
 
 		/* Also resync the divided-clock countdown here, the same way
 		 * the do_resync path recomputes it after firing -- otherwise a
