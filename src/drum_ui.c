@@ -946,7 +946,15 @@ static void fire(uint8_t chan)
 {
 	drum_chan[chan].trigger_pending = 1;
 	drum_trig_flash[chan] = DRUM_FLASH_TICKS;
-	drum_gate_ticks[chan] = DRUM_GATE_TICKS;
+
+	/* Performance-mode mute (see drum_ui_performance_mode()) silences
+	 * this channel's audio via the level ramp in oscillator.c, but that
+	 * doesn't touch the ENV OUT gate jack at all -- without this check
+	 * a muted channel would still pulse CV out on every hit, which
+	 * defeats the point of muting it for anything patched from that
+	 * jack downstream. */
+	if (!drum_chan[chan].muted)
+		drum_gate_ticks[chan] = DRUM_GATE_TICKS;
 
 	/* Hi-hat choke group: the closed-hat channel firing always cuts the
 	 * open-hat channel dead, same as a real cymbal being one physical
