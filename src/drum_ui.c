@@ -614,7 +614,14 @@ static void apply_chaos_delta(uint8_t c, float delta)
  * else (Euclid-mode selected channel, or channels E/F regardless of
  * engine -- see chan_is_grids_driven()) uses k. `delta` is encoder
  * clicks, not a 0..1 fraction like the other apply_*_delta functions
- * here -- one click moves one Grids detent or one Euclid k step. */
+ * here -- one click moves one Grids detent or one Euclid k step.
+ *
+ * Arms this channel's own slider_pickup_pending the same way a preset
+ * load does (see that flag's doc comment above) -- without it,
+ * read_channel_sliders() runs again on the very next tick, sees the
+ * physical slider sitting away from the value the encoder just set,
+ * and immediately snaps it right back to wherever the slider happens
+ * to be resting. */
 static void apply_density_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
@@ -626,6 +633,7 @@ static void apply_density_delta(uint8_t c, float delta)
 		euclid_set_k(&dc->euclid, dc->euclid.k + (int)delta);
 		__enable_irq();
 	}
+	slider_pickup_pending[c] = 1;
 }
 
 /* Runs `apply` on every channel if global edit mode is active, else on

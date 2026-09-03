@@ -219,18 +219,15 @@ void update_display_at_encoder_press(void)
 	 * feedback almost completely. Left removed rather than gated, since
 	 * these two encoders have no other job left to protect here. */
 
-	static uint8_t cpu_toggle_handled = 0;
-	if (rotary_pressed(rotm_LFOSPEED) == SHORT_PRESSED) {
-		if (!cpu_toggle_handled) {
-			cpu_toggle_handled = 1;
-			if (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE)
-				led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
-			else
-				start_ongoing_display_cpu_usage();
-		}
-	} else {
-		cpu_toggle_handled = 0;
-	}
+	/* Holding LFOSPEED used to toggle the CPU-usage debug display here,
+	 * which also silently rerouted the right output channel to debug
+	 * FSK audio instead of the kit (see fsk_out_active in
+	 * process_audio_block_codec(), oscillator.c) -- surprising on a
+	 * drum station, where holding LFOSPEED is now a normal gesture (it
+	 * arms the density->CV-target hold in read_voice_encoders(), and is
+	 * about to be turned for step count via its push+turn). Removed
+	 * rather than gated, same as the TRANSPOSE/OCT overlays above --
+	 * there's no drum-station use for this debug toggle to protect. */
 }
 
 void update_led_flash(void)
