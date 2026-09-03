@@ -1195,6 +1195,17 @@ void update_drum_triggers(void)
 	uint8_t grids_advanced = 0;
 	if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
 		if (clk_step) {
+			/* Guards against a bad grids_clock_rate (NaN, zero,
+			 * negative) permanently freezing the shared stepper --
+			 * every `grids_step_phase >= 1.0f` compare below would
+			 * silently be false forever otherwise, with no crash to
+			 * signal it. Self-heals the source too, not just this
+			 * tick, so a bad value doesn't have to be caught here on
+			 * every single tick from then on. `!(rate > 0.0f)` catches
+			 * NaN as well as <= 0, since every comparison against NaN
+			 * is false. */
+			if (!(grids_clock_rate > 0.0f) || grids_clock_rate > 64.0f)
+				grids_clock_rate = 1.0f;
 			grids_step_phase += grids_clock_rate;
 			if (grids_step_phase > 64.0f)
 				grids_step_phase = 64.0f;
