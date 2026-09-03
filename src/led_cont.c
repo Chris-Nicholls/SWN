@@ -804,9 +804,14 @@ void display_drum_param(void)
 			 * lands well left of center since the multiply range above it
 			 * is much wider than the divide range below it. Grids mode
 			 * shows the one shared rate instead of the selected channel's
-			 * own (which isn't what's actually being turned there). */
+			 * own (which isn't what's actually being turned there) --
+			 * except for channels E/F, which have no Grids data and keep
+			 * turning their own rate even in Grids mode (see
+			 * kChanGridsPart / drum_chan_grids_part()). */
 			{
-				float divmult_id = (drum_pattern_engine == PATTERN_ENGINE_GRIDS)
+				uint8_t chan_grids_driven = (drum_pattern_engine == PATTERN_ENGINE_GRIDS)
+				                          && (drum_chan_grids_part(drum_selected_chan) >= 0);
+				float divmult_id = chan_grids_driven
 				                  ? grids_clock_divmult_id : d->clock_divmult_id;
 				value = (divmult_id - LFO_MIN_DIVMULT_ID) / (float)(LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
 			}

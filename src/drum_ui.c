@@ -633,10 +633,14 @@ static void read_voice_encoders(void)
 	 * In Grids mode this is one shared rate for the whole stepper --
 	 * unconditional on selected channel, same as x/y -- since all four
 	 * Grids-driven channels read the one grids_state.step; in Euclid
-	 * mode it stays per-channel (global-edit-mode-aware). */
+	 * mode it stays per-channel (global-edit-mode-aware). Channels E/F
+	 * have no Grids data (see kChanGridsPart) and always run their own
+	 * independent Euclidean pattern -- including their own clock_rate --
+	 * even while the kit is in Grids mode, so selecting one of them
+	 * keeps editing its own per-channel rate instead of the shared one. */
 	enc = pop_encoder_q(pec_LFOSPEED);
 	if (enc) {
-		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
+		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS && chan_is_grids_driven(drum_selected_chan)) {
 			grids_clock_divmult_id = _CLAMP_F(grids_clock_divmult_id + (float)enc, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
 			grids_clock_rate = calc_divmult_amount(grids_clock_divmult_id);
 		} else {
