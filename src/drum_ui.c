@@ -810,13 +810,22 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_SPEED);
 	}
 
-	/* Plain turn on OCT (fully dead otherwise) -- chaos amount. Grids
-	 * mode edits the one shared pattern_chaos (its parts have no other
-	 * per-channel identity); Euclid mode edits the selected channel's
-	 * own chaos_amount instead, same selected-vs-global convention as
-	 * every other per-channel knob here, since each Euclid channel
-	 * already has its own independent pattern. */
+	/* Plain turn on OCT (fully dead otherwise) -- ghost-note amount,
+	 * same shape as humanize above. Paired with chaos on the same
+	 * physical encoder since both are "pattern variation" controls. */
 	enc = pop_encoder_q(pec_OCT);
+	if (enc) {
+		apply_to_selected_or_all(apply_ghost_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
+	}
+
+	/* Push+turn on OCT (sec_SCALE, dead in the old wavetable UI) --
+	 * chaos amount. Grids mode edits the one shared pattern_chaos (its
+	 * parts have no other per-channel identity); Euclid mode edits the
+	 * selected channel's own chaos_amount instead, same selected-vs-
+	 * global convention as every other per-channel knob here, since
+	 * each Euclid channel already has its own independent pattern. */
+	enc = pop_encoder_q(sec_SCALE);
 	if (enc) {
 		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
 			pattern_chaos = (uint8_t)_CLAMP_I32((int32_t)pattern_chaos + enc * DRUM_CHAOS_STEP, 0, 255);
@@ -824,16 +833,6 @@ static void read_voice_encoders(void)
 			apply_to_selected_or_all(apply_chaos_delta, (float)(enc * DRUM_CHAOS_STEP));
 		}
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_CHAOS);
-	}
-
-	/* Push+turn on OCT (sec_SCALE, dead in the old wavetable UI) --
-	 * ghost-note amount, same shape as humanize above. Paired with
-	 * chaos on the same physical encoder since both are "pattern
-	 * variation" controls. */
-	enc = pop_encoder_q(sec_SCALE);
-	if (enc) {
-		apply_to_selected_or_all(apply_ghost_delta, (float)enc * DRUM_PARAM_STEP);
-		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
 	}
 
 }
