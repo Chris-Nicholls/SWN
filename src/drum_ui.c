@@ -1090,8 +1090,8 @@ static void fire(uint8_t chan)
 		drum_chan[DRUM_CAT_OPEN_HAT].choke_pending = 1;
 }
 
-#define DRUM_HUMANIZE_MAX_DELAY_TICKS	12u		/* ~6.7ms at the 1.8kHz OSC_TIM rate; late-only, see schedule_pattern_hit() */
-#define DRUM_HUMANIZE_VELOCITY_RANGE	0.4f	/* +/- this fraction of gain at humanize=1.0 */
+#define DRUM_HUMANIZE_MAX_DELAY_TICKS	20u		/* ~11ms at the 1.8kHz OSC_TIM rate; late-only, see schedule_pattern_hit() */
+#define DRUM_HUMANIZE_VELOCITY_RANGE	0.6f	/* +/- this fraction of gain at humanize=1.0 */
 
 static uint32_t humanize_rng = 0x9E3779B9u;	/* arbitrary nonzero xorshift seed */
 
@@ -1160,10 +1160,16 @@ static void schedule_pattern_hit(uint8_t c, float base_gain)
 		return;
 	}
 
-	float jitter = (humanize_rand01() * 2.0f - 1.0f) * d->humanize * DRUM_HUMANIZE_VELOCITY_RANGE;
+	/* Squared rather than linear: most of the knob's travel stays
+	 * subtle (a small nudge low/mid), and the effect only really opens
+	 * up approaching full -- makes the top end read as distinctly
+	 * "loose"/"drunk" rather than a smooth, easy-to-miss ramp. */
+	float amount = d->humanize * d->humanize;
+
+	float jitter = (humanize_rand01() * 2.0f - 1.0f) * amount * DRUM_HUMANIZE_VELOCITY_RANGE;
 	d->accent_gain = _CLAMP_F(base_gain * (1.0f + jitter), 0.15f, 1.3f);
 
-	uint8_t delay = (uint8_t)(humanize_rand01() * d->humanize * DRUM_HUMANIZE_MAX_DELAY_TICKS);
+	uint8_t delay = (uint8_t)(humanize_rand01() * amount * DRUM_HUMANIZE_MAX_DELAY_TICKS);
 	if (delay > 0)
 		d->fire_delay = delay;
 	else
