@@ -88,16 +88,31 @@ typedef enum DrumVoiceCategory {
 	NUM_DRUM_CATEGORIES,
 } DrumVoiceCategory;
 
+/* Which ported DSP family a voice belongs to -- the "sound engine" the
+ * LFOMODE button cycles a channel's voice within (see
+ * read_voice_select_button() in drum_ui.c) and the LED ring colors by
+ * (see display_drum_voice() in led_cont.c). Pure metadata like
+ * `category` below, safe to edit freely. */
+typedef enum DrumVoiceEngine {
+	DRUM_ENGINE_MPUMP,
+	DRUM_ENGINE_DELUGE,
+	DRUM_ENGINE_CHIP,
+	DRUM_ENGINE_ROLLER,
+	DRUM_ENGINE_PLAITS,
+	NUM_DRUM_ENGINES,
+} DrumVoiceEngine;
+
 /* All voices, in a fixed, append-only order -- this is what a saved
  * preset's per-channel voice byte indexes, so it survives a rebuild
  * (a raw DrumVoiceOps* would not: it's relink-dependent). Add new
  * voices only at the end; never reorder or remove an entry, or old
- * presets will silently load the wrong sound. `category` is pure
- * metadata (not part of the index), safe to edit freely. */
+ * presets will silently load the wrong sound. `category`/`engine` are
+ * pure metadata (not part of the index), safe to edit freely. */
 typedef struct DrumVoiceEntry {
 	const DrumVoiceOps *ops;
 	const char *name;
 	DrumVoiceCategory category;
+	DrumVoiceEngine engine;
 } DrumVoiceEntry;
 
 extern const DrumVoiceEntry kDrumVoiceRegistry[];
@@ -111,3 +126,8 @@ int8_t drum_voice_registry_index(const DrumVoiceOps *ops);
 /* NULL if index is out of range (e.g. a preset saved by a future
  * firmware with more voices, loaded on an older build). */
 const DrumVoiceOps *drum_voice_registry_lookup(uint8_t index);
+
+/* DRUM_ENGINE_MPUMP (the first family) if ops is NULL or not found --
+ * a harmless fallback color rather than a fault, same spirit as
+ * drum_voice_registry_index()'s -1. */
+DrumVoiceEngine drum_voice_engine_of(const DrumVoiceOps *ops);

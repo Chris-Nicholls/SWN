@@ -710,6 +710,10 @@ void calculate_led_ring(void){
 				display_drum_cv_mode();
 				break;
 
+			case ONGOING_DISPLAY_DRUM_VOICE:
+				display_drum_voice();
+				break;
+
 			default:
 				display_drum_pattern();
 				break;
@@ -927,16 +931,24 @@ void start_ongoing_display_drum_engine(void)
 	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
-/* Brief whole-ring flash confirming the selected channel's CV-jack mode
- * just cycled -- same one-shot idiom as display_drum_engine(), one
+/* Brief whole-ring flash confirming a channel's CV-jack mode just got
+ * routed by holding it and turning a knob (see assign_cv_target_if_held()
+ * in drum_ui.c) -- same one-shot idiom as display_drum_engine(), one
  * colour per mode so it's at least distinguishable at a glance even
- * without reading the mode off anywhere else. */
+ * without reading the mode off anywhere else. Shows the held channel,
+ * not drum_selected_chan -- the two can differ (holding one channel
+ * while a knob still edits whichever channel is selected). Falls back
+ * to drum_selected_chan if nothing's held (shouldn't happen -- this is
+ * only ever armed from inside a hold -- but avoids reading a stale
+ * channel's mode if it ever does). */
 void display_drum_cv_mode(void)
 {
+	int8_t held = drum_ui_held_chan();
+	uint8_t chan = (held >= 0) ? (uint8_t)held : drum_selected_chan;
 	enum ledColors color;
 	uint8_t i;
 
-	switch (drum_chan[drum_selected_chan].cv_mode) {
+	switch (drum_chan[chan].cv_mode) {
 		case CV_MODE_DENSITY: color = ledc_BLUE; break;
 		case CV_MODE_FILTER:  color = ledc_AQUA; break;
 		default:              color = ledc_WHITE; break;	/* CV_MODE_TRIGGER */
@@ -952,6 +964,38 @@ void display_drum_cv_mode(void)
 void start_ongoing_display_drum_cv_mode(void)
 {
 	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_CV_MODE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Brief whole-ring flash confirming the selected channel's voice just
+ * cycled, colour-coded by DSP family (the "sound engine" the LFOMODE
+ * button now cycles within -- see read_voice_select_button() in
+ * drum_ui.c) rather than by individual voice, since a category can
+ * hold far more voices than there are easily-distinguishable colours.
+ * Same one-shot idiom as display_drum_engine()/display_drum_cv_mode(). */
+void display_drum_voice(void)
+{
+	static const enum ledColors kEngineColor[NUM_DRUM_ENGINES] = {
+		ledc_YELLOW,	/* DRUM_ENGINE_MPUMP */
+		ledc_PURPLE,	/* DRUM_ENGINE_DELUGE */
+		ledc_MED_GREEN,	/* DRUM_ENGINE_CHIP */
+		ledc_CORAL,		/* DRUM_ENGINE_ROLLER */
+		ledc_AQUA,		/* DRUM_ENGINE_PLAITS */
+	};
+	DrumVoiceEngine engine = drum_voice_engine_of(drum_chan[drum_selected_chan].ops);
+	enum ledColors color = kEngineColor[engine];
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, F_MAX_BRIGHTNESS);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_voice(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_VOICE;
 	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
@@ -1616,6 +1660,10 @@ void update_ongoing_display_timers(void){
 
 	/* Same one-shot idiom for the CV-mode-cycle flash. */
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_CV_MODE)
+		tick_down = 1;
+
+	/* Same one-shot idiom for the voice-cycle flash. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_VOICE)
 		tick_down = 1;
 
 	if (!tick_down)

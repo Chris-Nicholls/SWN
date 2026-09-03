@@ -47,9 +47,22 @@ volatile uint8_t drum_trig_flash[NUM_CHANNELS];
 volatile uint8_t drum_gate_ticks[NUM_CHANNELS];
 
 /* Channel currently held down (button_pressed() != RELEASED), or -1 if
- * none. While held, browse-encoder turns adjust that channel's level
- * instead of rotating the selected channel's pattern. */
+ * none. While held, turning the DEPTH or LFOSPEED encoder routes that
+ * channel's CV jack to the corresponding modulation target instead of
+ * (only) editing the knob -- see assign_cv_target_if_held(). */
 static int8_t drum_held_chan = -1;
+
+/* display_drum_cv_mode() needs this: assign_cv_target_if_held() routes
+ * the HELD channel's CV mode, which can differ from drum_selected_chan
+ * (you can hold one channel while turning a knob that's still editing
+ * whichever channel is selected -- see apply_to_selected_or_all()). */
+int8_t drum_ui_held_chan(void) { return drum_held_chan; }
+
+/* Set by assign_cv_target_if_held() the moment a hold actually routes a
+ * CV target, cleared at the start of each new hold -- read_channel_buttons()
+ * checks this on release to suppress the channel-select/global-edit-toggle
+ * action for a hold that was really a CV-routing gesture, not a tap. */
+static uint8_t held_chan_cv_assigned = 0;
 
 /* A FINE+press mute toggle queued in performance mode, one per channel.
  * Set here (main loop, read_performance_controls()), consumed and
@@ -391,14 +404,30 @@ static void read_channel_sliders(void)
 	}
 }
 
+/* Select/global-edit-toggle now lands on release rather than press, and
+ * only for a genuine short tap that never routed a CV target (see
+ * assign_cv_target_if_held()) -- holding a channel to route CV, or just
+ * holding it a while for no reason, must not also reselect it or flip
+ * global edit mode out from under whatever the hold was actually for.
+ * "Short" reuses the existing button_pressed() press-length ladder
+ * (RELEASED < PRESSED < SHORT_PRESSED < ...): the decision is made on
+ * the release edge by looking at whichever level the press had reached
+ * right before it, same idiom as read_drum_preset_ui()'s load/save
+ * decision -- a press released before it ever reaches SHORT_PRESSED
+ * (500ms) counts as short here. */
 static void read_channel_buttons(void)
 {
-	static uint8_t prev_pressed[NUM_CHANNELS];
+	static enum PressTypes prev_press_level[NUM_CHANNELS];
 	int8_t held = -1;
 
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
-		uint8_t now = (button_pressed(c) != RELEASED);
-		if (now && !prev_pressed[c]) {
+		enum PressTypes level = button_pressed(c);
+
+		if (level != RELEASED && prev_press_level[c] == RELEASED)
+			held_chan_cv_assigned = 0;
+
+		if (level == RELEASED && prev_press_level[c] != RELEASED
+		    && !held_chan_cv_assigned && prev_press_level[c] < SHORT_PRESSED) {
 			/* Re-pressing the channel that's already selected toggles
 			 * global edit mode instead of just reselecting it (a no-op
 			 * otherwise); pressing a genuinely different channel always
@@ -410,9 +439,10 @@ static void read_channel_buttons(void)
 				drum_global_edit_mode = 0;
 			}
 		}
-		if (now)
+
+		if (level != RELEASED)
 			held = (int8_t)c;
-		prev_pressed[c] = now;
+		prev_press_level[c] = level;
 	}
 	drum_held_chan = held;
 }
@@ -550,6 +580,26 @@ static void apply_chaos_delta(uint8_t c, float delta)
 	dc->chaos_amount = (uint8_t)_CLAMP_I32((int32_t)dc->chaos_amount + (int32_t)delta, 0, 255);
 }
 
+/* Active step count / density, the same value read_channel_sliders()
+ * drives -- see this function's own doc comment there for why Grids-
+ * driven channels use a quantized density threshold while everyone
+ * else (Euclid-mode selected channel, or channels E/F regardless of
+ * engine -- see chan_is_grids_driven()) uses k. `delta` is encoder
+ * clicks, not a 0..1 fraction like the other apply_*_delta functions
+ * here -- one click moves one Grids detent or one Euclid k step. */
+static void apply_density_delta(uint8_t c, float delta)
+{
+	o_drum_chan *dc = &drum_chan[c];
+	if (chan_is_grids_driven(c)) {
+		int32_t step = (int32_t)(delta * (255.0f / DRUM_DENSITY_DETENTS));
+		dc->density = (uint8_t)_CLAMP_I32((int32_t)dc->density + step, 0, 255);
+	} else {
+		__disable_irq();
+		euclid_set_k(&dc->euclid, dc->euclid.k + (int)delta);
+		__enable_irq();
+	}
+}
+
 /* Runs `apply` on every channel if global edit mode is active, else on
  * just the selected one -- the one piece of logic every knob handler
  * below shares. */
@@ -563,6 +613,30 @@ static void apply_to_selected_or_all(void (*apply)(uint8_t, float), float delta)
 	}
 }
 
+/* While a channel button is held, turning the DEPTH or LFOSPEED encoder
+ * routes that held channel's CV jack to the corresponding modulation
+ * target -- CV routing is chosen by touching the parameter you want it
+ * to modulate, rather than cycling blindly through a fixed list. The
+ * encoder still does its own normal job too (editing the selected
+ * channel's value, same as always -- see apply_to_selected_or_all()
+ * above), so held channel and selected channel can be two different
+ * channels turning the same knob for two different reasons at once.
+ * Turning the same encoder again while already routed to `new_mode`
+ * toggles back to CV_MODE_TRIGGER instead -- the only way back to
+ * trigger now that there's no dedicated cycle button (see
+ * read_voice_select_button(), which took LFOMODE_BUTTON over for
+ * sound-engine selection instead). No-op with no channel held. */
+static void assign_cv_target_if_held(uint8_t new_mode)
+{
+	if (drum_held_chan < 0)
+		return;
+
+	o_drum_chan *d = &drum_chan[drum_held_chan];
+	d->cv_mode = (d->cv_mode == new_mode) ? CV_MODE_TRIGGER : new_mode;
+	held_chan_cv_assigned = 1;
+	start_ongoing_display_drum_cv_mode();
+}
+
 static void read_voice_encoders(void)
 {
 	o_drum_chan *d = &drum_chan[drum_selected_chan];
@@ -572,6 +646,7 @@ static void read_voice_encoders(void)
 	if (enc) {
 		apply_to_selected_or_all(apply_filter_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER);
+		assign_cv_target_if_held(CV_MODE_FILTER);
 	}
 
 	/* Push+turn on DEPTH (sec_DISPERSION, dead in the old wavetable UI)
@@ -627,7 +702,53 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_HUMANIZE);
 	}
 
-	/* Clock divide/multiply. FINE used to fine-scale this; FINE is now
+	/* LFOSPEED: active step count / density -- the same value the
+	 * channel slider drives (see read_channel_sliders()' doc comment),
+	 * just reachable from an encoder too. apply_density_delta() picks
+	 * Grids density vs Euclid k per channel on its own (see
+	 * chan_is_grids_driven()), so this is safe to broadcast in global
+	 * edit mode even with a mix of Grids- and Euclid-driven channels
+	 * selected. Holding a channel while this turns also routes that
+	 * channel's CV jack to density -- see assign_cv_target_if_held(). */
+	enc = pop_encoder_q(pec_LFOSPEED);
+	if (enc) {
+		apply_to_selected_or_all(apply_density_delta, (float)enc);
+		assign_cv_target_if_held(CV_MODE_DENSITY);
+	}
+
+	/* Push+turn on LFOSPEED (sec_LFOGAIN, dead until now) -- total step
+	 * count, always for the selected channel only (not global-edit-mode
+	 * aware -- a step count only means something relative to that one
+	 * channel's own pattern). No effect on a Grids-driven channel,
+	 * which has no step count of its own (see chan_is_grids_driven()). */
+	enc = pop_encoder_q(sec_LFOGAIN);
+	if (enc && !chan_is_grids_driven(drum_selected_chan)) {
+		EuclidChannelState *e = &d->euclid;
+		__disable_irq();
+		euclid_set_n(e, e->n + enc);
+		__enable_irq();
+	}
+
+	/* LFOSHAPE: pattern rotation, always for the selected channel only
+	 * -- same convention and same Grids-driven exclusion as step count
+	 * above (this used to be the WBROWSE plain turn's job; see
+	 * read_pattern_encoder()). */
+	enc = pop_encoder_q(pec_LFOSHAPE);
+	if (enc && !chan_is_grids_driven(drum_selected_chan)) {
+		EuclidChannelState *e = &d->euclid;
+		/* euclid_rotate() advances a step's *source* index with
+		 * +rotation, which moves onsets to earlier step indices
+		 * (anticipates) as rotation increases -- backwards from
+		 * the expected "turn = later/lag" feel, hence the sign
+		 * flip here rather than in the (tested) pattern engine. */
+		__disable_irq();
+		euclid_set_rotation(e, e->rotation - enc);
+		__enable_irq();
+	}
+
+	/* Push+turn on LFOSHAPE (sec_LFOPHASE) -- clock divide/multiply,
+	 * the job pec_LFOSPEED's plain turn used to do before LFOSPEED took
+	 * over density above. FINE used to fine-scale this; FINE is now
 	 * dedicated entirely to automation record/play (see
 	 * read_automation()), so this always uses its one coarse step now.
 	 * In Grids mode this is one shared rate for the whole stepper --
@@ -638,7 +759,7 @@ static void read_voice_encoders(void)
 	 * independent Euclidean pattern -- including their own clock_rate --
 	 * even while the kit is in Grids mode, so selecting one of them
 	 * keeps editing its own per-channel rate instead of the shared one. */
-	enc = pop_encoder_q(pec_LFOSPEED);
+	enc = pop_encoder_q(sec_LFOPHASE);
 	if (enc) {
 		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS && chan_is_grids_driven(drum_selected_chan)) {
 			grids_clock_divmult_id = _CLAMP_F(grids_clock_divmult_id + (float)enc, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
@@ -675,80 +796,64 @@ static void read_voice_encoders(void)
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
 	}
 
-	/* Voice selection deliberately ignores global edit mode -- "same
-	 * position in each channel's own category" isn't a coherent action
-	 * across channels with different categories, unlike a plain knob
-	 * delta. Cycle the selected channel through its own category's voices only
-	 * (see kChannelCategory), so a channel is always "a kick" (etc.) no
-	 * matter how far this gets turned. Re-init rather than carry over
-	 * DSP state across a voice swap -- the old voice's envelope/
-	 * oscillator phase means nothing to the new one -- then re-push
-	 * filter/decay/other so the knobs don't silently reset to that
-	 * voice's own defaults. */
-	enc = pop_encoder_q(pec_LFOSHAPE);
-	if (enc) {
+}
+
+/* butm_LFOMODE_BUTTON: cycles the selected channel's voice within its
+ * own category (see kChannelCategory) -- the job pec_LFOSHAPE's plain
+ * turn used to do before LFOSHAPE took over rotation above. In the old
+ * wavetable UI this button toggled each channel's LFO/LPG mode, hence
+ * its name; fully free on the drum station until now. Edge-triggered,
+ * one step forward per press. Deliberately ignores global edit mode --
+ * "same position in each channel's own category" isn't a coherent
+ * action across channels with different categories, unlike a plain
+ * knob delta. Re-init rather than carry over DSP state across a voice
+ * swap -- the old voice's envelope/oscillator phase means nothing to
+ * the new one -- then re-push filter/decay/other so the knobs don't
+ * silently reset to that voice's own defaults. */
+static void read_voice_select_button(void)
+{
+	static uint8_t prev_pressed = 0;
+	uint8_t now = (button_pressed(butm_LFOMODE_BUTTON) != RELEASED);
+
+	if (now && !prev_pressed) {
+		o_drum_chan *d = &drum_chan[drum_selected_chan];
 		DrumVoiceCategory cat = kChannelCategory[drum_selected_chan];
-		const DrumVoiceOps *new_ops = cycle_voice_in_category(cat, d->ops, enc);
+		const DrumVoiceOps *new_ops = cycle_voice_in_category(cat, d->ops, 1);
+
 		if (new_ops && new_ops->state_size <= DRUM_VOICE_STATE_BYTES) {
 			d->ops = new_ops;
 			d->ops->init(d->state);
 			push_params(drum_selected_chan);
 		}
+		start_ongoing_display_drum_voice();
 	}
+	prev_pressed = now;
 }
 
+/* Grids' shared X/Y map position -- the one job left on this encoder
+ * now that rotation and step count moved to LFOSHAPE/LFOSPEED+push
+ * (see read_voice_encoders()), and the held-channel-nudges-level
+ * override that used to live here is gone entirely (holding a channel
+ * now routes CV targets instead -- see assign_cv_target_if_held()).
+ * X/Y have no per-channel identity (all Grids-driven channels share
+ * one map position), so this is unconditional on the selected channel,
+ * unlike everything that moved off it. Does nothing outside Grids
+ * mode -- currently unclaimed there. */
 static void read_pattern_encoder(void)
 {
-	EuclidChannelState *e = &drum_chan[drum_selected_chan].euclid;
+	if (drum_pattern_engine != PATTERN_ENGINE_GRIDS)
+		return;
 
-	/* Plain turn rotates the selected channel's pattern, unless a
-	 * channel button is currently held -- in that case the same turn
-	 * instead nudges that held channel's level (k is now the sliders'
-	 * job, so this encoder no longer needs to touch it). */
 	int16_t enc = pop_encoder_q(pec_WBROWSE);
 	int16_t enc2 = pop_encoder_q(sec_WTSEL);
 
-	/* Grids mode repoints this encoder at the shared map position:
-	 * rotation and n don't exist there. Holding a channel for level
-	 * still wins over both, in either mode. */
-	if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
-		if (enc) {
-			if (drum_held_chan >= 0) {
-				o_drum_chan *held = &drum_chan[drum_held_chan];
-				held->level = _CLAMP_F(held->level + (float)enc * DRUM_PARAM_STEP, 0.0f, 1.0f);
-			} else {
-				grids_x = (uint8_t)_CLAMP_I32((int32_t)grids_x + enc * DRUM_GRIDS_XY_STEP, 0, 255);
-				start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_X);
-			}
-		}
-		if (enc2) {
-			grids_y = (uint8_t)_CLAMP_I32((int32_t)grids_y + enc2 * DRUM_GRIDS_XY_STEP, 0, 255);
-			start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_Y);
-		}
-		return;
-	}
-
 	if (enc) {
-		if (drum_held_chan >= 0) {
-			o_drum_chan *held = &drum_chan[drum_held_chan];
-			held->level = _CLAMP_F(held->level + (float)enc * DRUM_PARAM_STEP, 0.0f, 1.0f);
-		} else {
-			__disable_irq();
-			/* euclid_rotate() advances a step's *source* index with
-			 * +rotation, which moves onsets to earlier step indices
-			 * (anticipates) as rotation increases -- backwards from
-			 * the expected "turn = later/lag" feel, hence the sign
-			 * flip here rather than in the (tested) pattern engine. */
-			euclid_set_rotation(e, e->rotation - enc);
-			__enable_irq();
-		}
+		grids_x = (uint8_t)_CLAMP_I32((int32_t)grids_x + enc * DRUM_GRIDS_XY_STEP, 0, 255);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_X);
 	}
-
-	/* Push+turn: total step count, always for the selected channel. */
 	if (enc2) {
-		__disable_irq();
-		euclid_set_n(e, e->n + enc2);
-		__enable_irq();
+		grids_y = (uint8_t)_CLAMP_I32((int32_t)grids_y + enc2 * DRUM_GRIDS_XY_STEP, 0, 255);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GRIDS_Y);
 	}
 }
 
@@ -780,29 +885,6 @@ static void read_pattern_engine_button(void)
 		 * than let the just-switched-to channels start out of phase
 		 * with the ones that never stopped. */
 		pattern_resync_pending = 1;
-	}
-	prev_pressed = now;
-}
-
-/* butm_LFOMODE_BUTTON is otherwise fully dead on the drum station --
- * cycles the selected channel's CV-jack mode (or every channel's, in
- * global edit mode, same selected-vs-global convention as the knob
- * handlers above). Edge-triggered for the same reason the pattern-
- * engine button above is. */
-static void read_cv_mode_button(void)
-{
-	static uint8_t prev_pressed = 0;
-	uint8_t now = (button_pressed(butm_LFOMODE_BUTTON) != RELEASED);
-
-	if (now && !prev_pressed) {
-		if (drum_global_edit_mode) {
-			for (uint8_t c = 0; c < NUM_CHANNELS; c++)
-				drum_chan[c].cv_mode = (drum_chan[c].cv_mode + 1) % NUM_CV_MODES;
-		} else {
-			o_drum_chan *d = &drum_chan[drum_selected_chan];
-			d->cv_mode = (d->cv_mode + 1) % NUM_CV_MODES;
-		}
-		start_ongoing_display_drum_cv_mode();
 	}
 	prev_pressed = now;
 }
@@ -939,7 +1021,7 @@ void read_drum_ui(void)
 	read_voice_encoders();
 	read_pattern_encoder();
 	read_pattern_engine_button();
-	read_cv_mode_button();
+	read_voice_select_button();
 	read_cv_filter_mod();
 	read_automation();
 }

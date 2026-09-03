@@ -332,6 +332,12 @@ uint8_t drum_ui_performance_mode(void);
  * landed. */
 uint8_t drum_ui_mute_pending(uint8_t chan);
 
+/* Channel currently held down (button_pressed() != RELEASED), or -1 if
+ * none -- see assign_cv_target_if_held() in drum_ui.c. Used by
+ * display_drum_cv_mode() (led_cont.c), which shows whichever channel's
+ * CV mode a hold just routed rather than drum_selected_chan. */
+int8_t drum_ui_held_chan(void);
+
 /* OSC_TIM: advances every channel's pattern on each master-clock step and
  * arms triggers (or takes them from a plugged CV jack instead). */
 void update_drum_triggers(void);
