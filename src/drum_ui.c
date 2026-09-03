@@ -295,6 +295,13 @@ static int slider_to_level_hysteretic(float slider01, int current, int num_level
  * absolute control resumes. Set by drum_preset.c after a load. */
 static uint8_t slider_pickup_pending[NUM_CHANNELS];
 
+/* Same idea, for performance mode's slider->level takeover instead of
+ * a preset load -- see its doc comment further down, next to
+ * read_performance_controls(). Declared here, alongside
+ * slider_pickup_pending, purely so drum_ui_slider_pickup_pending()
+ * below can report either one through the one shared LED. */
+static uint8_t level_pickup_pending[NUM_CHANNELS];
+
 void drum_ui_request_slider_pickup(void)
 {
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++)
@@ -303,11 +310,14 @@ void drum_ui_request_slider_pickup(void)
 
 /* For the slider LED: true while channel c's slider is being ignored
  * (see above), i.e. while its LED does *not* reflect the channel's
- * real k/density -- the physical slider hasn't been moved to catch up
- * with a just-loaded preset yet. */
+ * real k/density/level -- the physical slider hasn't been moved to
+ * catch up with a just-loaded preset or a performance-mode switch yet.
+ * The two pending flags are mutually exclusive in practice (edit vs.
+ * performance mode), so reporting either one through the one LED is
+ * unambiguous. */
 uint8_t drum_ui_slider_pickup_pending(uint8_t chan)
 {
-	return (chan < NUM_CHANNELS) ? slider_pickup_pending[chan] : 0;
+	return (chan < NUM_CHANNELS) ? (slider_pickup_pending[chan] || level_pickup_pending[chan]) : 0;
 }
 
 static void read_channel_sliders(void)
@@ -417,13 +427,32 @@ static void read_channel_buttons(void)
  * off-beat. Entirely separate from read_channel_buttons()/
  * read_channel_sliders() above -- read_drum_ui() calls one set or the
  * other, never both. */
+/* level_pickup_pending is declared next to slider_pickup_pending above.
+ * Armed on the edit-to-performance transition (see read_drum_ui()),
+ * cleared per channel once its slider is moved back within
+ * DRUM_LEVEL_PICKUP_MARGIN of the level it already had -- entering
+ * performance mode otherwise has each slider instantly snap that
+ * channel's level to wherever it physically happens to be sitting,
+ * almost never where it was already set to. */
+#define DRUM_LEVEL_PICKUP_MARGIN	0.03f
+
 static void read_performance_controls(void)
 {
 	static uint8_t prev_pressed[NUM_CHANNELS];
 	uint8_t fine_held = switch_pressed(FINE_BUTTON);
 
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
-		drum_chan[c].level = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+		float slider01 = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+
+		if (level_pickup_pending[c]) {
+			float diff = slider01 - drum_chan[c].level;
+			if (diff < 0.0f)
+				diff = -diff;
+			if (diff <= DRUM_LEVEL_PICKUP_MARGIN)
+				level_pickup_pending[c] = 0;
+		}
+		if (!level_pickup_pending[c])
+			drum_chan[c].level = slider01;
 
 		uint8_t now = (button_pressed(c) != RELEASED);
 		if (now && !prev_pressed[c]) {
@@ -883,10 +912,23 @@ void read_drum_ui(void)
 	 * edit mode just keeps playing underneath (update_drum_triggers()
 	 * isn't touched by this at all); this is a live mixing overlay, not
 	 * a pause. */
-	if (drum_ui_performance_mode()) {
+	static uint8_t was_performance_mode = 0;
+	uint8_t now_performance_mode = drum_ui_performance_mode();
+
+	if (now_performance_mode) {
+		/* Just switched in from edit mode -- arm soft pickup on every
+		 * slider (see level_pickup_pending's doc comment) rather than
+		 * letting each one instantly snap the channel's level to
+		 * wherever it physically happens to be sitting. */
+		if (!was_performance_mode) {
+			for (uint8_t c = 0; c < NUM_CHANNELS; c++)
+				level_pickup_pending[c] = 1;
+		}
+		was_performance_mode = 1;
 		read_performance_controls();
 		return;
 	}
+	was_performance_mode = 0;
 
 	read_channel_sliders();
 	read_channel_buttons();
