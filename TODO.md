@@ -6,8 +6,9 @@ Do not guess, but ask for clarification if a task is underspecified at a feature
 
 - [x] CV routing and automation should work on any parameter -- chaos, active steps, anything manually interactive for a channel
   - `DrumParamId` (drum_ui.h) now names every per-channel value a knob can reach; `drum_param_get01()`/`drum_param_set01()` (drum_ui.c) are the one read/write pair (normalized 0..1) both CV routing and automation funnel through, so neither needs per-parameter special-casing. CV is an absolute substitute while patched (not additive) -- the manual control resumes exactly where it sits the instant the cable comes out.
-  - Automation (FINE record/play) now targets whichever parameter the channel's CV is currently routed to (or filter, if nothing's been routed) instead of a fixed filter+decay+other trio -- one lane per channel now, not three.
+  - Automation (FINE record/play) now targets any parameter too, one lane per channel instead of a fixed filter+decay+other trio.
   - LED ring actually flashes (on/off) rather than holding solid when a target gets routed, colour-coded per parameter (reusing the same colours displayed elsewhere for that param's own bar-graph where one exists).
+  - Automation's target is independent of CV's -- a channel can have its CV jack modulating one parameter and its automation loop driving a completely different one. Routed with the same hold-channel-and-touch-a-control gesture as CV, disambiguated by also holding FINE (FINE held = routes automation; released = routes CV). Automation's flash also lights the inner ring, not just the outer one, so it's visibly distinct from a CV-routing flash even when they land on the same parameter/colour.
 - [x] crash sounds should be on the open hi hat too
   - Crash voices (mpump/roller) retagged DRUM_CAT_OPEN_HAT instead of a dedicated crash category, which no longer exists. Channels E and F are both DRUM_CAT_OTHER now (explicit kChannelCategory table, since channel index no longer maps 1:1 onto category).
 

@@ -191,18 +191,25 @@ typedef struct o_drum_chan {
 	 * records/plays. */
 	uint8_t				cv_mode;
 
-	/* Automation transport for this channel's one modulation target
-	 * (whatever cv_mode above currently points at -- DRUM_PARAM_FILTER
-	 * if cv_mode is still DRUM_CV_TARGET_TRIGGER, so a channel that's
-	 * never touched CV routing still gets a sensible default), driven
-	 * by holding FINE (see read_automation() in drum_ui.c): OFF while
+	/* Which DrumParamId automation records/plays for this channel --
+	 * independent of cv_mode above (a channel can have its CV jack
+	 * modulating one parameter and automation looping a completely
+	 * different one). Defaults to DRUM_PARAM_FILTER (0), same as a
+	 * fresh memset(). Routed the same hold-and-touch way as cv_mode,
+	 * but with FINE also held -- see assign_automation_target_if_held()
+	 * in drum_ui.c -- to disambiguate from routing cv_mode (channel
+	 * held, FINE not held) without needing a second physical gesture. */
+	uint8_t				automation_target;
+
+	/* Automation transport for automation_target above, driven by
+	 * holding FINE (see read_automation() in drum_ui.c): OFF while
 	 * under manual control, RECORD while FINE is held (sampling the
 	 * live value into the lane below once per bar_tick), PLAY once FINE
 	 * is released (looping the last recording, linearly interpolated
 	 * between its DRUM_BAR_TICKS points, normalized 0..1 -- see
 	 * drum_param_get01()/drum_param_set01()). Manually touching the
 	 * target parameter while PLAY-ing cancels back to OFF -- see
-	 * cancel_automation_if_playing(). Not saved with presets/autosave in
+	 * cancel_automation_if_target(). Not saved with presets/autosave in
 	 * v1; lost on power-cycle, same as any other live performance loop. */
 	uint8_t				automation_state;
 	float				automation_lane[DRUM_BAR_TICKS];

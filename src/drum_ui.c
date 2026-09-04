@@ -304,16 +304,6 @@ static void drum_param_set01(uint8_t c, DrumParamId id, float v01)
 	}
 }
 
-/* This channel's currently-routed CV/automation target -- DRUM_PARAM_FILTER
- * if cv_mode is still DRUM_CV_TARGET_TRIGGER (nothing explicitly routed
- * yet), so automation has a sensible default target on a channel that's
- * never touched CV routing at all. */
-static DrumParamId drum_chan_cv_target(uint8_t c)
-{
-	uint8_t mode = drum_chan[c].cv_mode;
-	return (mode == DRUM_CV_TARGET_TRIGGER) ? DRUM_PARAM_FILTER : (DrumParamId)(mode - 1);
-}
-
 /* Steps `current` forward/back by `step` positions within just the
  * registry entries tagged `cat`, wrapping within that subset (not the
  * whole registry) -- this is what keeps a channel's voice cycling
@@ -666,15 +656,15 @@ static void read_performance_controls(void)
 /* Manually touching a knob always wins over a looping automation
  * playback on that same channel -- same "the real control wins"
  * precedent as the slider-pickup fix and CV-density mode -- but only
- * when it's the knob automation is actually driving (drum_chan_cv_target()):
- * touching an unrelated parameter shouldn't stop a loop that has
- * nothing to do with it. Doesn't apply while RECORD is armed (FINE
- * held): that's the manual knob turning itself being captured, not
- * something to cancel. */
+ * when it's the knob automation is actually driving (automation_target,
+ * independent of cv_mode -- see that field's doc comment): touching an
+ * unrelated parameter shouldn't stop a loop that has nothing to do
+ * with it. Doesn't apply while RECORD is armed (FINE held): that's the
+ * manual knob turning itself being captured, not something to cancel. */
 static void cancel_automation_if_target(uint8_t c, DrumParamId id)
 {
 	o_drum_chan *dc = &drum_chan[c];
-	if (dc->automation_state == AUTOMATION_PLAY && drum_chan_cv_target(c) == id)
+	if (dc->automation_state == AUTOMATION_PLAY && dc->automation_target == id)
 		dc->automation_state = AUTOMATION_OFF;
 }
 
@@ -802,16 +792,15 @@ static void apply_to_selected_or_all(void (*apply)(uint8_t, float), float delta)
 }
 
 /* While a channel button is held, turning *any* per-channel knob
- * routes that held channel's CV jack (and automation -- see
- * drum_chan_cv_target()) to that parameter *instead of* editing the
- * knob's value -- the target is chosen by touching the control you
- * want it to affect, and the hold is a dedicated "pick a target"
- * gesture, not also a live edit (held channel and selected channel can
- * be two different channels, and it would be surprising for turning a
- * knob to route one channel's CV to also change another channel's
- * sound). The only way back to DRUM_CV_TARGET_TRIGGER is holding the
- * channel for DRUM_CV_CLEAR_HOLD_MS without touching a knob at all --
- * see read_channel_buttons(). */
+ * routes that held channel's CV jack to that parameter *instead of*
+ * editing the knob's value -- the target is chosen by touching the
+ * control you want it to affect, and the hold is a dedicated "pick a
+ * target" gesture, not also a live edit (held channel and selected
+ * channel can be two different channels, and it would be surprising
+ * for turning a knob to route one channel's CV to also change another
+ * channel's sound). The only way back to DRUM_CV_TARGET_TRIGGER is
+ * holding the channel for DRUM_CV_CLEAR_HOLD_MS without touching a
+ * knob at all -- see read_channel_buttons(). */
 static void assign_cv_target_if_held(DrumParamId id)
 {
 	drum_chan[drum_held_chan].cv_mode = 1 + (uint8_t)id;
@@ -819,15 +808,36 @@ static void assign_cv_target_if_held(DrumParamId id)
 	start_ongoing_display_drum_cv_mode();
 }
 
+/* Same idea as assign_cv_target_if_held() above, but for
+ * automation_target instead of cv_mode -- automation's own,
+ * independent target (see that field's doc comment), routed with FINE
+ * also held so the same "hold channel + turn a knob" gesture can pick
+ * either one without a second physical control: FINE held routes
+ * automation, released routes CV -- see route_cv_or_edit(). No
+ * "hold-to-clear" here since automation_target has no special
+ * "nothing routed" state the way cv_mode's trigger default is --
+ * it's just always some DrumParamId, defaulting to filter. */
+static void assign_automation_target_if_held(DrumParamId id)
+{
+	drum_chan[drum_held_chan].automation_target = (uint8_t)id;
+	held_chan_cv_assigned = 1;
+	start_ongoing_display_drum_automation_target();
+}
+
 /* The one piece of logic every per-channel knob handler below shares:
- * while a channel is held, route its CV target to `id` and report "I
- * handled this, don't also edit the value" (1); otherwise report "go
- * ahead and edit normally" (0). See assign_cv_target_if_held() above. */
+ * while a channel is held, route its CV target (or, with FINE also
+ * held, its automation target instead) to `id` and report "I handled
+ * this, don't also edit the value" (1); otherwise report "go ahead and
+ * edit normally" (0). See assign_cv_target_if_held()/
+ * assign_automation_target_if_held() above. */
 static uint8_t route_cv_or_edit(DrumParamId id)
 {
 	if (drum_held_chan < 0)
 		return 0;
-	assign_cv_target_if_held(id);
+	if (switch_pressed(FINE_BUTTON))
+		assign_automation_target_if_held(id);
+	else
+		assign_cv_target_if_held(id);
 	return 1;
 }
 
@@ -1113,9 +1123,8 @@ static volatile uint16_t g_bar_tick  = 0;
 static volatile float    g_clk_frac  = 0.0f;
 
 /* FINE dedicated entirely to automation record/play for this channel's
- * one current CV/automation target (drum_chan_cv_target() -- whatever
- * cv_mode is routed to, or DRUM_PARAM_FILTER if it's still
- * DRUM_CV_TARGET_TRIGGER), one lane per channel, one bar long
+ * own automation_target (independent of cv_mode -- see that field's
+ * doc comment), one lane per channel, one bar long
  * (DRUM_BAR_TICKS points, linearly interpolated between them, stored
  * normalized 0..1 via drum_param_get01()/drum_param_set01() regardless
  * of the target's own native range). Holding FINE arms/continues
@@ -1163,15 +1172,15 @@ static void read_automation(void)
 			if (d->automation_state != AUTOMATION_RECORD)
 				record_start_ms[c] = now_ms;
 			d->automation_state = AUTOMATION_RECORD;
-			d->automation_lane[tick] = drum_param_get01(c, drum_chan_cv_target(c));
+			d->automation_lane[tick] = drum_param_get01(c, (DrumParamId)d->automation_target);
 			continue;
 		}
 
 		if (d->automation_state == AUTOMATION_RECORD) {
 			/* Commits this take's target now, once, rather than
-			 * re-reading drum_chan_cv_target() every PLAY tick below --
-			 * see this function's own doc comment on retargeting. */
-			play_target[c] = drum_chan_cv_target(c);
+			 * re-reading automation_target every PLAY tick below -- see
+			 * this function's own doc comment on retargeting. */
+			play_target[c] = (DrumParamId)d->automation_target;
 			d->automation_state = ((now_ms - record_start_ms[c]) >= AUTOMATION_MIN_RECORD_MS)
 			                     ? AUTOMATION_PLAY : AUTOMATION_OFF;
 		}

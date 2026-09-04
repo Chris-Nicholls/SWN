@@ -61,6 +61,7 @@ enum ongoingDisplays{
 	ONGOING_DISPLAY_DRUM_ENGINE,
 	ONGOING_DISPLAY_DRUM_CV_MODE,
 	ONGOING_DISPLAY_DRUM_VOICE,
+	ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET,
 
 	NUM_ONGOING_DISPLAYS
 };
@@ -154,6 +155,8 @@ void 		display_drum_cv_mode(void);
 void 		start_ongoing_display_drum_cv_mode(void);
 void 		display_drum_voice(void);
 void 		start_ongoing_display_drum_voice(void);
+void 		display_drum_automation_target(void);
+void 		start_ongoing_display_drum_automation_target(void);
 void 		display_wt_seed_pos(void);
 void 		display_transpose(void);
 void 		display_finetune(void);

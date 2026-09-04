@@ -711,6 +711,10 @@ void calculate_led_ring(void){
 				display_drum_voice();
 				break;
 
+			case ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET:
+				display_drum_automation_target();
+				break;
+
 			default:
 				display_drum_pattern();
 				break;
@@ -928,42 +932,47 @@ void start_ongoing_display_drum_engine(void)
 	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
+/* One colour per DrumParamId, shared by display_drum_cv_mode() and
+ * display_drum_automation_target() below -- reusing the exact colour
+ * display_drum_param() already shows that same parameter's own
+ * bar-graph wherever one exists, so a flash reads as "that parameter"
+ * at a glance rather than an arbitrary new colour to memorize. */
+static const enum ledColors kDrumParamColor[NUM_DRUM_PARAMS] = {
+	ledc_AQUA,		/* DRUM_PARAM_FILTER */
+	ledc_DEEP_BLUE,	/* DRUM_PARAM_FILTER_RANDOM */
+	ledc_YELLOW,	/* DRUM_PARAM_DECAY */
+	ledc_BUTTERCUP,	/* DRUM_PARAM_DECAY_RANDOM */
+	ledc_PURPLE,	/* DRUM_PARAM_OTHER */
+	ledc_BRIGHTPINK,/* DRUM_PARAM_OTHER_RANDOM */
+	ledc_GOLD,		/* DRUM_PARAM_PITCH */
+	ledc_CORAL,		/* DRUM_PARAM_HUMANIZE */
+	ledc_LIGHT_GREEN,/* DRUM_PARAM_GHOST */
+	ledc_RED,		/* DRUM_PARAM_CHAOS */
+	ledc_MED_GREEN,	/* DRUM_PARAM_SPEED */
+	ledc_BLUE,		/* DRUM_PARAM_DENSITY */
+	ledc_FUSHIA,	/* DRUM_PARAM_ROTATION */
+	ledc_MED_BLUE,	/* DRUM_PARAM_STEPS */
+};
+
 /* Actually flashes (on/off, via led_cont.flash_state -- the same
  * ~256ms-period toggle the mute/pending-slider blinks already use)
- * rather than a solid hold, confirming a channel's CV/automation
- * target just got routed by holding it and turning a control (see
- * assign_cv_target_if_held() in drum_ui.c). One colour per
- * DrumParamId, reusing the exact colour display_drum_param() already
- * shows that same parameter's own bar-graph in wherever one exists, so
- * the flash reads as "that parameter" at a glance rather than an
- * arbitrary new colour to memorize. Shows the held channel, not
- * drum_selected_chan -- the two can differ (holding one channel while
- * a knob still edits whichever channel is selected). Falls back to
- * drum_selected_chan if nothing's held (shouldn't happen -- this is
+ * rather than a solid hold, confirming a channel's CV target just got
+ * routed by holding it and turning a control (see
+ * assign_cv_target_if_held() in drum_ui.c). Outer ring only --
+ * display_drum_automation_target() below is the same idiom but also
+ * flashes the inner ring, so the two are visually distinguishable at a
+ * glance even though they can share a colour. Shows the held channel,
+ * not drum_selected_chan -- the two can differ (holding one channel
+ * while a knob still edits whichever channel is selected). Falls back
+ * to drum_selected_chan if nothing's held (shouldn't happen -- this is
  * only ever armed from inside a hold -- but avoids reading a stale
  * channel's mode if it ever does). */
 void display_drum_cv_mode(void)
 {
-	static const enum ledColors kParamColor[NUM_DRUM_PARAMS] = {
-		ledc_AQUA,		/* DRUM_PARAM_FILTER */
-		ledc_DEEP_BLUE,	/* DRUM_PARAM_FILTER_RANDOM */
-		ledc_YELLOW,	/* DRUM_PARAM_DECAY */
-		ledc_BUTTERCUP,	/* DRUM_PARAM_DECAY_RANDOM */
-		ledc_PURPLE,	/* DRUM_PARAM_OTHER */
-		ledc_BRIGHTPINK,/* DRUM_PARAM_OTHER_RANDOM */
-		ledc_GOLD,		/* DRUM_PARAM_PITCH */
-		ledc_CORAL,		/* DRUM_PARAM_HUMANIZE */
-		ledc_LIGHT_GREEN,/* DRUM_PARAM_GHOST */
-		ledc_RED,		/* DRUM_PARAM_CHAOS */
-		ledc_MED_GREEN,	/* DRUM_PARAM_SPEED */
-		ledc_BLUE,		/* DRUM_PARAM_DENSITY */
-		ledc_FUSHIA,	/* DRUM_PARAM_ROTATION */
-		ledc_MED_BLUE,	/* DRUM_PARAM_STEPS */
-	};
 	int8_t held = drum_ui_held_chan();
 	uint8_t chan = (held >= 0) ? (uint8_t)held : drum_selected_chan;
 	uint8_t cv_mode = drum_chan[chan].cv_mode;
-	enum ledColors color = (cv_mode == DRUM_CV_TARGET_TRIGGER) ? ledc_WHITE : kParamColor[cv_mode - 1];
+	enum ledColors color = (cv_mode == DRUM_CV_TARGET_TRIGGER) ? ledc_WHITE : kDrumParamColor[cv_mode - 1];
 	float bri = led_cont.flash_state ? F_MAX_BRIGHTNESS : 0.0f;
 	uint8_t i;
 
@@ -977,6 +986,34 @@ void display_drum_cv_mode(void)
 void start_ongoing_display_drum_cv_mode(void)
 {
 	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_CV_MODE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Same flash idiom as display_drum_cv_mode() above, for automation's
+ * own independent target (see assign_automation_target_if_held() and
+ * automation_target's doc comment in drum_ui.h) -- but flashes *both*
+ * rings, not just the outer one, so routing automation reads visibly
+ * different from routing CV even when they land on the same parameter
+ * (and colour). No DRUM_CV_TARGET_TRIGGER-equivalent case here --
+ * automation_target is always some real DrumParamId. */
+void display_drum_automation_target(void)
+{
+	int8_t held = drum_ui_held_chan();
+	uint8_t chan = (held >= 0) ? (uint8_t)held : drum_selected_chan;
+	enum ledColors color = kDrumParamColor[drum_chan[chan].automation_target];
+	float bri = led_cont.flash_state ? F_MAX_BRIGHTNESS : 0.0f;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, bri);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, bri);
+}
+
+void start_ongoing_display_drum_automation_target(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET;
 	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
@@ -1677,6 +1714,10 @@ void update_ongoing_display_timers(void){
 
 	/* Same one-shot idiom for the voice-cycle flash. */
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_VOICE)
+		tick_down = 1;
+
+	/* Same one-shot idiom for the automation-target-routing flash. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET)
 		tick_down = 1;
 
 	if (!tick_down)
