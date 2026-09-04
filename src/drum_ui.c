@@ -1218,6 +1218,14 @@ void read_drum_ui(void)
 		read_performance_controls();
 		return;
 	}
+	if (was_performance_mode) {
+		/* Just switched back from performance mode -- arm the same
+		 * soft pickup in the other direction, on k/density this
+		 * time, so the pattern doesn't snap to wherever the slider
+		 * happens to be sitting after moving levels around. */
+		for (uint8_t c = 0; c < NUM_CHANNELS; c++)
+			slider_pickup_pending[c] = 1;
+	}
 	was_performance_mode = 0;
 
 	read_channel_sliders();
