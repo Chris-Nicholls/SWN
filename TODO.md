@@ -2,7 +2,12 @@ TODOs:
 Do not guess, but ask for clarification if a task is underspecified at a feature level. This is a living document. 
 
 - [x] figure out what to do with CV ins
-  - Each channel's CV jack now has a mode, cycled by pressing LFOMODE (or every channel's, in global edit mode): trigger (unchanged), density-mod (feeds that channel's k/density the same way the slider does), or filter-mod (adds to the manual filter knob position). One-shot LED-ring flash on cycling, colour-coded per mode.
+  - Each channel's CV jack now has a mode: trigger (unchanged, the default) or any one of the manually-editable parameters (filter, decay, other, their random amounts, pitch, humanize, ghost, chaos, speed, density/active-steps, rotation, total steps). Routed by holding the channel's button and touching the control you want the jack to drive, rather than cycling through a fixed list -- see "CV routing and automation should work on any parameter" further down for the full redesign (this originally shipped LFOMODE-cycled with just trigger/density/filter).
+
+- [x] CV routing and automation should work on any parameter -- chaos, active steps, anything manually interactive for a channel
+  - `DrumParamId` (drum_ui.h) now names every per-channel value a knob can reach; `drum_param_get01()`/`drum_param_set01()` (drum_ui.c) are the one read/write pair (normalized 0..1) both CV routing and automation funnel through, so neither needs per-parameter special-casing. CV is an absolute substitute while patched (not additive) -- the manual control resumes exactly where it sits the instant the cable comes out.
+  - Automation (FINE record/play) now targets whichever parameter the channel's CV is currently routed to (or filter, if nothing's been routed) instead of a fixed filter+decay+other trio -- one lane per channel now, not three.
+  - LED ring actually flashes (on/off) rather than holding solid when a target gets routed, colour-coded per parameter (reusing the same colours displayed elsewhere for that param's own bar-graph where one exists).
 - [x] crash sounds should be on the open hi hat too
   - Crash voices (mpump/roller) retagged DRUM_CAT_OPEN_HAT instead of a dedicated crash category, which no longer exists. Channels E and F are both DRUM_CAT_OTHER now (explicit kChannelCategory table, since channel index no longer maps 1:1 onto category).
 

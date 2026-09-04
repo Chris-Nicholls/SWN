@@ -928,31 +928,47 @@ void start_ongoing_display_drum_engine(void)
 	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
-/* Brief whole-ring flash confirming a channel's CV-jack mode just got
- * routed by holding it and turning a knob (see assign_cv_target_if_held()
- * in drum_ui.c) -- same one-shot idiom as display_drum_engine(), one
- * colour per mode so it's at least distinguishable at a glance even
- * without reading the mode off anywhere else. Shows the held channel,
- * not drum_selected_chan -- the two can differ (holding one channel
- * while a knob still edits whichever channel is selected). Falls back
- * to drum_selected_chan if nothing's held (shouldn't happen -- this is
+/* Actually flashes (on/off, via led_cont.flash_state -- the same
+ * ~256ms-period toggle the mute/pending-slider blinks already use)
+ * rather than a solid hold, confirming a channel's CV/automation
+ * target just got routed by holding it and turning a control (see
+ * assign_cv_target_if_held() in drum_ui.c). One colour per
+ * DrumParamId, reusing the exact colour display_drum_param() already
+ * shows that same parameter's own bar-graph in wherever one exists, so
+ * the flash reads as "that parameter" at a glance rather than an
+ * arbitrary new colour to memorize. Shows the held channel, not
+ * drum_selected_chan -- the two can differ (holding one channel while
+ * a knob still edits whichever channel is selected). Falls back to
+ * drum_selected_chan if nothing's held (shouldn't happen -- this is
  * only ever armed from inside a hold -- but avoids reading a stale
  * channel's mode if it ever does). */
 void display_drum_cv_mode(void)
 {
+	static const enum ledColors kParamColor[NUM_DRUM_PARAMS] = {
+		ledc_AQUA,		/* DRUM_PARAM_FILTER */
+		ledc_DEEP_BLUE,	/* DRUM_PARAM_FILTER_RANDOM */
+		ledc_YELLOW,	/* DRUM_PARAM_DECAY */
+		ledc_BUTTERCUP,	/* DRUM_PARAM_DECAY_RANDOM */
+		ledc_PURPLE,	/* DRUM_PARAM_OTHER */
+		ledc_BRIGHTPINK,/* DRUM_PARAM_OTHER_RANDOM */
+		ledc_GOLD,		/* DRUM_PARAM_PITCH */
+		ledc_CORAL,		/* DRUM_PARAM_HUMANIZE */
+		ledc_LIGHT_GREEN,/* DRUM_PARAM_GHOST */
+		ledc_RED,		/* DRUM_PARAM_CHAOS */
+		ledc_MED_GREEN,	/* DRUM_PARAM_SPEED */
+		ledc_BLUE,		/* DRUM_PARAM_DENSITY */
+		ledc_FUSHIA,	/* DRUM_PARAM_ROTATION */
+		ledc_MED_BLUE,	/* DRUM_PARAM_STEPS */
+	};
 	int8_t held = drum_ui_held_chan();
 	uint8_t chan = (held >= 0) ? (uint8_t)held : drum_selected_chan;
-	enum ledColors color;
+	uint8_t cv_mode = drum_chan[chan].cv_mode;
+	enum ledColors color = (cv_mode == DRUM_CV_TARGET_TRIGGER) ? ledc_WHITE : kParamColor[cv_mode - 1];
+	float bri = led_cont.flash_state ? F_MAX_BRIGHTNESS : 0.0f;
 	uint8_t i;
 
-	switch (drum_chan[chan].cv_mode) {
-		case CV_MODE_DENSITY: color = ledc_BLUE; break;
-		case CV_MODE_FILTER:  color = ledc_AQUA; break;
-		default:              color = ledc_WHITE; break;	/* CV_MODE_TRIGGER */
-	}
-
 	for (i = 0; i < NUM_LED_OUTRING; i++)
-		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, F_MAX_BRIGHTNESS);
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, bri);
 
 	for (i = 0; i < NUM_LED_INRING; i++)
 		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);

@@ -66,7 +66,7 @@ static uint8_t held_chan_cv_assigned = 0;
 
 /* Holding a channel for this long *without* touching a knob (see
  * held_chan_cv_assigned above) clears that channel's CV mode back to
- * CV_MODE_TRIGGER -- the only way back now that routing a target is a
+ * DRUM_CV_TARGET_TRIGGER -- the only way back now that routing a target is a
  * plain "set", not a toggle (see assign_cv_target_if_held()). Tracked
  * in ms (HAL_GetTick(), same clock read_automation() already uses)
  * rather than a tick count, since read_drum_ui() runs off the variable-
@@ -166,9 +166,153 @@ static uint8_t chan_is_grids_driven(uint8_t c)
 #define DRUM_CHAOS_STEP			6		/* same coarseness as DRUM_GRIDS_XY_STEP, one shared 0..255 range */
 #define DRUM_PARAM_STEP			0.02f
 #define DRUM_PITCH_STEP			1.0f	/* one semitone per encoder click */
-#define DRUM_CV_FILTER_MOD_RANGE	0.5f	/* +/- this much filter, bipolar around the manual knob position, at full-scale CV */
 /* LED update runs at 60 Hz, so 4 ticks is a ~66 ms visible blip. */
 #define DRUM_FLASH_TICKS		4
+
+/* The read/write pair every DrumParamId funnels through, normalized to
+ * 0..1 regardless of the target's own native range/type -- what lets
+ * CV routing (read_cv_param_mod()) and automation (read_automation())
+ * share one implementation instead of each needing its own per-
+ * parameter special-casing. Chaos/density/speed each branch on
+ * chan_is_grids_driven(c) the same way their own manual controls
+ * already do (see read_voice_encoders()), so routing one of these on a
+ * Grids-driven channel reaches whichever storage (shared or
+ * per-channel) that channel's own knob would have reached too.
+ * Rotation/steps always address this channel's own euclid state
+ * regardless of engine -- harmless (if inaudible) to route on a
+ * Grids-driven channel, same as turning their own knobs already is. */
+static float drum_param_get01(uint8_t c, DrumParamId id)
+{
+	const o_drum_chan *d = &drum_chan[c];
+
+	switch (id) {
+		case DRUM_PARAM_FILTER:        return d->filter;
+		case DRUM_PARAM_FILTER_RANDOM: return d->filter_random;
+		case DRUM_PARAM_DECAY:         return d->decay;
+		case DRUM_PARAM_DECAY_RANDOM:  return d->decay_random;
+		case DRUM_PARAM_OTHER:         return d->other;
+		case DRUM_PARAM_OTHER_RANDOM:  return d->other_random;
+		case DRUM_PARAM_PITCH:         return (d->pitch + 24.0f) / 48.0f;
+		case DRUM_PARAM_HUMANIZE:      return d->humanize;
+		case DRUM_PARAM_GHOST:         return d->ghost_amount;
+		case DRUM_PARAM_CHAOS:
+			return (float)(chan_is_grids_driven(c) ? pattern_chaos : d->chaos_amount) / 255.0f;
+		case DRUM_PARAM_SPEED: {
+			float divmult_id = chan_is_grids_driven(c) ? grids_clock_divmult_id : d->clock_divmult_id;
+			return (divmult_id - LFO_MIN_DIVMULT_ID) / (LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
+		}
+		case DRUM_PARAM_DENSITY:
+			if (chan_is_grids_driven(c))
+				return (float)d->density / 255.0f;
+			return (d->euclid.n > 0) ? (float)d->euclid.k / (float)d->euclid.n : 0.0f;
+		case DRUM_PARAM_ROTATION:
+			return (d->euclid.n > 0) ? (float)d->euclid.rotation / (float)d->euclid.n : 0.0f;
+		case DRUM_PARAM_STEPS:
+			return (float)(d->euclid.n - 1) / (float)(EUCLID_MAX_STEPS - 1);
+		default:
+			return 0.0f;
+	}
+}
+
+/* Sets the target directly from a 0..1 value -- an absolute
+ * substitute, not a modulation added on top of the manual value, same
+ * as CV_MODE_DENSITY's original (pre-generalization) behavior: while a
+ * routed jack is patched, it fully owns this parameter every tick (see
+ * read_cv_param_mod()), and the manual control for it does nothing
+ * until the cable comes out. Chosen over an additive scheme because
+ * most of these parameters (density, rotation, chaos, speed, steps...)
+ * have no separate "live" value distinct from their own stored field
+ * the way filter/decay/other's voice-coefficient push does -- writing
+ * a modulated result back into that same field would either drift the
+ * manual value permanently or need a second shadow copy of every
+ * parameter, so one consistent rule (CV wins outright while patched)
+ * beats a per-parameter special case. */
+static void drum_param_set01(uint8_t c, DrumParamId id, float v01)
+{
+	o_drum_chan *d = &drum_chan[c];
+	v01 = _CLAMP_F(v01, 0.0f, 1.0f);
+
+	switch (id) {
+		case DRUM_PARAM_FILTER:
+			d->filter = v01;
+			if (d->ops) d->ops->set_filter(d->state, d->filter);
+			break;
+		case DRUM_PARAM_FILTER_RANDOM:
+			d->filter_random = v01;
+			break;
+		case DRUM_PARAM_DECAY:
+			d->decay = v01;
+			if (d->ops) d->ops->set_decay(d->state, d->decay);
+			break;
+		case DRUM_PARAM_DECAY_RANDOM:
+			d->decay_random = v01;
+			break;
+		case DRUM_PARAM_OTHER:
+			d->other = v01;
+			if (d->ops) d->ops->set_other(d->state, d->other);
+			break;
+		case DRUM_PARAM_OTHER_RANDOM:
+			d->other_random = v01;
+			break;
+		case DRUM_PARAM_PITCH:
+			d->pitch = -24.0f + v01 * 48.0f;
+			break;
+		case DRUM_PARAM_HUMANIZE:
+			d->humanize = v01;
+			break;
+		case DRUM_PARAM_GHOST:
+			d->ghost_amount = v01;
+			break;
+		case DRUM_PARAM_CHAOS:
+			if (chan_is_grids_driven(c))
+				pattern_chaos = (uint8_t)(v01 * 255.0f);
+			else
+				d->chaos_amount = (uint8_t)(v01 * 255.0f);
+			break;
+		case DRUM_PARAM_SPEED: {
+			float divmult_id = LFO_MIN_DIVMULT_ID + v01 * (LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
+			if (chan_is_grids_driven(c)) {
+				grids_clock_divmult_id = divmult_id;
+				grids_clock_rate = calc_divmult_amount(divmult_id);
+			} else {
+				d->clock_divmult_id = divmult_id;
+				d->clock_rate = calc_divmult_amount(divmult_id);
+			}
+			break;
+		}
+		case DRUM_PARAM_DENSITY:
+			if (chan_is_grids_driven(c)) {
+				d->density = (uint8_t)(v01 * 255.0f);
+			} else {
+				__disable_irq();
+				euclid_set_k(&d->euclid, (int)(v01 * (float)d->euclid.n + 0.5f));
+				__enable_irq();
+			}
+			break;
+		case DRUM_PARAM_ROTATION:
+			__disable_irq();
+			euclid_set_rotation(&d->euclid, (int)(v01 * (float)d->euclid.n));
+			__enable_irq();
+			break;
+		case DRUM_PARAM_STEPS:
+			__disable_irq();
+			euclid_set_n(&d->euclid, 1 + (int)(v01 * (float)(EUCLID_MAX_STEPS - 1) + 0.5f));
+			__enable_irq();
+			break;
+		default:
+			break;
+	}
+}
+
+/* This channel's currently-routed CV/automation target -- DRUM_PARAM_FILTER
+ * if cv_mode is still DRUM_CV_TARGET_TRIGGER (nothing explicitly routed
+ * yet), so automation has a sensible default target on a channel that's
+ * never touched CV routing at all. */
+static DrumParamId drum_chan_cv_target(uint8_t c)
+{
+	uint8_t mode = drum_chan[c].cv_mode;
+	return (mode == DRUM_CV_TARGET_TRIGGER) ? DRUM_PARAM_FILTER : (DrumParamId)(mode - 1);
+}
 
 /* Steps `current` forward/back by `step` positions within just the
  * registry entries tagged `cat`, wrapping within that subset (not the
@@ -349,17 +493,13 @@ static void read_channel_sliders(void)
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
 		EuclidChannelState *e = &drum_chan[c].euclid;
 
-		/* CV_MODE_DENSITY feeds this exact same density/k input from
-		 * that channel's own CV jack instead of its physical slider --
-		 * everything below (hysteresis, pickup, the squared k curve)
-		 * is unchanged either way. Falls back to the physical slider
-		 * if nothing's actually patched, so picking this mode with an
-		 * empty jack doesn't just freeze the channel. */
-		float slider01;
-		if (drum_chan[c].cv_mode == CV_MODE_DENSITY && analog_jack_plugged(A_VOCT + c))
-			slider01 = _CLAMP_F(analog[A_VOCT + c].lpf_val / 4095.0f, 0.0f, 1.0f);
-		else
-			slider01 = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+		/* If this channel's CV is routed to density and the jack is
+		 * patched, read_cv_param_mod() overwrites whatever gets set
+		 * below again later this same tick (it runs after this in
+		 * read_drum_ui()) -- so this always reads the physical slider
+		 * unconditionally; CV, when routed and patched, simply wins
+		 * every tick, same as any other routed target. */
+		float slider01 = _CLAMP_F(analog[A_SLIDER + c].lpf_val / 4095.0f, 0.0f, 1.0f);
 
 		/* Grids has no k -- the same slider becomes that part's
 		 * density threshold instead. The two Other channels have no Grids data,
@@ -468,7 +608,7 @@ static void read_channel_buttons(void)
 	if (held >= 0 && !held_chan_cv_assigned && !held_chan_cv_cleared) {
 		uint32_t now_ms = HAL_GetTick() / TICKS_PER_MS;
 		if (now_ms - held_chan_press_start_ms >= DRUM_CV_CLEAR_HOLD_MS) {
-			drum_chan[held].cv_mode = CV_MODE_TRIGGER;
+			drum_chan[held].cv_mode = DRUM_CV_TARGET_TRIGGER;
 			held_chan_cv_cleared = 1;
 			start_ongoing_display_drum_cv_mode();
 		}
@@ -525,13 +665,16 @@ static void read_performance_controls(void)
 
 /* Manually touching a knob always wins over a looping automation
  * playback on that same channel -- same "the real control wins"
- * precedent as the slider-pickup fix and CV-density mode. Doesn't apply
- * while RECORD is armed (FINE held): that's the manual knob turning
- * itself being captured, not something to cancel. */
-static void cancel_automation_if_playing(uint8_t c)
+ * precedent as the slider-pickup fix and CV-density mode -- but only
+ * when it's the knob automation is actually driving (drum_chan_cv_target()):
+ * touching an unrelated parameter shouldn't stop a loop that has
+ * nothing to do with it. Doesn't apply while RECORD is armed (FINE
+ * held): that's the manual knob turning itself being captured, not
+ * something to cancel. */
+static void cancel_automation_if_target(uint8_t c, DrumParamId id)
 {
 	o_drum_chan *dc = &drum_chan[c];
-	if (dc->automation_state == AUTOMATION_PLAY)
+	if (dc->automation_state == AUTOMATION_PLAY && drum_chan_cv_target(c) == id)
 		dc->automation_state = AUTOMATION_OFF;
 }
 
@@ -541,7 +684,7 @@ static void cancel_automation_if_playing(uint8_t c)
 static void apply_filter_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
-	cancel_automation_if_playing(c);
+	cancel_automation_if_target(c, DRUM_PARAM_FILTER);
 	dc->filter = _CLAMP_F(dc->filter + delta, 0.0f, 1.0f);
 	if (dc->ops) dc->ops->set_filter(dc->state, dc->filter);
 }
@@ -549,7 +692,7 @@ static void apply_filter_delta(uint8_t c, float delta)
 static void apply_decay_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
-	cancel_automation_if_playing(c);
+	cancel_automation_if_target(c, DRUM_PARAM_DECAY);
 	dc->decay = _CLAMP_F(dc->decay + delta, 0.0f, 1.0f);
 	if (dc->ops) dc->ops->set_decay(dc->state, dc->decay);
 }
@@ -557,35 +700,40 @@ static void apply_decay_delta(uint8_t c, float delta)
 static void apply_other_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
-	cancel_automation_if_playing(c);
+	cancel_automation_if_target(c, DRUM_PARAM_OTHER);
 	dc->other = _CLAMP_F(dc->other + delta, 0.0f, 1.0f);
 	if (dc->ops) dc->ops->set_other(dc->state, dc->other);
 }
 
 static void apply_filter_random_delta(uint8_t c, float delta)
 {
+	cancel_automation_if_target(c, DRUM_PARAM_FILTER_RANDOM);
 	drum_chan[c].filter_random = _CLAMP_F(drum_chan[c].filter_random + delta, 0.0f, 1.0f);
 }
 
 static void apply_decay_random_delta(uint8_t c, float delta)
 {
+	cancel_automation_if_target(c, DRUM_PARAM_DECAY_RANDOM);
 	drum_chan[c].decay_random = _CLAMP_F(drum_chan[c].decay_random + delta, 0.0f, 1.0f);
 }
 
 static void apply_other_random_delta(uint8_t c, float delta)
 {
+	cancel_automation_if_target(c, DRUM_PARAM_OTHER_RANDOM);
 	drum_chan[c].other_random = _CLAMP_F(drum_chan[c].other_random + delta, 0.0f, 1.0f);
 }
 
 static void apply_pitch_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_target(c, DRUM_PARAM_PITCH);
 	dc->pitch = _CLAMP_F(dc->pitch + delta, -24.0f, 24.0f);
 }
 
 static void apply_clock_rate_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_target(c, DRUM_PARAM_SPEED);
 	dc->clock_divmult_id = _CLAMP_F(dc->clock_divmult_id + delta, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
 	dc->clock_rate = calc_divmult_amount(dc->clock_divmult_id);
 }
@@ -593,18 +741,21 @@ static void apply_clock_rate_delta(uint8_t c, float delta)
 static void apply_humanize_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_target(c, DRUM_PARAM_HUMANIZE);
 	dc->humanize = _CLAMP_F(dc->humanize + delta, 0.0f, 1.0f);
 }
 
 static void apply_ghost_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_target(c, DRUM_PARAM_GHOST);
 	dc->ghost_amount = _CLAMP_F(dc->ghost_amount + delta, 0.0f, 1.0f);
 }
 
 static void apply_chaos_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_target(c, DRUM_PARAM_CHAOS);
 	dc->chaos_amount = (uint8_t)_CLAMP_I32((int32_t)dc->chaos_amount + (int32_t)delta, 0, 255);
 }
 
@@ -625,6 +776,7 @@ static void apply_chaos_delta(uint8_t c, float delta)
 static void apply_density_delta(uint8_t c, float delta)
 {
 	o_drum_chan *dc = &drum_chan[c];
+	cancel_automation_if_target(c, DRUM_PARAM_DENSITY);
 	if (chan_is_grids_driven(c)) {
 		int32_t step = (int32_t)(delta * (255.0f / DRUM_DENSITY_DETENTS));
 		dc->density = (uint8_t)_CLAMP_I32((int32_t)dc->density + step, 0, 255);
@@ -649,26 +801,34 @@ static void apply_to_selected_or_all(void (*apply)(uint8_t, float), float delta)
 	}
 }
 
-/* While a channel button is held, turning the DEPTH or LFOSPEED encoder
- * routes that held channel's CV jack to the corresponding modulation
- * target *instead of* editing the knob's value -- CV routing is chosen
- * by touching the parameter you want it to modulate, and the hold is a
- * dedicated "pick a target" gesture, not also a live edit (held channel
- * and selected channel can be two different channels, and it would be
- * surprising for turning a knob to route one channel's CV to also
- * change another channel's sound). The only way back to
- * CV_MODE_TRIGGER is holding the channel for DRUM_CV_CLEAR_HOLD_MS
- * without touching a knob at all -- see read_channel_buttons(). No-op
- * with no channel held (the caller falls through to its normal
- * apply_to_selected_or_all() edit in that case). */
-static void assign_cv_target_if_held(uint8_t new_mode)
+/* While a channel button is held, turning *any* per-channel knob
+ * routes that held channel's CV jack (and automation -- see
+ * drum_chan_cv_target()) to that parameter *instead of* editing the
+ * knob's value -- the target is chosen by touching the control you
+ * want it to affect, and the hold is a dedicated "pick a target"
+ * gesture, not also a live edit (held channel and selected channel can
+ * be two different channels, and it would be surprising for turning a
+ * knob to route one channel's CV to also change another channel's
+ * sound). The only way back to DRUM_CV_TARGET_TRIGGER is holding the
+ * channel for DRUM_CV_CLEAR_HOLD_MS without touching a knob at all --
+ * see read_channel_buttons(). */
+static void assign_cv_target_if_held(DrumParamId id)
 {
-	if (drum_held_chan < 0)
-		return;
-
-	drum_chan[drum_held_chan].cv_mode = new_mode;
+	drum_chan[drum_held_chan].cv_mode = 1 + (uint8_t)id;
 	held_chan_cv_assigned = 1;
 	start_ongoing_display_drum_cv_mode();
+}
+
+/* The one piece of logic every per-channel knob handler below shares:
+ * while a channel is held, route its CV target to `id` and report "I
+ * handled this, don't also edit the value" (1); otherwise report "go
+ * ahead and edit normally" (0). See assign_cv_target_if_held() above. */
+static uint8_t route_cv_or_edit(DrumParamId id)
+{
+	if (drum_held_chan < 0)
+		return 0;
+	assign_cv_target_if_held(id);
+	return 1;
 }
 
 static void read_voice_encoders(void)
@@ -677,26 +837,22 @@ static void read_voice_encoders(void)
 	int16_t enc;
 
 	enc = pop_encoder_q(pec_DEPTH);
-	if (enc) {
-		if (drum_held_chan >= 0) {
-			assign_cv_target_if_held(CV_MODE_FILTER);
-		} else {
-			apply_to_selected_or_all(apply_filter_delta, (float)enc * DRUM_PARAM_STEP);
-			start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER);
-		}
+	if (enc && !route_cv_or_edit(DRUM_PARAM_FILTER)) {
+		apply_to_selected_or_all(apply_filter_delta, (float)enc * DRUM_PARAM_STEP);
+		start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER);
 	}
 
 	/* Push+turn on DEPTH (sec_DISPERSION, dead in the old wavetable UI)
 	 * -- how much random bipolar offset gets added to filter on each
 	 * hit (see apply_random_offsets() in drum_render_channel()). */
 	enc = pop_encoder_q(sec_DISPERSION);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_FILTER_RANDOM)) {
 		apply_to_selected_or_all(apply_filter_random_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_FILTER_RANDOM);
 	}
 
 	enc = pop_encoder_q(pec_LATITUDE);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_DECAY)) {
 		apply_to_selected_or_all(apply_decay_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_DECAY);
 	}
@@ -705,13 +861,13 @@ static void read_voice_encoders(void)
 	 * Used to be ghost-note amount; that moved to OCT push+turn below
 	 * to make room for all three params to get this symmetrically. */
 	enc = pop_encoder_q(sec_DISPPATT);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_DECAY_RANDOM)) {
 		apply_to_selected_or_all(apply_decay_random_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_DECAY_RANDOM);
 	}
 
 	enc = pop_encoder_q(pec_LONGITUDE);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_OTHER)) {
 		apply_to_selected_or_all(apply_other_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_OTHER);
 	}
@@ -719,13 +875,13 @@ static void read_voice_encoders(void)
 	/* Push+turn on LONGITUDE (sec_WTSEL_SPREAD, dead in the old
 	 * wavetable UI) -- same idea, for other. */
 	enc = pop_encoder_q(sec_WTSEL_SPREAD);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_OTHER_RANDOM)) {
 		apply_to_selected_or_all(apply_other_random_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_OTHER_RANDOM);
 	}
 
 	enc = pop_encoder_q(pec_TRANSPOSE);
-	if (enc)
+	if (enc && !route_cv_or_edit(DRUM_PARAM_PITCH))
 		apply_to_selected_or_all(apply_pitch_delta, (float)enc * DRUM_PITCH_STEP);
 
 	/* Push+turn on the same encoder (sec_OSC_SPREAD, "spread" in the
@@ -734,7 +890,7 @@ static void read_voice_encoders(void)
 	 * actually does to a hit. Global-edit-mode-aware like every other
 	 * knob here. */
 	enc = pop_encoder_q(sec_OSC_SPREAD);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_HUMANIZE)) {
 		apply_to_selected_or_all(apply_humanize_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_HUMANIZE);
 	}
@@ -745,16 +901,10 @@ static void read_voice_encoders(void)
 	 * Grids density vs Euclid k per channel on its own (see
 	 * chan_is_grids_driven()), so this is safe to broadcast in global
 	 * edit mode even with a mix of Grids- and Euclid-driven channels
-	 * selected. Holding a channel while this turns routes that
-	 * channel's CV jack to density instead -- see
-	 * assign_cv_target_if_held(). */
+	 * selected. */
 	enc = pop_encoder_q(pec_LFOSPEED);
-	if (enc) {
-		if (drum_held_chan >= 0)
-			assign_cv_target_if_held(CV_MODE_DENSITY);
-		else
-			apply_to_selected_or_all(apply_density_delta, (float)enc);
-	}
+	if (enc && !route_cv_or_edit(DRUM_PARAM_DENSITY))
+		apply_to_selected_or_all(apply_density_delta, (float)enc);
 
 	/* Push+turn on LFOSPEED (sec_LFOGAIN, dead until now) -- total step
 	 * count, always for the selected channel only (not global-edit-mode
@@ -762,8 +912,9 @@ static void read_voice_encoders(void)
 	 * channel's own pattern). No effect on a Grids-driven channel,
 	 * which has no step count of its own (see chan_is_grids_driven()). */
 	enc = pop_encoder_q(sec_LFOGAIN);
-	if (enc && !chan_is_grids_driven(drum_selected_chan)) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_STEPS) && !chan_is_grids_driven(drum_selected_chan)) {
 		EuclidChannelState *e = &d->euclid;
+		cancel_automation_if_target(drum_selected_chan, DRUM_PARAM_STEPS);
 		__disable_irq();
 		euclid_set_n(e, e->n + enc);
 		__enable_irq();
@@ -774,13 +925,14 @@ static void read_voice_encoders(void)
 	 * above (this used to be the WBROWSE plain turn's job; see
 	 * read_pattern_encoder()). */
 	enc = pop_encoder_q(pec_LFOSHAPE);
-	if (enc && !chan_is_grids_driven(drum_selected_chan)) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_ROTATION) && !chan_is_grids_driven(drum_selected_chan)) {
 		EuclidChannelState *e = &d->euclid;
 		/* euclid_rotate() advances a step's *source* index with
 		 * +rotation, which moves onsets to earlier step indices
 		 * (anticipates) as rotation increases -- backwards from
 		 * the expected "turn = later/lag" feel, hence the sign
 		 * flip here rather than in the (tested) pattern engine. */
+		cancel_automation_if_target(drum_selected_chan, DRUM_PARAM_ROTATION);
 		__disable_irq();
 		euclid_set_rotation(e, e->rotation - enc);
 		__enable_irq();
@@ -800,7 +952,7 @@ static void read_voice_encoders(void)
 	 * even while the kit is in Grids mode, so selecting one of them
 	 * keeps editing its own per-channel rate instead of the shared one. */
 	enc = pop_encoder_q(sec_LFOPHASE);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_SPEED)) {
 		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS && chan_is_grids_driven(drum_selected_chan)) {
 			grids_clock_divmult_id = _CLAMP_F(grids_clock_divmult_id + (float)enc, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
 			grids_clock_rate = calc_divmult_amount(grids_clock_divmult_id);
@@ -814,7 +966,7 @@ static void read_voice_encoders(void)
 	 * same shape as humanize above. Paired with chaos on the same
 	 * physical encoder since both are "pattern variation" controls. */
 	enc = pop_encoder_q(pec_OCT);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_GHOST)) {
 		apply_to_selected_or_all(apply_ghost_delta, (float)enc * DRUM_PARAM_STEP);
 		start_ongoing_display_drum_param(DRUM_PARAM_DISP_GHOST);
 	}
@@ -826,7 +978,7 @@ static void read_voice_encoders(void)
 	 * global convention as every other per-channel knob here, since
 	 * each Euclid channel already has its own independent pattern. */
 	enc = pop_encoder_q(sec_SCALE);
-	if (enc) {
+	if (enc && !route_cv_or_edit(DRUM_PARAM_CHAOS)) {
 		if (drum_pattern_engine == PATTERN_ENGINE_GRIDS) {
 			pattern_chaos = (uint8_t)_CLAMP_I32((int32_t)pattern_chaos + enc * DRUM_CHAOS_STEP, 0, 255);
 		} else {
@@ -928,30 +1080,27 @@ static void read_pattern_engine_button(void)
 	prev_pressed = now;
 }
 
-/* CV_MODE_FILTER: adds the patched CV (bipolar around the manual knob
- * position, so it can sweep the filter both ways rather than only ever
- * opening it further) on top of `filter` and re-pushes every tick --
- * unlike the encoder-driven filter/decay/other above, this has to run
- * continuously rather than only on a change, since the CV itself can be
- * moving every tick. Cheap: set_filter() is a coefficient recompute,
- * not audio-rate work. Leaves `filter` itself untouched so the manual
- * knob position underneath is never clobbered -- switching back to
- * CV_MODE_TRIGGER/DENSITY (or unpatching) just drops the modulation and
- * resumes exactly at the knob's own value. */
-static void read_cv_filter_mod(void)
+/* Drives whichever parameter this channel's CV is routed to (anything
+ * but DRUM_CV_TARGET_TRIGGER -- see o_drum_chan.cv_mode's doc comment)
+ * straight from the jack, every tick, via drum_param_set01() -- this
+ * has to run continuously rather than only on a change, since the CV
+ * itself can be moving every tick. Only while actually patched: an
+ * unplugged jack leaves the target exactly where manual control (or a
+ * previous CV reading) last set it, rather than pulling it to some
+ * default. Runs after every manual control above in read_drum_ui(), so
+ * a routed+patched target always wins the tick over its own knob --
+ * same "the cable's job, not the knob's, while it's plugged in"
+ * behavior CV_MODE_DENSITY originally established, just generalized to
+ * every parameter instead of one. */
+static void read_cv_param_mod(void)
 {
 	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
 		o_drum_chan *d = &drum_chan[c];
-		if (d->cv_mode != CV_MODE_FILTER || !d->ops)
+		if (d->cv_mode == DRUM_CV_TARGET_TRIGGER || !analog_jack_plugged(A_VOCT + c))
 			continue;
 
-		float mod = 0.0f;
-		if (analog_jack_plugged(A_VOCT + c)) {
-			float cv01 = _CLAMP_F(analog[A_VOCT + c].lpf_val / 4095.0f, 0.0f, 1.0f);
-			mod = (cv01 - 0.5f) * 2.0f * DRUM_CV_FILTER_MOD_RANGE;
-		}
-
-		d->ops->set_filter(d->state, _CLAMP_F(d->filter + mod, 0.0f, 1.0f));
+		float cv01 = _CLAMP_F(analog[A_VOCT + c].lpf_val / 4095.0f, 0.0f, 1.0f);
+		drum_param_set01(c, (DrumParamId)(d->cv_mode - 1), cv01);
 	}
 }
 
@@ -963,17 +1112,26 @@ static void read_cv_filter_mod(void)
 static volatile uint16_t g_bar_tick  = 0;
 static volatile float    g_clk_frac  = 0.0f;
 
-/* FINE dedicated entirely to automation record/play for filter/decay/
- * other, one lane per channel, one bar long (DRUM_BAR_TICKS points,
- * linearly interpolated between them). Holding FINE arms/continues
+/* FINE dedicated entirely to automation record/play for this channel's
+ * one current CV/automation target (drum_chan_cv_target() -- whatever
+ * cv_mode is routed to, or DRUM_PARAM_FILTER if it's still
+ * DRUM_CV_TARGET_TRIGGER), one lane per channel, one bar long
+ * (DRUM_BAR_TICKS points, linearly interpolated between them, stored
+ * normalized 0..1 via drum_param_get01()/drum_param_set01() regardless
+ * of the target's own native range). Holding FINE arms/continues
  * RECORD on the selected channel (or every channel, in global edit
- * mode) -- sampling live knob values once per bar_tick, wrapping and
- * overwriting continuously, so a hold of any length just keeps the
+ * mode) -- sampling the live target value once per bar_tick, wrapping
+ * and overwriting continuously, so a hold of any length just keeps the
  * most recent lap. Releasing commits and starts PLAY, looping forever
- * until a manual knob edit cancels it (see cancel_automation_if_playing())
- * or FINE is held again for a fresh take. Playback always runs for
- * every channel regardless of selection, so switching which channel is
- * selected mid-loop doesn't stall one that's already playing. */
+ * until a manual edit of that same target cancels it (see
+ * cancel_automation_if_target()) or FINE is held again for a fresh
+ * take. Playback always runs for every channel regardless of
+ * selection, so switching which channel is selected mid-loop doesn't
+ * stall one that's already playing. Retargeting a channel (holding it
+ * and touching a different control) takes effect on the *next* RECORD
+ * -- an in-progress PLAY keeps looping whatever it already captured
+ * under the old target until re-recorded, rather than reinterpreting
+ * old lane data against a new parameter. */
 /* Guards against exactly the bug that caused a boot crash: a
  * momentary power-on glitch on FINE's GPIO read as a "press" for a
  * tick or two arms RECORD, and the instant it clears (still within
@@ -989,6 +1147,7 @@ static volatile float    g_clk_frac  = 0.0f;
 static void read_automation(void)
 {
 	static uint32_t record_start_ms[NUM_CHANNELS];
+	static DrumParamId play_target[NUM_CHANNELS];
 
 	uint8_t fine_held = switch_pressed(FINE_BUTTON);
 	uint32_t now_ms = HAL_GetTick() / TICKS_PER_MS;
@@ -1004,27 +1163,24 @@ static void read_automation(void)
 			if (d->automation_state != AUTOMATION_RECORD)
 				record_start_ms[c] = now_ms;
 			d->automation_state = AUTOMATION_RECORD;
-			d->automation_filter[tick] = d->filter;
-			d->automation_decay[tick]  = d->decay;
-			d->automation_other[tick]  = d->other;
+			d->automation_lane[tick] = drum_param_get01(c, drum_chan_cv_target(c));
 			continue;
 		}
 
 		if (d->automation_state == AUTOMATION_RECORD) {
+			/* Commits this take's target now, once, rather than
+			 * re-reading drum_chan_cv_target() every PLAY tick below --
+			 * see this function's own doc comment on retargeting. */
+			play_target[c] = drum_chan_cv_target(c);
 			d->automation_state = ((now_ms - record_start_ms[c]) >= AUTOMATION_MIN_RECORD_MS)
 			                     ? AUTOMATION_PLAY : AUTOMATION_OFF;
 		}
 
-		if (d->automation_state != AUTOMATION_PLAY || !d->ops)
+		if (d->automation_state != AUTOMATION_PLAY)
 			continue;
 
-		d->filter = _CLAMP_F(d->automation_filter[tick] + (d->automation_filter[next] - d->automation_filter[tick]) * frac, 0.0f, 1.0f);
-		d->decay  = _CLAMP_F(d->automation_decay[tick]  + (d->automation_decay[next]  - d->automation_decay[tick])  * frac, 0.0f, 1.0f);
-		d->other  = _CLAMP_F(d->automation_other[tick]  + (d->automation_other[next]  - d->automation_other[tick])  * frac, 0.0f, 1.0f);
-
-		d->ops->set_filter(d->state, d->filter);
-		d->ops->set_decay(d->state, d->decay);
-		d->ops->set_other(d->state, d->other);
+		float v = d->automation_lane[tick] + (d->automation_lane[next] - d->automation_lane[tick]) * frac;
+		drum_param_set01(c, play_target[c], v);
 	}
 }
 
@@ -1061,7 +1217,7 @@ void read_drum_ui(void)
 	read_pattern_encoder();
 	read_pattern_engine_button();
 	read_voice_select_button();
-	read_cv_filter_mod();
+	read_cv_param_mod();
 	read_automation();
 }
 
@@ -1363,13 +1519,12 @@ void update_drum_triggers(void)
 		uint8_t cv_high = 0;
 
 		/* A plugged CV jack takes over as this channel's trigger source
-		 * only in CV_MODE_TRIGGER -- CV_MODE_DENSITY/FILTER are read
-		 * elsewhere (read_channel_sliders()/read_cv_filter_mod(), main
-		 * loop) and leave the pattern engine driving triggers normally
-		 * here. Either way the pattern keeps advancing underneath, so
-		 * switching mode or unplugging drops back in sync rather than
-		 * at a stale step. */
-		uint8_t cv_override = (d->cv_mode == CV_MODE_TRIGGER) && analog_jack_plugged(A_VOCT + c);
+		 * only in DRUM_CV_TARGET_TRIGGER -- any other target is read
+		 * elsewhere instead (read_cv_param_mod(), main loop) and leaves
+		 * the pattern engine driving triggers normally here. Either way
+		 * the pattern keeps advancing underneath, so switching target
+		 * or unplugging drops back in sync rather than at a stale step. */
+		uint8_t cv_override = (d->cv_mode == DRUM_CV_TARGET_TRIGGER) && analog_jack_plugged(A_VOCT + c);
 		if (cv_override) {
 			float cv = analog[A_VOCT + c].lpf_val / 4095.0f;
 			cv_high = (cv > DRUM_CV_TRIG_THRESHOLD);

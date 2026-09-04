@@ -177,26 +177,35 @@ typedef struct o_drum_chan {
 	 * so silencing it has to go through this same flag handoff. */
 	volatile uint8_t	choke_pending;
 
-	/* Which of trigger/density-mod/filter-mod this channel's own CV
-	 * jack (A_VOCT+c) is currently doing -- cycled by butm_LFOMODE_BUTTON.
-	 * See update_drum_triggers() (trigger), read_channel_sliders()
-	 * (density), and read_cv_filter_mod() (filter) in drum_ui.c. */
+	/* Which target this channel's own CV jack (A_VOCT+c) is currently
+	 * routed to -- DRUM_CV_TARGET_TRIGGER (0, the default) for today's
+	 * original "rising edge fires a hit, bypassing the pattern"
+	 * behavior, otherwise 1+a DrumParamId (see that enum) and the jack
+	 * instead drives that parameter directly while patched (an absolute
+	 * substitute, not an offset added on top -- see drum_param_set01()
+	 * in drum_ui.c), leaving the manual control free to resume exactly
+	 * where it sits the moment the cable comes out. Routed by holding
+	 * this channel's button and turning the control for whichever
+	 * parameter should be the target -- see assign_cv_target_if_held()
+	 * in drum_ui.c. This same target is also what automation below
+	 * records/plays. */
 	uint8_t				cv_mode;
 
-	/* Automation transport for this channel's filter/decay/other, driven
+	/* Automation transport for this channel's one modulation target
+	 * (whatever cv_mode above currently points at -- DRUM_PARAM_FILTER
+	 * if cv_mode is still DRUM_CV_TARGET_TRIGGER, so a channel that's
+	 * never touched CV routing still gets a sensible default), driven
 	 * by holding FINE (see read_automation() in drum_ui.c): OFF while
-	 * under manual knob control, RECORD while FINE is held (sampling the
-	 * live knob values into the lanes below once per bar_tick), PLAY
-	 * once FINE is released (looping the last recording, linearly
-	 * interpolated between its DRUM_BAR_TICKS points). Turning
-	 * Depth/Latitude/Longitude manually while PLAY-ing cancels back to
-	 * OFF -- see apply_filter_delta() etc. Not saved with presets/
-	 * autosave in v1; lost on power-cycle, same as any other live
-	 * performance loop. */
+	 * under manual control, RECORD while FINE is held (sampling the
+	 * live value into the lane below once per bar_tick), PLAY once FINE
+	 * is released (looping the last recording, linearly interpolated
+	 * between its DRUM_BAR_TICKS points, normalized 0..1 -- see
+	 * drum_param_get01()/drum_param_set01()). Manually touching the
+	 * target parameter while PLAY-ing cancels back to OFF -- see
+	 * cancel_automation_if_playing(). Not saved with presets/autosave in
+	 * v1; lost on power-cycle, same as any other live performance loop. */
 	uint8_t				automation_state;
-	float				automation_filter[DRUM_BAR_TICKS];
-	float				automation_decay[DRUM_BAR_TICKS];
-	float				automation_other[DRUM_BAR_TICKS];
+	float				automation_lane[DRUM_BAR_TICKS];
 
 	/* Performance mode only (VOCTSW -- see drum_ui_performance_mode()):
 	 * this channel's mute. A plain channel-button press toggles it
@@ -209,12 +218,36 @@ typedef struct o_drum_chan {
 	uint8_t				state[DRUM_VOICE_STATE_BYTES] __attribute__((aligned(8)));
 } o_drum_chan;
 
-enum ChannelCvMode {
-	CV_MODE_TRIGGER,	/* today's only behavior: rising edge fires a hit, bypassing the pattern */
-	CV_MODE_DENSITY,	/* feeds read_channel_sliders()'s density/k input instead of the physical slider */
-	CV_MODE_FILTER,		/* modulates filter cutoff on top of the manual knob position */
-	NUM_CV_MODES,
-};
+/* Every per-channel value a manual control can reach -- the full set
+ * both CV routing (o_drum_chan.cv_mode) and automation
+ * (o_drum_chan.automation_state/automation_lane) can target. See
+ * drum_param_get01()/drum_param_set01() in drum_ui.c, which are the
+ * only two places that need to know how each of these maps to and
+ * from the channel's own native fields. */
+typedef enum DrumParamId {
+	DRUM_PARAM_FILTER,
+	DRUM_PARAM_FILTER_RANDOM,
+	DRUM_PARAM_DECAY,
+	DRUM_PARAM_DECAY_RANDOM,
+	DRUM_PARAM_OTHER,
+	DRUM_PARAM_OTHER_RANDOM,
+	DRUM_PARAM_PITCH,
+	DRUM_PARAM_HUMANIZE,
+	DRUM_PARAM_GHOST,
+	DRUM_PARAM_CHAOS,
+	DRUM_PARAM_SPEED,
+	DRUM_PARAM_DENSITY,
+	DRUM_PARAM_ROTATION,
+	DRUM_PARAM_STEPS,
+	NUM_DRUM_PARAMS,
+} DrumParamId;
+
+/* o_drum_chan.cv_mode: 0 means the jack overrides this channel's
+ * trigger (today's original, and still default, behavior); any other
+ * value is 1+a DrumParamId, meaning the jack instead drives that
+ * parameter -- see drum_param_set01() in drum_ui.c. */
+#define DRUM_CV_TARGET_TRIGGER	0
+#define NUM_CV_MODES			(1 + NUM_DRUM_PARAMS)
 
 enum DrumAutomationState {
 	AUTOMATION_OFF,
