@@ -34,7 +34,6 @@
 #include "exp_1voct_10_41V.h"
 #include "flash_params.h"
 #include "math.h"
-#include "sphere_flash_io.h"
 #include "lfo_wavetable_bank.h"
 #include "quantz_scales.h"
 #include "led_cont.h"
@@ -46,14 +45,10 @@
 #include "math_util.h"
 #include "params_wt_browse.h"
 #include "quantz_scales.h"
-#include "wavetable_recording.h"
-#include "wavetable_editing.h"
 #include "oscillator.h"
 #include "hardware_controls.h"
 #include "ui_modes.h"
 #include "key_combos.h"
-#include "wavetable_saveload.h"
-#include "wavetable_effects.h"
 #include "preset_manager.h"
 #include "preset_manager_UI.h"
 #include "params_pitch.h"
@@ -63,13 +58,9 @@
 #include "flash_params.h"
 #include "ui_modes.h"
 #include "oscillator.h"
-#include "wavetable_saveload_UI.h"
 #include "drivers/flashram_spidma.h"
-#include "wavetable_play_export.h"
 #include "preset_manager_selbus.h"
-#include "eq.h"
 
-extern o_wt_osc wt_osc;
 extern enum UI_Modes ui_mode;
 extern o_lfos lfos;
 extern SystemCalibrations *system_calibrations;
@@ -85,11 +76,8 @@ extern	o_switch	hwSwitch[NUM_SWITCHES];
 extern	o_monoLed 	monoLed[NUM_MONO_LED];
 extern	o_led_cont	led_cont;
 
-extern uint8_t audio_in_gate;
-
 extern const uint8_t ALL_CHANNEL_MASK;
 
-extern	SRAM1DATA o_spherebuf spherebuf;
 extern const int16_t TTONE[WT_TABLELEN];
 
 const int8_t		CHORD_LIST[NUM_CHORDS][NUM_CHANNELS] =
@@ -236,10 +224,6 @@ void init_params(void){
 
 		calc_params.gate_in_is_sustaining[i]	= 0;
 
-		calc_wt_pos(i);
-		for (j=0; j<3; j++)
-			update_wt_pos_interp_params(i, j);
-
 		// flags
 		calc_params.already_handled_button[i] = 0;
 
@@ -248,20 +232,22 @@ void init_params(void){
 
 		params.random[i] = 1.0;
 
-		// Plaits defaults
-		params.plaits_params[i].lpg_decay = 0.5f;
-		params.plaits_params[i].lpg_color = 0.5f;
-		params.plaits_params[i].mod_timbre = 0.0f;
-		params.plaits_params[i].mod_morph = 0.0f;
-		params.plaits_params[i].mod_harmonics = 0.0f;
-		params.plaits_params[i].mod_freq = 0.0f;
-		params.plaits_params[i].output_mode = 0; // 0=Main, 1=Aux
 	}
 
 	calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 0;
 	calc_params.already_handled_button[butm_LFOMODE_BUTTON] = 0;
 	for (i=0; i<14; i++)
 		params.enabled_spheres[i]=0xFF;
+
+	// Chord overtone weights defaults 
+	params.chord_overtone_weights [0] = 1.0f;
+	params.chord_overtone_weights [1] = 0.8f;
+	params.chord_overtone_weights [2] = 0.25f;
+	params.chord_overtone_weights [3] = 0.6f;
+	params.chord_overtone_weights [4] = 0.1f;
+	params.chord_overtone_weights [5] = 0.3f;
+	params.chord_overtone_weights [6] = 0.1f;
+
 
 }
 
@@ -340,27 +326,41 @@ void init_param_object(o_params *t_params){
 
 	t_params->soft_clip_pregain = DEFAULT_SOFT_CLIP_PREGAIN;
 
-	// Resonator envelope defaults
-	t_params->resonator_attack_freq = 500.0f;  // Fast attack
-	t_params->resonator_decay_freq = 8.0f;     // Slow decay
+	t_params->_reserved_param_a = 0.0f;
+	t_params->_reserved_param_b = 0.0f;
 
 	// EQ defaults (flat)
 	for (chan = 0; chan < 6; chan++)
 		t_params->eq_slider_values[chan] = 2048;  // 50% = flat
+
+	// Chord overtone weights defaults (all 1.0)
+	for (chan = 0; chan < 7; chan++)
+		t_params->chord_overtone_weights[chan] = 1.0f;
 
 	// Unison defaults
 	for (chan=0; chan<NUM_CHANNELS; chan++) {
 		t_params->unison_spread_amt[chan] = 0.2f; // Slight detune by default
 		t_params->unison_voice_count[chan] = 1;
 
-		// Plaits defaults
-		t_params->plaits_params[chan].lpg_decay = 0.5f;
-		t_params->plaits_params[chan].lpg_color = 0.5f;
-		t_params->plaits_params[chan].mod_timbre = 0.0f;
-		t_params->plaits_params[chan].mod_morph = 0.0f;
-		t_params->plaits_params[chan].mod_harmonics = 0.0f;
-		t_params->plaits_params[chan].mod_freq = 0.0f;
-		t_params->plaits_params[chan].output_mode = 0;
+	}
+
+	// Reverb defaults (vF)
+	for (chan = 0; chan < NUM_CHANNELS; chan++)
+		t_params->reverb_send[chan] = 0.0f;
+	t_params->reverb_time         = 0.6f;
+	t_params->reverb_diffusion    = 0.625f;
+	t_params->reverb_lp           = 0.7f;
+	t_params->reverb_input_gain   = 2.0f;
+	t_params->reverb_output_level = 1.0f;
+
+	/* Halo defaults (vH) — kept in sync with the historical
+	 * static initializers used by the rs_*_base macros in this file. */
+	for (chan = 0; chan < NUM_CHANNELS; chan++) {
+		t_params->halo_damping[chan]     = 0.2f;
+		t_params->halo_noise_level[chan] = 0.1f;
+		t_params->halo_noise_color[chan] = 0.4f;
+		t_params->halo_wt_attack[chan]   = 0.0f;
+		t_params->halo_lpf_cutoff[chan]  = 24;
 	}
 }
 
@@ -387,6 +387,11 @@ void init_calc_params(void)
 	calc_params.already_handled_button[butm_LFOMODE_BUTTON] = 0;
 	calc_params.button_safe_release[0] = 0;
 	calc_params.button_safe_release[1] = 0;
+}
+
+uint8_t is_channel_in_chord_mode(uint8_t chan) {
+	(void)chan;
+	return 0;
 }
 
 void set_pitch_params_to_ttone(void) {
@@ -543,63 +548,6 @@ void cache_uncache_pitch_params(enum CacheUncache cache_uncache)
 
 static uint8_t new_key_armed[NUM_CHANNELS] = {0};
 
-void read_ext_trigs(void)
-{
-	uint8_t chan;
-	uint8_t chans_in_cvgate_mode=0;
-
-	static uint8_t last_trig_level[NUM_CHANNELS+1]={0};
-	uint8_t trig_level[NUM_CHANNELS+1]={0};
-
-	trig_level[0] = (params.key_sw[0]==ksw_KEYS_EXT_TRIG) ? audio_in_gate : (analog[WTSEL_CV].raw_val > 2048);
-	trig_level[1] = analog[DISP_CV].raw_val > 2048;
-	trig_level[2] = analog[DEPTH_CV].raw_val > 2048;
-	trig_level[3] = analog[DISPPAT_CV].raw_val > 2048;
-	trig_level[4] = analog[LATITUDE_CV].raw_val > 2048;
-	trig_level[5] = analog[WTSEL_SPREAD_CV].raw_val > 2048;
-	trig_level[6] = analog[CHORD_CV].raw_val > 2048;
-
-	for (chan=0; chan<NUM_CHANNELS; chan++)
-	{
-		uint8_t is_sustaining = 0;
-		if (params.key_sw[chan]==ksw_KEYS_EXT_TRIG || params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN)
-		{
-			chans_in_cvgate_mode++;
-
-			if (analog_jack_plugged(A_VOCT+chan) || button_pressed(chan)) {
-				if ((trig_level[chan] || button_pressed(chan)) && !last_trig_level[chan])
-				{
-					lfos.cycle_pos[chan] = 0.f;
-					params.note_on[chan] = 1;
-					params.new_key[chan] = 1;
-					new_key_armed[chan] = 0;
-				}
-				if (params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN && (trig_level[chan] || button_pressed(chan)))
-					is_sustaining = 1;
-			}
-		}
-		last_trig_level[chan] = (trig_level[chan] || button_pressed(chan));
-		calc_params.gate_in_is_sustaining[chan] = is_sustaining;
-	}
-
-	//Transpose CV jack must be patched for gate to work on Chord CV
-	if (chans_in_cvgate_mode && analog_jack_plugged(TRANSPOSE_CV))
-	{
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-		{
-			if (trig_level[6] && !last_trig_level[6])
-			{
-				lfos.cycle_pos[chan] = 0.f;
-				params.note_on[chan] = 1;
-				params.new_key[chan] = 1;
-				new_key_armed[chan]	= 0;
-			}
-			if (params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN && trig_level[6])
-				calc_params.gate_in_is_sustaining[chan] = 1;
-		}
-	}
-	last_trig_level[6] = trig_level[6];
-}
 enum SelBusActions {SELBUS_NO_ACTION, SELBUS_TOGGLE_RECALL, SELBUS_TOGGLE_SAVE, SELBUS_STORE_SETTINGS};
 void read_selbus_buttons(void)
 {
@@ -655,7 +603,6 @@ void read_noteon(uint8_t i)
 			if (!calc_params.already_handled_button[i])
 			{
 				if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
-					params.plaits_params[i].output_mode = !params.plaits_params[i].output_mode;
 				
 				calc_params.already_handled_button[i] = 1;
 			}
@@ -704,13 +651,7 @@ void read_noteon(uint8_t i)
 					new_key_armed[i] = 1;
 					params.new_key[i] = 1;
 					params.note_on[i] = 1;
-					if (params.key_sw[i]==ksw_KEYS_EXT_TRIG)
-						lfos.cycle_pos[i] = 0;
 				}
-				// if (params.key_sw[i]==ksw_KEYS_EXT_TRIG_SUSTAIN) {
-				// 	calc_params.gate_in_is_sustaining[i] = 1;
-				// 	lfos.cycle_pos[i] = 0;
-				// }
 			}
 			else //button_released(i)
 			{
@@ -733,11 +674,7 @@ void read_noteon(uint8_t i)
 					if (!calc_params.already_handled_button[i])
 					{
 						if (calc_params.lock_change_staged[i]==1) {
-							if (params.wt_bank[i] >= PLAITS_SPHERE_OFFSET)
-								params.plaits_params[i].output_mode = !params.plaits_params[i].output_mode;
-							else
-								toggle_lock(i);
-
+							toggle_lock(i);
 							calc_params.lock_change_staged[i] = 2;
 						}
 					}
@@ -761,88 +698,6 @@ float default_pan(uint8_t chan)
 	return (chan&1) ? 0.33f :0.66f;
 }
 
-void read_level_and_pan(uint8_t chan)
-{
-	static float last_slider_val[NUM_CHANNELS] = {0};
-	float slider_val = analog[A_SLIDER + chan].lpf_val;
-	float slider_motion = fabs(analog[A_SLIDER + chan].lpf_val - last_slider_val[chan]);
-	float level = 0.f;
-
-	if (slider_motion > 20)
-	{
-		last_slider_val[chan] = analog[A_SLIDER + chan].lpf_val;
-		
-		// Fine+slider: update EQ for this band (pick-up style)
-		if (switch_pressed(FINE_BUTTON))
-		{
-			params.eq_slider_values[chan] = (uint16_t)slider_val;
-			eq_update_from_sliders(params.eq_slider_values);
-			return;  // Don't process as level
-		}
-		
-		if (button_pressed(chan))
-		{
-			calc_params.already_handled_button[chan] = 1;
-			calc_params.adjusting_pan_state[chan] = pan_PANNING;
-			params.pan[chan] = slider_val / 4095.f;
-		}
-	}
-
-	switch (calc_params.adjusting_pan_state[chan]) {
-		case (pan_PANNING):
-			level = calc_params.cached_level[chan];
-			if (!button_pressed(chan)) {
-				calc_params.adjusting_pan_state[chan] = pan_CACHED_LEVEL;
-			}
-			break;
-
-		case (pan_CACHED_LEVEL):
-			level = calc_params.cached_level[chan];
-			if (fabsf(slider_val - calc_params.cached_level[chan]) < 10) {
-				calc_params.adjusting_pan_state[chan] = pan_INACTIVE;
-			}
-			break;
-
-		case (pan_INACTIVE):
-			level = slider_val - 20.f;
-			calc_params.cached_level[chan] = level;
-			break;
-	}
-
-	//Adjust level by CV and Mute button
-	if (!params.note_on[chan])
-		calc_params.level[chan] = 0.f;
-
-	else {
-		uint8_t is_plaits = (params.wt_bank[chan] >= 100);
-		uint8_t jack_is_plugged = (analog[A_VOCT + chan].plug_sense_switch.pressed == PRESSED);
-		uint8_t is_vca_switch = (params.voct_switch_state[chan] == SW_VCA);
-		uint8_t in_key_mode = (params.key_sw[chan] != ksw_MUTE);
-
-		// Dynamic Trigger Mode: Enables internal Mod Envelopes and Engine Triggers (for Drums/Strings)
-		// (Note: Internal LPG Amplitude Envelope is disabled in Voice.cc. This flag allows Plaits to react to triggers for Timbre/Morph modulation)
-		uint8_t plaits_enable_triggers = is_plaits && (in_key_mode || (is_vca_switch && jack_is_plugged));
-		params.plaits_params[chan].use_internal_lpg = plaits_enable_triggers;
-
-		// Skip LFO-VCA mapping ONLY if using new Unified LPG Mode (handled in oscillator.c)
-		// We ALWAYS apply SWN VCA envelope otherwise, because Plaits internal LPG is disabled (Raw Audio).
-		// This ensures we get amplitude decay in Keyboard/Trigger modes.
-		if (lfos.to_vca[chan] && lfos.mode[chan] != lfot_LPG)	
-			level *= lfos.out_lpf[chan];
-
-		// Skip CV-VCA mapping if Plaits Internal Triggers are active OR using new Unified LPG Mode
-		// (In these modes, CV is used as Trigger, so don't apply it as VCA level)
-		if (!plaits_enable_triggers && lfos.mode[chan] != lfot_LPG)
-			level *= read_vca_cv(chan);
-
-		calc_params.level[chan] = _CLAMP_F(level, 0.f, 4095.f);
-
-		// Dynamic Plaits Trigger calculation is handled in oscillator.c for audio-rate precision.
-		// We just need to manage the SWN VCA levels here.
-	}
-
-}
-
 void set_master_gain(void)
 {
 	static uint32_t last_slider_a=0;
@@ -863,15 +718,6 @@ void set_master_gain(void)
 
 float read_vca_cv(uint8_t chan)
 {
-	// Resonator mode: use coherence as VCA instead of CV input
-	// Square to suppress weak coherences, amplify strong ones
-	// Disable for Plaits engines (bank >= 100)
-	if (jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY) && (params.wt_bank[chan] < 100)) {
-		float coh = wt_osc.coherence_env[chan];
-		coh = _CLAMP_F(coh-0.005, 0.0f, 2.0f);
-		return coh * RESONATOR_GAIN;
-	}
-
 	//No VCA CV if switch is set to V/oct, or if Key Mode is Key or Note
 	if ((params.voct_switch_state[chan] == SW_VOCT) || (params.key_sw[chan] != ksw_MUTE))
 		return 1.0;
@@ -984,8 +830,8 @@ void read_lfomode(uint8_t i)
 
 			if (!button_pressed(i) && any_button_pressed && calc_params.armed[armf_LFOMODE][i]){
 				//if (!lfos.locked[i]) {
-					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
-					params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					// Toggle between LFO and LPG modes only
+					lfos.mode[i] = (lfos.mode[i] == lfot_LFO) ? lfot_LPG : lfot_LFO;
 				//}
 				calc_params.armed[armf_LFOMODE][i]   = 0;
 			}
@@ -1004,9 +850,8 @@ void read_lfomode(uint8_t i)
 		else if (!button_pressed(butm_LFOMODE_BUTTON)){
 			if(calc_params.armed[armf_LFOMODE][i]){
 				if (!lfos.locked[i]) {
-					lfos.mode[i] = (lfos.mode[i] + 1) % NUM_LFO_MODES;
-					if (lfos.mode[i] == lfot_LPG)
-						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					// Toggle between LFO and LPG modes only
+					lfos.mode[i] = (lfos.mode[i] == lfot_LFO) ? lfot_LPG : lfot_LFO;
 				}
 				calc_params.armed[armf_LFOMODE][i] = 0;
 			}
@@ -1019,9 +864,9 @@ void read_lfomode(uint8_t i)
 		}
 	}
 
-	else if (!cached[i]){ // cache lfo mode and set to shape when entering audio range
+	else if (!cached[i]){ // cache lfo mode and set to LFO when entering audio range
 		cache_uncache_lfomode(i, CACHE);
-		lfos.mode[i] = lfot_SHAPE;
+		lfos.mode[i] = lfot_LFO;
 		cached[i] = 1;
 	}
 }
@@ -1143,18 +988,6 @@ void apply_keymode(uint8_t chan, enum MuteNoteKeyStates new_keymode)
 			//params.indiv_scale[chan] = params.indiv_scale_buf[chan];
 		}
 
-		//Switched to Ext Trig
-		else if (new_keymode == ksw_KEYS_EXT_TRIG)
-		{
-			params.indiv_scale[chan] = sclm_NONE;
-			force_wt_interp_update(chan);
-		}
-		else if (new_keymode == ksw_KEYS_EXT_TRIG_SUSTAIN)
-		{
-			calc_params.gate_in_is_sustaining[chan] = 0;
-			force_wt_interp_update(chan);
-		}
-
 		params.key_sw[chan] = new_keymode;
 	}
 
@@ -1234,7 +1067,7 @@ void update_pitch(uint8_t chan)
 	int8_t oct;
 	int16_t oct_clamped;
 
-	if ( params.key_sw[chan]==ksw_MUTE || params.key_sw[chan]==ksw_KEYS_EXT_TRIG_SUSTAIN || params.key_sw[chan]==ksw_KEYS_EXT_TRIG || params.new_key[chan] || ((params.key_sw[chan] == ksw_NOTE) && !params.note_on[chan]) )
+	if ( params.key_sw[chan]==ksw_MUTE || params.new_key[chan] || ((params.key_sw[chan] == ksw_NOTE) && !params.note_on[chan]) )
 	{
 		// Calculate pitch multiplier from individual jack 1V/oct CV
 		if ((params.voct_switch_state[chan] == SW_VOCT) || (params.key_sw[chan] != ksw_MUTE))
@@ -1290,38 +1123,6 @@ void update_pitch(uint8_t chan)
 	// Apply fine-tuning
 	calc_params.pitch[chan] = _CLAMP_F(calc_params.qtz_freq[chan] * calc_params.tuning[chan], F_MIN_FREQ, F_MAX_FREQ);
 
-	update_wt_head_pos_inc(chan);
-
-	if (params.wt_bank[chan] >= 100)
-		params.plaits_params[chan].note = 69.0f + 12.0f * log2f(calc_params.pitch[chan] / 440.0f);
-}
-
-// Spread factors for 8 voices (centered around 0)
-// Unequally spaced to avoid predictable beating (Prime-ish / fibrous numbers)
-const float osc_detune_factors[8] = {0.0f, 0.11f, -0.13f, 0.27f, -0.31f, 0.47f, -0.53f, 0.79f};
-
-void update_wt_head_pos_inc(uint8_t chan){
-	uint8_t v;
-	float base_pitch, detune_pitch;
-	float spread_amt = params.unison_spread_amt[chan];
-
-	base_pitch = calc_params.pitch[chan];
-
-	for (v = 0; v < MAX_UNISON_VOICES; v++) {
-		if (v < params.unison_voice_count[chan]) {
-			// Apply detuning based on voice index and spread amount
-			// detune_factor scales the offset. 
-			// Example: 1.0 + (spread * factor * scaling)
-			// Using a small scaling factor to keep musical range reasonable (e.g. +/- 50 cents max)
-			float detune_scaler = 0.06f; // approx +/- 1 semitone max spread
-			float ratio = 1.0f + (spread_amt * osc_detune_factors[v] * detune_scaler);
-			
-			detune_pitch = base_pitch * ratio;
-			wt_osc.wt_head_pos_inc[chan][v] = (detune_pitch * F_WT_TABLELEN) / F_SAMPLERATE;
-		} else {
-			wt_osc.wt_head_pos_inc[chan][v] = 0.0f;
-		}
-	}
 }
 
 /*** Move to params_pitch.c ***/
@@ -1352,133 +1153,6 @@ void update_noise(uint8_t chan)
 //##########################################################
 //						OSC PARAMS /*** Move to params_pitch.c ***/
 //##########################################################
-
-
-void read_freq(void){
-
-	set_master_gain();
-
-	int16_t tmp1, tmp2, tmp3, tmp4;
-	static uint8_t reset_detuning_enabled = 1;
-	static uint8_t reset_transpose_enabled = 1;
-	static uint8_t reset_octaves_enabled = 1;
-
-	// if (key_combo_osc_lock_pressed()){update_osc_param_lock();}
-	// else {
-
-		tmp1 = pop_encoder_q (pec_OCT  );
-		tmp2 = pop_encoder_q (sec_SCALE);
-		tmp3 = pop_encoder_q (pec_TRANSPOSE );
-		tmp4 = pop_encoder_q (sec_OSC_SPREAD);
-
-		// UNISON MODE OVERRIDES
-		// Press Main Knob (Wavetable) + Turn Tuning (pec_TRANSPOSE) -> Unison Detune
-		// Press Main Knob (Wavetable) + Turn Spread (sec_OSC_SPREAD) -> Unison Voice Count
-		if (rotary_pressed(rotm_WAVETABLE)) {
-			if (tmp3) {
-				// Adjust Unison Detune
-				float change = tmp3 * 0.01f; // Sensitivity
-				uint8_t i;
-				
-				if (macro_states.all_af_buttons_released) {
-					// Global: adjust all unlocked channels
-					for (i = 0; i < NUM_CHANNELS; i++) {
-						if (!params.osc_param_lock[i]) {
-							params.unison_spread_amt[i] = _CLAMP_F(params.unison_spread_amt[i] + change, 0.0f, 1.0f);
-						}
-					}
-				} else {
-					// Individual: adjust only pressed channels
-					for (i = 0; i < NUM_CHANNELS; i++) {
-						if (button_pressed(i)) {
-							params.unison_spread_amt[i] = _CLAMP_F(params.unison_spread_amt[i] + change, 0.0f, 1.0f);
-							calc_params.already_handled_button[i] = 1;
-						}
-					}
-				}
-				start_ongoing_display_unison(); 
-				tmp3 = 0; // Consume the event
-			}
-			if (tmp4) {
-				// Adjust Unison Voice Count
-				int8_t change = (tmp4 > 0) ? 1 : -1;
-				uint8_t i;
-
-				if (macro_states.all_af_buttons_released) {
-					// Global: adjust all unlocked channels
-					for (i = 0; i < NUM_CHANNELS; i++) {
-						if (!params.osc_param_lock[i]) {
-							int16_t new_count = (int16_t)params.unison_voice_count[i] + change;
-							params.unison_voice_count[i] = _CLAMP_I16(new_count, 1, MAX_UNISON_VOICES);
-						}
-					}
-				} else {
-					// Individual: adjust only pressed channels
-					for (i = 0; i < NUM_CHANNELS; i++) {
-						if (button_pressed(i)) {
-							int16_t new_count = (int16_t)params.unison_voice_count[i] + change;
-							params.unison_voice_count[i] = _CLAMP_I16(new_count, 1, MAX_UNISON_VOICES);
-							calc_params.already_handled_button[i] = 1;
-						}
-					}
-				}
-				start_ongoing_display_unison();
-				tmp4 = 0; // Consume the event
-			}
-		}
-
-		// ---------------------
-		//	OCT / SCALE
-		// ---------------------
-
-		if (tmp1) 		{update_oct 	(tmp1);}
-		else if (tmp2)	{update_scale	(tmp2);}
-
-		// ----------------------------------------------
-		//		TRANSPOSE / TUNE / CHORD / DETUNE SPREAD
-		// ----------------------------------------------
-
-		else if(tmp3){
-			// Press LFO Speed (in gain mode) + Turn Spread (TRANSPOSE) = adjust soft clip pregain
-			if (rotary_pressed(rotm_LFOSPEED)) {
-				params.soft_clip_pregain += tmp3 * SOFT_CLIP_PREGAIN_SCALING;
-				params.soft_clip_pregain = _CLAMP_F(params.soft_clip_pregain, MIN_SOFT_CLIP_PREGAIN, MAX_SOFT_CLIP_PREGAIN);
-				start_ongoing_display_soft_clip();
-			}
-			else if (switch_pressed(FINE_BUTTON)) { update_finetune (tmp3); }
-			else							{ update_transpose(tmp3); }
-		}
-
-		else if (tmp4){
-			if		(switch_pressed(FINE_BUTTON)  && macro_states.all_af_buttons_released)	spread_finetune(tmp4);
-			else if (!switch_pressed(FINE_BUTTON) && macro_states.all_af_buttons_released) update_spread(tmp4);
-		}
-
-
-		if (key_combo_reset_detuning())	{
-			if (reset_detuning_enabled) {
-				retune_oscillators();
-				reset_detuning_enabled = 0;
-			}
-		} else reset_detuning_enabled = 1;
-
-		if (key_combo_reset_transpose())	{
-			if (reset_transpose_enabled) {
-				reset_notes();
-				reset_transpose_enabled = 0;
-			}
-		} else reset_transpose_enabled = 1;
-
-		if (key_combo_reset_octaves())	{
-			if (reset_octaves_enabled) {
-				reset_octaves();
-				reset_octaves_enabled = 0;
-			}
-		} else reset_octaves_enabled = 1;
-
-	// }
-	update_spread_cv();
-}
 
 
 void cache_uncache_locks(enum CacheUncache cache_uncache)
@@ -1664,15 +1338,7 @@ void retune_oscillators(void)
 
 void resync_audio_osc(uint8_t channels)
 {
-	uint8_t i;
-
-	for (i=0; i<NUM_CHANNELS; i++)
-	{
-		if (channels & (1<<i)) {
-			uint8_t v;
-			for(v=0;v<MAX_UNISON_VOICES;v++) wt_osc.wt_head_pos[i][v] = 0;
-		}
-	}
+	(void)channels;
 }
 
 
@@ -1748,31 +1414,19 @@ void update_spread(int16_t tmp){
 	uint8_t chan;
 
 	for (chan=0; chan<NUM_CHANNELS; chan++){
-		if (!params.osc_param_lock[chan])
+		if (!params.osc_param_lock[chan]) {
 			params.spread_enc[chan] += tmp;
+			
+			// Force qtz update cache to invalidate so it stops lagging
+			calc_params.prev_qtz_note[chan] = 255;
+		}
 	}
 	start_ongoing_display_transpose();
 }
 
-static uint8_t any_key_sw(enum MuteNoteKeyStates state);
-static uint8_t any_key_sw(enum MuteNoteKeyStates state) {
-	if (   params.key_sw[0]==state
-		|| params.key_sw[1]==state
-		|| params.key_sw[2]==state
-		|| params.key_sw[3]==state
-		|| params.key_sw[4]==state
-		|| params.key_sw[5]==state)
-		return 1;
-	else
-		return 0;
-}
-
 void update_spread_cv(void)
 {
-	if (analog_jack_plugged(TRANSPOSE_CV) && (any_key_sw(ksw_KEYS_EXT_TRIG) || any_key_sw(ksw_KEYS_EXT_TRIG_SUSTAIN)))
-		params.spread_cv = 0;
-	else
-		params.spread_cv = (int8_t)((float)(analog[CHORD_CV].bracketed_val)  * (float)(NUM_CHORDS) / (4095.0*1.04));//4% down-scaling allows black keys to select chords (C#0 to C#5)
+	params.spread_cv = (int8_t)((float)(analog[CHORD_CV].bracketed_val)  * (float)(NUM_CHORDS) / (4095.0*1.04));//4% down-scaling allows black keys to select chords (C#0 to C#5)
 }
 
 void combine_transpose_spread(void){
@@ -1883,784 +1537,17 @@ float compute_transposition(int32_t transpose)
 // ########################################################################
 
 
-void update_wt(void)
-{
-	uint8_t		i;
-	static uint8_t  poll_ctr =  0;
-
-
-	for (i = 0; i < NUM_CHANNELS; i++){
-		update_wbrowse_step_pos(i);
-	}
-
-	switch(poll_ctr++){
-
-		// ------------
-		// WT SELECTION
-		// -------------
-
-		// spread
-		case 2:
-			read_wtsel_spread();	//updates and wraps wtsel_spread_enc
-			read_wtsel_spread_cv();	//updates wtsel_spread_cv based on cv on the jack
-
-			read_browse_encoder();	//calls read_wtsel() if encoder is pushed+turned and updates wtsel_enc[]
-			read_wtsel_cv();		//updates wtsel_cv based on cv on the jack
-
-			update_wtsel();		//sets calc_params.wtsel[] based on sum of spread and calc_params.wtsel (cv and enc)
-
-			update_wt_bank();		//sets wt_bank = calc_params.wtsel and requests wt update if it's changed
-
-		break;
-
-
-		// ------------
-		// WT POSITION
-		// ------------
-
-		case 4:
-			update_wt_disp (0);
-			update_wbrowse_cv();
-		break;
-
-		// depth
-		case 6:
-			update_wt_nav_cv(0);
-			read_nav_encoder(0);
-		break;
-
-		// latitude
-		case 9:
-			update_wt_nav_cv(1);
-			read_nav_encoder(1);
-		break;
-
-		// longitude
-		case 12:
-			update_wt_nav_cv(2);
-			read_nav_encoder(2);
-		break;
-
-		case 15:
-			//Todo: make these functions into one looping function
-			for (i = 0; i < NUM_CHANNELS; i++){
-				calc_wt_pos				(i);
-				update_wt_pos_interp_params	(i, 0);
-				update_wt_pos_interp_params	(i, 1);
-				update_wt_pos_interp_params	(i, 2);
-			}
-			poll_ctr=0;
-		break;
-	}
-}
-
-void read_nav_encoder(uint8_t dim){
-
-	uint8_t i;
-	int16_t enc;
-	uint8_t	WT_ENCODERS[3] = {pec_DEPTH, pec_LATITUDE, pec_LONGITUDE};
-	float wt_pos_increment;
-
-	enc = pop_encoder_q(WT_ENCODERS[dim]);
-	if (enc) {
-		if ((ui_mode == WTEDITING) && (!macro_states.all_af_buttons_released))
-		{
-			if	 (dim == 0){for (i = 0; i < WT_DIM_SIZE; i++){update_wt_fx_params(i,					wt_osc.m0[1][0],	wt_osc.m0[2][0],	enc);}}
-			else if(dim == 1){for (i = 0; i < WT_DIM_SIZE; i++){update_wt_fx_params(wt_osc.m0[0][0],	i,					wt_osc.m0[2][0],	enc);}}
-			else if(dim == 2){for (i = 0; i < WT_DIM_SIZE; i++){update_wt_fx_params(wt_osc.m0[0][0],	wt_osc.m0[1][0],	i,					enc);}}
-		}
-		else
-		{
-			// PLAITS MODULATION CONTROL (Speed + Nav)
-			if (rotary_pressed(rotm_LFOSPEED)) {
-				uint8_t handled = 0;
-				for (i=0; i<NUM_CHANNELS; i++) {
-					// Check if channel is Plaits mode and unlocked (or selected)
-					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
-						float *val_ptr = 0;
-						if (dim == 0) val_ptr = &params.plaits_params[i].mod_freq; // Depth -> FM
-						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre; // Lat -> Timbre
-						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph; // Long -> Morph
-						
-						if (val_ptr) {
-							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
-							handled = 1;
-						}
-					}
-				}
-				if (handled) return; 
-			}
-
-			// PLAITS SECONDARY MODULATION (Fine + Nav)
-			// Provides access to Harmonics Modulation (Depth) which is not covered by Speed+Nav.
-			// Map: Depth -> Harmonics, Lat -> Timbre, Long -> Morph.
-			if (switch_pressed(FINE_BUTTON)) {
-				uint8_t handled = 0;
-				for (i=0; i<NUM_CHANNELS; i++) {
-					// Check if channel is Plaits mode and unlocked (or selected)
-					// Approximating standard lock logic: !locked OR button_pressed
-					if (params.wt_bank[i] >= 100 && (!params.wt_pos_lock[i] || button_pressed(i))) {
-						float *val_ptr = 0;
-						if (dim == 0) val_ptr = &params.plaits_params[i].mod_harmonics;
-						if (dim == 1) val_ptr = &params.plaits_params[i].mod_timbre;
-						if (dim == 2) val_ptr = &params.plaits_params[i].mod_morph;
-						
-						if (val_ptr) {
-							*val_ptr = _CLAMP_F(*val_ptr + (enc / 127.0f), -1.0f, 1.0f);
-							handled = 1;
-						}
-					}
-				}
-				if (handled) return; 
-			}
-
-			if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-				wt_pos_increment = enc * (switch_pressed(FINE_BUTTON) ? F_SCALING_NAVIGATE : 1);
-			else
-				wt_pos_increment = enc * (switch_pressed(FINE_BUTTON) ? F_SCALING_FINE_NAVIGATE : F_SCALING_NAVIGATE);
-
-			update_wt_nav(dim, wt_pos_increment);
-		}
-	}
-}
-
-
-void read_browse_encoder(void)
-{
-	int16_t enc, enc2;
-	int16_t i,j,k;
-	static uint8_t set_new_global_brightness=0;
-	static uint8_t browse_pressed = 0;
-	static uint8_t browse_moved = 0;
-
-	enc = pop_encoder_q(pec_WBROWSE);
-	enc2 = pop_encoder_q(sec_WTSEL);
-
-	if (enc || enc2) browse_moved = 1;
-
-	if (rotary_pressed(rotm_WAVETABLE))
-	{
-		if (!browse_pressed) {
-			browse_pressed = 1;
-			browse_moved = 0;
-		}
-	} else {
-		if (browse_pressed) {
-			browse_pressed = 0;
-			if (!browse_moved && (ui_mode == WTMONITORING)) {
-				start_play_export_sphere();
-			}
-		}
-	}
-
-	if (ui_mode == WTEDITING && !macro_states.all_af_buttons_released)
-	{
-		params.dispersion_enc = 0;
-		// params.disppatt_enc = 1;
-		update_wt_disp(CLEAR_LPF);
-		update_wt_fx_params(wt_osc.m0[0][0], wt_osc.m0[1][0], wt_osc.m0[2][0], enc);
-	}
-	else
-	{
-		if (!rotary_pressed(rotm_PRESET))
-			update_wbrowse(enc);
-
-		if (enc)
-		{
-			if (rotary_pressed(rotm_PRESET)) {
-				exit_preset_manager();
-				stop_all_displays();
-				start_ongoing_display_globright();
-				system_settings.global_brightness = _CLAMP_F(system_settings.global_brightness + ((float)enc * F_SCALING_NAVIGATE_GLOBAL_BRIGHTNESS), F_MIN_GLOBAL_BRIGHTNESS, 1.0);
-				set_new_global_brightness =1;
-			}
-		}
-		if (!rotary_pressed(rotm_PRESET) && set_new_global_brightness) {
-			save_flash_params();
-			set_new_global_brightness=0;
-		}
-	}
-
-	if (enc2)
-	{
-		if (ui_mode == WTEDITING)
-		{
-			if (macro_states.all_af_buttons_released)
-				update_sphere_stretch_position(enc2);
-			else
-			{
-				for (i=0; i< WT_DIM_SIZE; i++){
-					for (j=0; j< WT_DIM_SIZE; j++){
-						for (k=0; k< WT_DIM_SIZE; k++){
-							update_wt_fx_params(i,j,k,enc2);
-						}
-					}
-				}
-			}
-		}
-
-		else if (ui_mode == PLAY) {
-			read_wtsel(enc2);
-		}
-	}
-}
-
-
-enum WTFlashLoadQueueStates{
-	WT_FLASH_NO_ACTION,
-	WT_FLASH_LOAD_0,
-	WT_FLASH_LOAD_1,
-	WT_FLASH_LOAD_2,
-	WT_FLASH_LOAD_3,
-	WT_FLASH_LOAD_4,
-	WT_FLASH_LOAD_5,
-	WT_FLASH_LOAD_6,
-	WT_FLASH_LOAD_7,
-	WT_FLASH_INTERP,
-
-};
-void update_wt_interp(void)
-{
-	int8_t chan;
-	uint8_t x[2],y[2],z[2];
-
-	static uint8_t  loadx[2][NUM_CHANNELS]={0}, loady[2][NUM_CHANNELS]={0}, loadz[2][NUM_CHANNELS]={0};
-	static int16_t	*p_waveform[NUM_CHANNELS][8]; // addresses for 8x waveforms used for interpolation
-	static uint8_t	old_x0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-	static uint8_t	old_y0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-	static uint8_t	old_z0[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-	static uint8_t	old_bank[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-	static uint8_t	loading_bank[NUM_CHANNELS] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-	static enum WTFlashLoadQueueStates state[NUM_CHANNELS] = {WT_FLASH_NO_ACTION};
-
-	for (chan = 0; chan < NUM_CHANNELS; chan++)
-	{
-		if (wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_NONE)
-			continue;
-
-		// FIX: Do not attempt to load wavetables for Plaits engines (Virtual Spheres)
-		// Accessing flash for indices >= 100 causes access beyond the flash chip capacity (Bus Fault)
-		if (params.wt_bank[chan] >= PLAITS_SPHERE_OFFSET) {
-			wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_NONE;
-			state[chan] = WT_FLASH_NO_ACTION;
-			continue;
-		}
-
-		//Todo: If wt_osc.m0[][chan] changes while a
-
-
-		if ((wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_REFRESH)
-				&& (state[chan] == WT_FLASH_NO_ACTION)
-				&& (wt_osc.m0[0][chan] == old_x0[chan]) && (wt_osc.m0[1][chan] == old_y0[chan]) && (wt_osc.m0[2][chan] == old_z0[chan])
-				&& (params.wt_bank[chan] == old_bank[chan])
-			)
-		{
-			// Even when just refreshing positions, ensure we didn't just come back from Editing mode with stale cache/pointers
-			if (p_waveform[chan][0] != waveform[chan][0][0][0].wave) {
-				old_bank[chan] = 0xFF; // Force a full reload to restore pointers
-			} else {
-				interp_wt(chan, p_waveform[chan]);
-			}
-		}
-		else
-		{
-			// Reset load state if target changed OR update is FORCED (but only if not already loading)
-			if ((state[chan] == WT_FLASH_NO_ACTION) && (params.wt_bank[chan] != old_bank[chan] || wt_osc.wt_interp_request[chan] == WT_INTERP_REQ_FORCE)) {
-				state[chan] = WT_FLASH_NO_ACTION;
-				old_bank[chan] = 0xFF; // Definitive invalidation
-			}
-
-			if (ui_mode == PLAY)
-			{
-				if (get_flash_state() != sFLASH_NOTBUSY)
-					continue;
-
-				if (state[chan]==WT_FLASH_NO_ACTION)
-				{
-					loadx[0][chan] = wt_osc.m0[0][chan];
-					loady[0][chan] = wt_osc.m0[1][chan];
-					loadz[0][chan] = wt_osc.m0[2][chan];
-					loadx[1][chan] = wt_osc.m1[0][chan];
-					loady[1][chan] = wt_osc.m1[1][chan];
-					loadz[1][chan] = wt_osc.m1[2][chan];
-					loading_bank[chan] = params.wt_bank[chan];
-					
-					// Commit target coordinates now so we can detect mid-load changes
-					old_x0[chan] = loadx[0][chan];
-					old_y0[chan] = loady[0][chan];
-					old_z0[chan] = loadz[0][chan];
-				} else {
-					// Detect if target parameters changed mid-load and restart if necessary
-					if (loadx[0][chan] != wt_osc.m0[0][chan] || loady[0][chan] != wt_osc.m0[1][chan] || loadz[0][chan] != wt_osc.m0[2][chan] || loading_bank[chan] != params.wt_bank[chan]) {
-						state[chan] = WT_FLASH_NO_ACTION;
-						old_bank[chan] = 0xFF; 
-						continue;
-					}
-				}
-
-				state[chan]++;
-
-				if (state[chan] < WT_FLASH_INTERP) {
-					uint8_t s = state[chan]-1;
-					uint8_t sb0 = s&1;
-					uint8_t sb1 = (s&2)>>1;
-					uint8_t sb2 = (s&4)>>2;
-					load_extflash_wavetable(params.wt_bank[chan], &(waveform[chan][sb2][sb1][sb0]), loadx[sb0][chan], loady[sb1][chan], loadz[sb2][chan]);
-				}
-				else {
-					old_bank[chan] = params.wt_bank[chan];
-
-					// Invalidate D-Cache for all 8 corners because they were loaded via DMA
-					// Without this, the D-Cache may contain stale data as loading via DMA into sram 
-					// does not automatically invalidate the D-Cache
-					#ifndef HOST_TEST
-					SCB_InvalidateDCache_by_Addr((uint32_t *)&(waveform[chan][0][0][0]), sizeof(o_waveform) * 8);
-					#endif
-
-					p_waveform[chan][0] = waveform[chan][0][0][0].wave; // 0,0,0
-					p_waveform[chan][1] = waveform[chan][0][0][1].wave; // 1,0,0 (X=1)
-					p_waveform[chan][2] = waveform[chan][0][1][0].wave; // 0,1,0 (Y=1)
-					p_waveform[chan][3] = waveform[chan][0][1][1].wave; // 1,1,0 (X=1, Y=1)
-					p_waveform[chan][4] = waveform[chan][1][0][0].wave; // 0,0,1 (Z=1)
-					p_waveform[chan][5] = waveform[chan][1][0][1].wave; // 1,0,1 (X=1, Z=1)
-					p_waveform[chan][6] = waveform[chan][1][1][0].wave; // 0,1,1 (Y=1, Z=1)
-					p_waveform[chan][7] = waveform[chan][1][1][1].wave; // 1,1,1 (X=1, Y=1, Z=1)
-					
-					state[chan] = WT_FLASH_NO_ACTION;
-					interp_wt(chan, p_waveform[chan]);
-				}
-			}
-
-			else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-			{
-				x[0] = wt_osc.m0[0][chan];
-				y[0] = wt_osc.m0[1][chan];
-				z[0] = wt_osc.m0[2][chan];
-				x[1] = wt_osc.m1[0][chan];
-				y[1] = wt_osc.m1[1][chan];
-				z[1] = wt_osc.m1[2][chan];
-				old_x0[chan] = x[0];
-				old_y0[chan] = y[0];
-				old_z0[chan] = z[0];
-				old_bank[chan] = params.wt_bank[chan];
-
-				p_waveform[chan][0] =  spherebuf.data[x[0]][y[0]][z[0]].wave;
-				p_waveform[chan][1] =  spherebuf.data[x[1]][y[0]][z[0]].wave;
-				p_waveform[chan][2] =  spherebuf.data[x[0]][y[1]][z[0]].wave;
-				p_waveform[chan][3] =  spherebuf.data[x[1]][y[1]][z[0]].wave;
-				p_waveform[chan][4] =  spherebuf.data[x[0]][y[0]][z[1]].wave;
-				p_waveform[chan][5] =  spherebuf.data[x[1]][y[0]][z[1]].wave;
-				p_waveform[chan][6] =  spherebuf.data[x[0]][y[1]][z[1]].wave;
-				p_waveform[chan][7] =  spherebuf.data[x[1]][y[1]][z[1]].wave;
-				state[chan] = WT_FLASH_NO_ACTION;
-				interp_wt(chan, p_waveform[chan]);
-			}
-		}
-	}
-}
-
-
-void interp_wt(uint8_t chan, int16_t *p_waveform[8]){
-
-	uint16_t  i = 0;
-	// float xfade0, xfade1, yfade0, yfade1;
-
-	if (ui_mode == WTTTONE) {
-		while (i < WT_TABLELEN){
-			wt_osc.mc[1 - wt_osc.buffer_sel[chan]][chan][i] = (float)(TTONE[i]);
-			i++;
-		}
-	}
-	else{
-		while (i < WT_TABLELEN){
-		//100us
-			wt_osc.mc[1 - wt_osc.buffer_sel[chan]][chan][i] =
-				(
-					( (float) ( *(p_waveform[0] + i))  * wt_osc.m_frac_inv[0][chan] + (float) ( *(p_waveform[1] + i))  * wt_osc.m_frac[0][chan] )  * wt_osc.m_frac_inv[1][chan] +
-					( (float) ( *(p_waveform[2] + i))  * wt_osc.m_frac_inv[0][chan] + (float) ( *(p_waveform[3] + i))  * wt_osc.m_frac[0][chan] )  * wt_osc.m_frac	[1][chan]
-				) * wt_osc.m_frac_inv[2][chan]
-				+
-				(
-					( (float) ( *(p_waveform[4] + i))  * wt_osc.m_frac_inv[0][chan] + (float) ( *(p_waveform[5] + i))   * wt_osc.m_frac[0][chan] )   * wt_osc.m_frac_inv[1][chan] +
-					( (float) ( *(p_waveform[6] + i))	* wt_osc.m_frac_inv[0][chan] + (float) ( *(p_waveform[7] + i))   * wt_osc.m_frac[0][chan] )   * wt_osc.m_frac	[1][chan]
-				) * wt_osc.m_frac[2][chan];
-
-			i++;
-		}
-	}
-	wt_osc.wt_xfade[chan]			= 1.0;
-	wt_osc.buffer_sel[chan]		= 1 - wt_osc.buffer_sel[chan];
-	wt_osc.wt_interp_request[chan]	= WT_INTERP_REQ_NONE;
-
-}
-
-void req_wt_interp_update (uint8_t chan){
-	wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_REFRESH;
-}
-
-
-void force_all_wt_interp_update (void){
-	force_wt_interp_update(0);
-	force_wt_interp_update(1);
-	force_wt_interp_update(2);
-	force_wt_interp_update(3);
-	force_wt_interp_update(4);
-	force_wt_interp_update(5);
-}
-
-void force_wt_interp_update (uint8_t chan){
-	wt_osc.wt_interp_request[chan] = WT_INTERP_REQ_FORCE;
-}
-
-
-void set_num_sphere_filled(uint8_t num_filled){
-	num_spheres_filled = num_filled;
-}
-
-
-// ####################################
-//			WT SELECTION
-// ####################################
-
-//Todo: if we ever have more than 127 spheres then we'll need to use uint8_t or int16_t or something for params.wtsel_enc[]
-//or else wrap it properly from +127 to -128 (must wrap to same modulus of number of spheres)
-void read_wtsel(int8_t wtsel)
-{
-	uint8_t i;
-	int16_t wtsel_enc[NUM_CHANNELS];
-
-	if (wtsel)
-	{
-		for (i = 0; i < NUM_CHANNELS; i++)
-			wtsel_enc[i] = params.wtsel_enc[i];
-
-		if (change_param_i16(wtsel_enc, wtsel))
-		{
-			for (i = 0; i < NUM_CHANNELS; i++)
-				params.wtsel_enc[i] = wtsel_enc[i];
-		}
-
-		start_ongoing_display_sphere_sel();
-	}
-}
-
-
-void read_wtsel_cv(void){
-	if ((params.key_sw[0]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(A_VOCT))
-		params.wtsel_cv = 0;
-	else
-		params.wtsel_cv = analog[WTSEL_CV].bracketed_val * num_spheres_filled / 4095;
-}
-
-
-void read_wtsel_spread(void)
-{
-	int8_t wtsel_spread;
-	uint8_t chan;
-
-	wtsel_spread = pop_encoder_q(sec_WTSEL_SPREAD);
-
-	if (wtsel_spread && !UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-	{
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-		{
-			if (!params.wtsel_lock[chan])
-				params.wtsel_spread_enc[chan] = _WRAP_I16(params.wtsel_spread_enc[chan] + wtsel_spread, 0, NUM_WTSEL_SPREADS);
-		}
-
-		start_ongoing_display_sphere_sel();
-	}
-}
-
-void read_wtsel_spread_cv(void)
-{
-	if (!UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-	{
-		if ((params.key_sw[5]==ksw_KEYS_EXT_TRIG || params.key_sw[5]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(F_VOCT))
-			params.wtsel_spread_cv = 0;
-		else
-			params.wtsel_spread_cv = analog[WTSEL_SPREAD_CV].bracketed_val * NUM_WTSEL_SPREADS / 4095;
-	}
-}
-
-int8_t calc_wtspread_offset(uint8_t spread_amt, uint8_t chan)
-{
-	int8_t offset_per_spread = (int8_t)chan - ((int8_t)NUM_CHANNELS/2);
-
-	if (chan >= (NUM_CHANNELS/2))
-		offset_per_spread++;
-
-	return (int8_t)spread_amt * offset_per_spread;
-
-	//0: -3, 1: -2, 2: -1, 3: 1, 4: 2, 5: 3
-}
-
-void update_wtsel(void){
-	uint16_t spread_sum;
-	int8_t wtsel_sum;
-	uint8_t chan;
-	uint8_t wtsel_spread_cv, wtsel_cv;
-
-	for (chan=0; chan<NUM_CHANNELS; chan++)
-	{
-		wtsel_spread_cv =  params.wtsel_lock[chan] ? 0 : params.wtsel_spread_cv;
-		wtsel_cv = params.wtsel_lock[chan] ? 0 : params.wtsel_cv;
-		spread_sum = _WRAP_U8(wtsel_spread_cv + params.wtsel_spread_enc[chan], 0, NUM_WTSEL_SPREADS);
-		wtsel_sum = params.wtsel_enc[chan] + wtsel_cv + calc_wtspread_offset(spread_sum, chan);
-
-		calc_params.wtsel[chan] = _WRAP_I8(wtsel_sum, 0, num_spheres_filled);
-	}
-}
-
-void update_wt_bank(void)
-{
-	uint8_t i;
-	uint8_t test_bank;
-
-	for (i=0; i<NUM_CHANNELS; i++){
-		test_bank = sphere_index_to_bank(calc_params.wtsel[i]);
-
-		if ((params.wt_bank[i]!=test_bank) ) {
-			params.wt_bank[i] = test_bank;
-
-			if (test_bank >= PLAITS_SPHERE_OFFSET) {
-				int engine = test_bank - PLAITS_SPHERE_OFFSET;
-				params.plaits_params[i].engine = _CLAMP_I16(engine, 0, 23);
-			}
-
-			req_wt_interp_update(i);
-		}
-
-	}
-}
-
-
-//Given Spread and WTSel encoder positions (ignoring CV), return the wtsel
-int8_t calc_static_wtsel(uint8_t chan)
-{
-	uint16_t spread_sum;
-	int8_t wtsel_sum;
-
-	spread_sum = _WRAP_U8(params.wtsel_spread_enc[chan], 0, NUM_WTSEL_SPREADS);
-	wtsel_sum = params.wtsel_enc[chan] + calc_wtspread_offset(spread_sum, chan);
-	return _WRAP_I8(wtsel_sum, 0, num_spheres_filled);
-}
-
-//Makes adjustments to wtbank when recalling a preset saved since new spheres have been added
-//This maintains wtsel <--> wtbank consistancy
-void fix_wtsel_wtbank_offset(void)
-{
-	uint8_t chan;
-	int8_t wtsel;
-	uint8_t test_bank;
-	uint8_t target_sphere_i;
-	int8_t offset;
-
-	for (chan=0; chan<NUM_CHANNELS; chan++)
-	{
-		wtsel = calc_static_wtsel(chan);
-		test_bank = sphere_index_to_bank(wtsel);
-		if (test_bank != params.wt_bank[chan])
-		{
-			target_sphere_i = bank_to_sphere_index(params.wt_bank[chan]);
-			offset = target_sphere_i - wtsel;
-			params.wtsel_enc[chan] += offset;
-		}
-	}
-}
-
-
-void set_wtsel(uint8_t selection)
-{
-	uint8_t i;
-
-	for (i=0; i<NUM_CHANNELS; i++)
-	{
-		if (!params.wtsel_lock[i]) {
-			params.wtsel_spread_enc[i] = 0;
-			params.wtsel_enc[i] = selection;
-		}
-	}
-	update_wtsel();
-	update_wt_bank();
-}
-
-
-// ####################################
-//			WT NAVIGATION
-// ####################################
-
-
-
-void update_wt_nav(uint8_t wt_dim, float wt_nav_increment)
-{
-	if (wt_nav_increment)
-	{
-		change_param_f(params.wt_nav_enc[wt_dim], wt_nav_increment);
-
-		if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && !switch_pressed(FINE_BUTTON)) {
-			params.dispersion_enc = 0;
-			// params.disppatt_enc = 1;
-			update_wt_disp(CLEAR_LPF);
-		}
-	}
-}
-
-void update_wt_nav_cv(uint8_t wt_dim)
-{
-	switch (wt_dim) {
-		case 0:
-			if ((params.key_sw[2]==ksw_KEYS_EXT_TRIG || params.key_sw[2]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(C_VOCT))
-				params.wt_nav_cv[0] = 0;
-			else
-				params.wt_nav_cv[0] = (float)(analog[DEPTH_CV].bracketed_val) * (float)WT_DIM_SIZE / 4095.0; //0..3
-			break;
-
-		case 1:
-			if ((params.key_sw[4]==ksw_KEYS_EXT_TRIG || params.key_sw[4]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(E_VOCT))
-				params.wt_nav_cv[1] = 0;
-			else
-				params.wt_nav_cv[1] = (float)(analog[LATITUDE_CV].bracketed_val) * (float)WT_DIM_SIZE / 4095.0; //0..3
-			break;
-
-		case 2:
-			params.wt_nav_cv[2] = 0; //we only have 2 CV jacks for wt nav_enc
-			break;
-
-		default:
-			break;
-	}
-
-}
-
-
-void update_wt_disp(uint8_t clear_lpf){
-
-	int8_t			patt_encoder_motion;
-	float			disp_encoder_motion;
-	static float	disp_encoder_motion_lpf = 0.0f;
-
-	if (clear_lpf==CLEAR_LPF)
-		disp_encoder_motion_lpf = 0;
-
-	else {
-		// Dispersion encoder
-		disp_encoder_motion = pop_encoder_q(sec_DISPERSION) * (switch_pressed(FINE_BUTTON) ? F_SCALING_FINE_DISPERSION : F_SCALING_DISPERSION);
-		disp_encoder_motion_lpf = (disp_encoder_motion_lpf * (1.0-F_SCALING_DISPERSION_LPF)) + (disp_encoder_motion * F_SCALING_DISPERSION_LPF);
-		if (fabs(disp_encoder_motion_lpf)>0.001)
-			params.dispersion_enc = _WRAP_F(params.dispersion_enc + disp_encoder_motion_lpf, 0 ,2.0);
-
-		// Dispersion cv
-		if ((params.key_sw[1]==ksw_KEYS_EXT_TRIG || params.key_sw[1]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(B_VOCT))
-			params.dispersion_cv = 0;
-		else
-			params.dispersion_cv = ((float)analog[DISP_CV].bracketed_val)/4095.0;
-
-
-		// Pattern encoder
-		patt_encoder_motion = pop_encoder_q(sec_DISPPATT);
-		if(patt_encoder_motion)
-			params.disppatt_enc = _WRAP_I8(params.disppatt_enc + patt_encoder_motion, 0, NUM_DISPPAT);
-
-		// Pattern cv
-		if ((params.key_sw[3]==ksw_KEYS_EXT_TRIG || params.key_sw[3]==ksw_KEYS_EXT_TRIG_SUSTAIN) && analog_jack_plugged(D_VOCT))
-			params.disppatt_cv = 0;
-		else
-			params.disppatt_cv = analog[DISPPAT_CV].bracketed_val * NUM_DISPPAT / 4095;
-	}
-}
-
-
-// Set the wt_pos[dim][chan], properly wrapping it, and requesting an update if needed
-// Given:
-// params.dispersion_enc: float 0..1
-// params.dispersion_cv: float 0..1
-//
-// params.disppatt_enc: int8_t 0.. NUM_DISPPAT
-// params.disppatt_cv: int8_t 0.. NUM_DISPPAT
-//
-// params.wt_browse_step_pos_enc[dim][chan] float 0..27
-// params.wt_browse_step_pos_cv[dim] float 0..27
-//
-// params.wt_nav_enc[dim][chan] float 0..3
-// params.wt_nav_cv[dim] float 0..3
-//
-void calc_wt_pos(uint8_t chan){
-
-	uint8_t wt_dim;
-	float	disp_amt, browse_nav[3], nav_enc[3];
-	float	total_disp, total_browse;
-	uint8_t disp_pattern;
-	float	new_wt_pos = 10;
-	float	disp_cv, disppat_cv, nav_cv, browse_cv;
-	uint8_t snap_to_int=0;
-
-	if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && !switch_pressed(FINE_BUTTON))
-		snap_to_int = 1;
-
-	// NAVIGATION
-	nav_enc[0]	= params.wt_nav_enc[0][chan];
-	nav_enc[1]	= params.wt_nav_enc[1][chan];
-	nav_enc[2]	= params.wt_nav_enc[2][chan];
-
-	// BROWSE
-	browse_cv = params.wt_pos_lock[chan] ? 0: params.wt_browse_step_pos_cv;
-	total_browse = params.wt_browse_step_pos_enc[chan] + browse_cv;
-	get_browse_nav(total_browse, &browse_nav[0], &browse_nav[1], &browse_nav[2]);
-
-	// DISPERSION
-	disp_cv = params.wt_pos_lock[chan] ? 0: params.dispersion_cv;
-	total_disp = _FOLD_F(params.dispersion_enc, 1.0) + disp_cv;
-
-	disppat_cv = params.wt_pos_lock[chan] ? 0: params.disppatt_cv;
-	disp_pattern = _WRAP_U8(params.disppatt_enc + disppat_cv, 0, NUM_DISPPAT);
-
-	// COMBINING
-	for (wt_dim=0;wt_dim<NUM_WT_DIMENSIONS;wt_dim++){
-
-		disp_amt = WT_DIM_SIZE * total_disp * (DISP_PATTERN[disp_pattern][chan][wt_dim]);
-
-		nav_cv = params.wt_pos_lock[chan] ? 0: params.wt_nav_cv[wt_dim];
-		new_wt_pos = _WRAP_F(disp_amt + browse_nav[wt_dim] + nav_cv + nav_enc[wt_dim], 0, WT_DIM_SIZE);
-
-		if (snap_to_int)
-			new_wt_pos = _WRAP_F((int32_t)(new_wt_pos+0.5),0,3);
-
-		if (new_wt_pos != calc_params.wt_pos[wt_dim][chan]){
-			calc_params.wt_pos[wt_dim][chan] = new_wt_pos;
-
-			if (params.wt_bank[chan] >= 100) {
-				if (wt_dim == 0) params.plaits_params[chan].harmonics = new_wt_pos * 0.5f;
-				if (wt_dim == 1) params.plaits_params[chan].timbre = new_wt_pos * 0.5f;
-				if (wt_dim == 2) params.plaits_params[chan].morph = new_wt_pos * 0.5f;
-			}
-
-			req_wt_interp_update(chan);
-		}
-	}
-}
-
-// This uses wt_pos[] to calculate the integer and fractional morph position within the sphere
-void update_wt_pos_interp_params(uint8_t chan, uint8_t wt_dim){
-	wt_osc.m0		[wt_dim][chan]	= ((uint8_t)(calc_params.wt_pos[wt_dim][chan]))     % WT_DIM_SIZE;
-	wt_osc.m1		[wt_dim][chan]	= ((uint8_t)(calc_params.wt_pos[wt_dim][chan]) + 1) % WT_DIM_SIZE;
-	wt_osc.m_frac	[wt_dim][chan]	= calc_params.wt_pos[wt_dim][chan] - (float)(wt_osc.m0[wt_dim][chan]);
-	wt_osc.m_frac_inv [wt_dim][chan]	= 1.0 - wt_osc.m_frac[wt_dim][chan];
-}
-
-
-void update_all_wt_pos_interp_params(void){
-	uint8_t i, j;
-
-	for(i=0; i<NUM_CHANNELS; i++){
-		calc_wt_pos(i);
-
-		for(j=0; j<WT_DIM_SIZE; j++){
-			update_wt_pos_interp_params(i, j);
-		}
-	}
-}
+/* Persistent encoder base for each Halo control (per channel).
+ * Each tick we combine base + CV offset into the live physics parameter.
+ * Without this, the CV-driven path would overwrite any encoder movement on
+ * the very next tick, making the encoder useless while a CV is patched.
+ *
+ * The bases live inside `o_params` (saved with presets, vH+). */
+#define halo_damping_base      (params.halo_damping)
+#define halo_noise_level_base  (params.halo_noise_level)
+#define halo_noise_color_base  (params.halo_noise_color)
+#define halo_wt_attack_base    (params.halo_wt_attack)
+#define halo_lpf_base          (params.halo_lpf_cutoff)
 
 void read_load_save_encoder(void){
 	static uint8_t preset_feature_armed = 0;
@@ -2679,9 +1566,6 @@ void read_load_save_encoder(void){
 
 	if (ui_mode==PLAY && key_combo_all_but_preset_released() && preset_feature_armed)
 		handle_preset_events(enc,enc2);
-
-	else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-		handle_wt_saving_events(enc);
 }
 
 

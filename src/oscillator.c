@@ -29,357 +29,147 @@
 #include "oscillator.h"
 #include "arm_math.h"
 #include "params_lfo.h"
-#include "plaits_shim.h"
 #include "globals.h"
 #include "analog_conditioning.h"
-#include "audio_util.h"
-#include "flash_params.h"
-#include "params_update.h"
-#include "envout_pwm.h"
-#include "adc_interface.h"
-#include "timekeeper.h"
 #include "compressor.h"
 #include "system_settings.h"
 #include "codec_sai.h"
-#include "ui_modes.h"
-#include "wavetable_editing.h"
-#include "wavetable_recording.h"
-#include "rotary_driver.h"
-#include "math_util.h"
-#include "gpio_pins.h"
-#include "wavetable_play_export.h"
-#include "lfo_wavetable_bank.h"
-#include "eq.h"
-#include "UI_conditioning.h"
-#include "hardware_controls.h"
+#include "timekeeper.h"
+#include "diag_log.h"
+#include "diag_fsk.h"
+#include "led_cont.h"
+#include "drum_ui.h"
 
-extern enum UI_Modes 	ui_mode;
-extern o_rotary 		rotary[NUM_ROTARIES];
-extern o_params 		params;
-extern o_calc_params	calc_params;
 extern o_systemSettings	system_settings;
 extern o_led_cont 		led_cont;
-extern o_analog 		analog[NUM_ANALOG_ELEMENTS];
-
-extern o_recbuf 		recbuf;
-__attribute__((aligned(32))) o_wt_osc	wt_osc;
-uint8_t 				audio_in_gate;
-
-//Private:
-void update_sphere_wt(void);
 
 void process_audio_block_codec(int32_t * __restrict__ src, int32_t * __restrict__ dst)
 {
+	extern volatile uint32_t diag_audio_isr_peak_cycles;
+	uint32_t audio_isr_start_cycles = DWT->CYCCNT;
+
 	int16_t 		i_sample;
 	uint8_t 		chan;
-	float 			smpl;
-	float 			fade_gain_current, fade_gain_prev;
 
-	int32_t			audio_in_sample, outL, outR;
+	int32_t			outL, outR;
 	float			output_buffer_evens[MONO_BUFSZ] = {0.f};
 	float			output_buffer_odds[MONO_BUFSZ] = {0.f};
-
-	float 			oscout_status, audiomon_status;
 
 	static float 	prev_level[NUM_CHANNELS] = {0.f};
 	float 			interpolated_level, level_inc;
 
-	static float 	prev_pan[NUM_CHANNELS] = {0.f};
-	float 			interpolated_pan, pan_inc;
-
-	float 			audio_in_sum = 0.0f;
-	static uint8_t	audio_gate_ctr=0;
-
-	float			read_pos;
-
-	// Resonator mode variables
-	uint8_t			resonator_mode_active;
-	float			audio_in_buffer[MONO_BUFSZ];
-	
-	// Plaits/Wavetable accumulation buffer
+	/* Per-channel drum render scratch. */
 	float			temp_buffer[MONO_BUFSZ];
-	uint8_t			is_plaits_mode;
 
-	oscout_status = 	((ui_mode != WTRECORDING) && (ui_mode != WTMONITORING) && (ui_mode != WTREC_WAIT));
-	audiomon_status = 	((ui_mode == WTRECORDING) || (ui_mode == WTMONITORING) || (ui_mode == WTREC_WAIT) || (ui_mode == WTTTONE));
-
-	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && oscout_status;
-
-	// 1. UNIFIED INPUT READING
-	int32_t *src_ptr = src;
-	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-		audio_in_sample = convert_s24_to_s32(*src_ptr++);
-		src_ptr++; // ignore right
-		audio_in_buffer[i_sample] = (float)audio_in_sample / 8388608.0f;
-		if (audio_in_sample < 0) audio_in_sum += (float)audio_in_sample;
-	}
+	(void)src;
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
-		read_level_and_pan(chan);
-		level_inc = (calc_params.level[chan] - prev_level[chan]) / MONO_BUFSZ;
+		/* accent_gain folds Grids' accent flag into the same smoothed
+		 * level ramp below -- it only steps at a trigger, but the
+		 * existing per-block interpolation already exists to avoid
+		 * zipper noise on slider moves, so an accent's gain change
+		 * rides it for free instead of clicking. Performance-mode mute
+		 * (see drum_ui_performance_mode()) rides the same ramp for the
+		 * same reason -- a mute toggle is otherwise just as abrupt a
+		 * gain step as an accent is. */
+		float level = drum_chan[chan].level * drum_chan[chan].accent_gain
+		            * (drum_chan[chan].muted ? 0.0f : 1.0f);
+		level_inc = (level - prev_level[chan]) / MONO_BUFSZ;
 		interpolated_level = prev_level[chan];
-		prev_level[chan] = calc_params.level[chan];
-		
-		pan_inc = (params.pan[chan] - prev_pan[chan]) / MONO_BUFSZ;
-		interpolated_pan = prev_pan[chan];
-		prev_pan[chan] = params.pan[chan];
+		prev_level[chan] = level;
 
-		is_plaits_mode = (params.wt_bank[chan] >= PLAITS_SPHERE_OFFSET);
+		drum_render_channel(chan, temp_buffer, MONO_BUFSZ);
 
-		// 1. Unified Trigger Detection & Policy (Refractory Lockout)
-		if (wt_osc.plaits_refractory_timer[chan] > 0) {
-			if (wt_osc.plaits_refractory_timer[chan] > MONO_BUFSZ) 
-				wt_osc.plaits_refractory_timer[chan] -= MONO_BUFSZ;
-			else 
-				wt_osc.plaits_refractory_timer[chan] = 0;
-		}
+		/* Drums are mono per channel and panned by channel parity so a
+		 * kit spreads across the stereo pair without needing the old
+		 * per-channel pan control. Open hat borrows closed hat's parity
+		 * for this rather than its own -- they're one physical cymbal
+		 * (they already choke each other, see fire() in drum_ui.c) and
+		 * should sit in the same place in the stereo field. Kick stays
+		 * dead center regardless of parity -- it anchors the kit and
+		 * needs to hit evenly in both ears, not lean to one side. */
+		uint8_t pan_chan = (chan == DRUM_CAT_OPEN_HAT) ? DRUM_CAT_CLOSED_HAT : chan;
+		float pan = (chan == DRUM_CAT_KICK) ? 0.5f : ((pan_chan & 1) ? 0.33f : 0.66f);
 
-		uint8_t jack_is_plugged = (analog[A_VOCT + chan].plug_sense_switch.pressed == PRESSED);
-		float vca_cv = (analog[A_VOCT + chan].polarity == AP_UNIPOLAR) ? (analog[A_VOCT + chan].lpf_val / 4095.0f) : (_CLAMP_F(analog[A_VOCT + chan].lpf_val - 2048.0f, 0.0f, 2048.0f) / 2048.0f);
-		
-		uint8_t jack_trig = 0;
-		if (vca_cv > 0.2f && wt_osc.plaits_last_cv_input[chan] <= 0.2f && wt_osc.plaits_refractory_timer[chan] == 0) {
-			jack_trig = 1;
-			wt_osc.plaits_refractory_timer[chan] = 480; // ~10ms refractory lockout
-		}
-		wt_osc.plaits_last_cv_input[chan] = vca_cv;
+		float g = interpolated_level;
+		const float g_step = level_inc * 4.0f;
 
-		uint8_t lpg_active = (lfos.mode[chan] == lfot_LPG && lfos.to_vca[chan]);
-		
-		// Trigger Policy: Determine which sources are allowed based on LPG and Jack state
-		uint8_t allow_lfo_trig  = ( lpg_active && !jack_is_plugged);
-		uint8_t allow_jack_trig = jack_is_plugged && ( lpg_active || (params.voct_switch_state[chan] == SW_VCA));
-		uint8_t allow_note_trig = (!lpg_active &&  params.key_sw[chan] != ksw_MUTE);
-
-		uint8_t main_trigger = (allow_lfo_trig  && lfos.trigout[chan]) || 
-		                       (allow_jack_trig && jack_trig)          || 
-		                       (allow_note_trig && params.new_key[chan]);
-
-		if (is_plaits_mode) {
-			// --- PLAITS PATH ---
-			if (params.note_on[chan]) {
-				PlaitsParams p = params.plaits_params[chan];
-				p.trigger = (float)main_trigger;
-				Plaits_Render(chan, &p, temp_buffer, MONO_BUFSZ);
-			} else {
-				for(int k=0; k<MONO_BUFSZ; k++) temp_buffer[k] = 0.0f;
-			}
-		} else {
-			// --- WAVETABLE PATH ---
-			uint8_t voice_count = params.unison_voice_count[chan];
-			float voice_scale = (voice_count > 1) ? (1.2f / sqrtf((float)voice_count)) : 1.0f;
-
-			if (wt_osc.wt_xfade[chan] > 0.0f) {
-				wt_osc.wt_xfade[chan] -= XFADE_INC;
-				if (wt_osc.wt_xfade[chan] < 0.0f) wt_osc.wt_xfade[chan] = 0.0f;
-			}
-			
-			// Always update unison increments to prevent pitch stalling/jumping
-			static const float osc_detune_factors[8] = {0, -0.0024f, 0.0024f, -0.0056f, 0.0056f, -0.01f, 0.01f, -0.016f};
-			float base_inc = wt_osc.wt_head_pos_inc[chan][0];
-			for (uint8_t v = 0; v < voice_count; v++) {
-				wt_osc.wt_head_pos_inc[chan][v] = base_inc * (1.0f + (osc_detune_factors[v] * params.unison_spread_amt[chan] * 4.0f));
-			}
-			fade_gain_prev = wt_osc.wt_xfade[chan];
-			fade_gain_current = 1.0f - fade_gain_prev;
-
-			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-				float s = 0.0f;
-				for (uint8_t v = 0; v < voice_count; v++) {
-					wt_osc.wt_head_pos[chan][v] += wt_osc.wt_head_pos_inc[chan][v];
-					if (wt_osc.wt_head_pos[chan][v] >= WT_TABLELEN) wt_osc.wt_head_pos[chan][v] -= WT_TABLELEN;
-					read_pos = wt_osc.wt_head_pos[chan][v];
-					uint16_t rh0 = (uint16_t)read_pos;
-					uint16_t rh1 = (rh0 + 1) & (WT_TABLELEN - 1);
-					float rhd = read_pos - (float)rh0;
-					float smpl_v = wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0] * (1.0f - rhd) + wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1] * rhd;
-					if (fade_gain_prev > 0.0f) {
-						float smpl_v2 = wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][rh0] * (1.0f - rhd) + wt_osc.mc[1-wt_osc.buffer_sel[chan]][chan][rh1] * rhd;
-						s += smpl_v * fade_gain_current + smpl_v2 * fade_gain_prev;
-					} else {
-						s += smpl_v;
-					}
-				}
-				temp_buffer[i_sample] = s * voice_scale;
-			}
-		}
-
-		// LPG Processing
-		if (lpg_active) {
-			float decay = params.plaits_params[chan].lpg_decay;
-			float color = params.plaits_params[chan].lpg_color;
-			
-			if (main_trigger) Shim_LPG_Trigger(chan);
-			Shim_LPG_Process(chan, temp_buffer, MONO_BUFSZ, decay, color);
-		}
-
-		// Pre-processing scaling/resonator
-		if (is_plaits_mode) {
-			arm_scale_f32(temp_buffer, 32768.0f, temp_buffer, MONO_BUFSZ);
-		} else if (resonator_mode_active) {
-			for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-				float read_pos_Q = wt_osc.wt_head_pos[chan][0] + (WT_TABLELEN / 4);
-				if (read_pos_Q >= (float)WT_TABLELEN) read_pos_Q -= (float)WT_TABLELEN;
-				uint16_t rh0_Q = (uint16_t)read_pos_Q;
-				uint16_t rh1_Q = (rh0_Q + 1) & (WT_TABLELEN - 1);
-				float rhd_Q = read_pos_Q - (float)rh0_Q;
-				float osc_Q = (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh0_Q] * (1.0f - rhd_Q)) + (wt_osc.mc[wt_osc.buffer_sel[chan]][chan][rh1_Q] * rhd_Q);
-				float ring_I = (temp_buffer[i_sample] / 32768.0f) * audio_in_buffer[i_sample];
-				float ring_Q = (osc_Q / 32768.0f) * audio_in_buffer[i_sample];
-				float dc_alpha = 100.0f / F_SAMPLERATE;
-				wt_osc.coherence_dc_I[chan] = dc_alpha * ring_I + (1.0f - dc_alpha) * wt_osc.coherence_dc_I[chan];
-				wt_osc.coherence_dc_Q[chan] = dc_alpha * ring_Q + (1.0f - dc_alpha) * wt_osc.coherence_dc_Q[chan];
-				float dc_mag = sqrtf(wt_osc.coherence_dc_I[chan] * wt_osc.coherence_dc_I[chan] + wt_osc.coherence_dc_Q[chan] * wt_osc.coherence_dc_Q[chan]);
-				float env_alpha = (dc_mag > wt_osc.coherence_env[chan]) ? (params.resonator_attack_freq / F_SAMPLERATE) : (params.resonator_decay_freq / F_SAMPLERATE);
-				wt_osc.coherence_env[chan] += env_alpha * (dc_mag - wt_osc.coherence_env[chan]);
-				temp_buffer[i_sample] *= wt_osc.coherence_env[chan];
-			}
-		}
-
-		// Optimized Mixing Loop: 4-sample blocks with vectorized math
 		for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample += 4) {
-			float avg_level = interpolated_level + (level_inc * 1.5f); // Halfway through the 4-sample block
-			float avg_pan = interpolated_pan + (pan_inc * 1.5f);
-			
-			float32_t block[4];
-			float32_t pan_L[4];
-			float32_t pan_R[4];
-
-			arm_scale_f32(&temp_buffer[i_sample], avg_level, block, 4);
-			arm_scale_f32(block, avg_pan, pan_L, 4);
-			arm_scale_f32(block, 1.0f - avg_pan, pan_R, 4);
-
-			arm_add_f32(&output_buffer_evens[i_sample], pan_L, &output_buffer_evens[i_sample], 4);
-			arm_add_f32(&output_buffer_odds[i_sample], pan_R, &output_buffer_odds[i_sample], 4);
-
-			interpolated_level += level_inc * 4;
-			interpolated_pan += pan_inc * 4;
+			float gL = g * pan;
+			float gR = g - gL;
+			for (int j = 0; j < 4; j++) {
+				float t = temp_buffer[i_sample + j];
+				output_buffer_evens[i_sample + j] += t * gL;
+				output_buffer_odds [i_sample + j] += t * gR;
+			}
+			g += g_step;
 		}
 	}
 
-	// Apply soft clipping to mixed output buffers
-	// Formula: out = tanh(x * pregain) / pregain
-	// if (oscout_status) {
-	// 	float pregain = params.soft_clip_pregain;
-	// 	if (pregain < 0.05f) pregain = 0.05f; // Safety against div/0
+	// Apply Global VCA from LFO CV jack (only when jack is plugged)
+	if (analog_jack_plugged(LFO_CV) && lfos.global_vca_level < 1.0f) {
+		arm_scale_f32(output_buffer_evens, lfos.global_vca_level, output_buffer_evens, MONO_BUFSZ);
+		arm_scale_f32(output_buffer_odds, lfos.global_vca_level, output_buffer_odds, MONO_BUFSZ);
+	}
 
-	// 	// Non-linear compensation: 1.0 / sqrt(pregain)
-	// 	// Maintains more volume when cranking saturation
-	// 	float inv_pregain = 1.0f / sqrtf(pregain);
- 
-	// 	// 8388608 = 2^23 = max value for signed 24-bit audio
-	// 	float scaler = 8388608.0f * 8.0f;
-	// 	float inv_scaler = 1.0f / scaler;
+	uint8_t fsk_out_active = diag_log_enabled
+	                      && (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE);
 
-	// 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++) {
-	// 		float in_even = output_buffer_evens[i_sample] * inv_scaler;
-	// 		float in_odd = output_buffer_odds[i_sample] * inv_scaler;
-
-	// 		output_buffer_evens[i_sample] = tanhf(in_even * pregain) * inv_pregain * scaler;
-	// 		output_buffer_odds[i_sample] = tanhf(in_odd * pregain) * inv_pregain * scaler;
-	// 	}
-	// }
-
-	// Apply EQ after soft clipping
-	// eq_process(output_buffer_evens, output_buffer_odds, MONO_BUFSZ);
-	
-	// 4. FINAL OUTPUT COMPRESSION & GATE
+	/* Drum voices were each individually gain-trimmed to avoid clipping
+	 * on their own, then further attenuated by the per-channel level
+	 * (default 0.8, not 1.0) and by the constant-sum pan law above
+	 * (~0.74x power for a split channel) -- the combined result sits
+	 * well under the full-scale level master_gain was calibrated for,
+	 * so the whole kit reads quiet even before a single voice is close
+	 * to clipping. compress() above is a soft asymptotic limiter, not a
+	 * hard clip, so it's safe to make up most of that headroom here;
+	 * re-tune by ear if a very dense multi-channel pattern audibly
+	 * pumps against the limiter. */
+	#define DRUM_MIX_MAKEUP_GAIN	1.8f
+	const float dac_scale = system_settings.master_gain * DRUM_MIX_MAKEUP_GAIN * (32768.0f * 4095.0f);
 	for (i_sample = 0; i_sample < MONO_BUFSZ; i_sample++)
 	{
-		outL = 0; outR = 0;
-		if (oscout_status) {
-			outL = (int32_t)(output_buffer_evens[i_sample] * system_settings.master_gain);
-			outR = (int32_t)(output_buffer_odds[i_sample] * system_settings.master_gain);
-		}
-		if (audiomon_status) {
-			int32_t mon_smpl = (int32_t)(audio_in_buffer[i_sample] * 8388608.0f);
-			outL += mon_smpl;
-			outR += mon_smpl;
-		}
+		outL = (int32_t)(output_buffer_evens[i_sample] * dac_scale);
+		outR = (int32_t)(output_buffer_odds[i_sample] * dac_scale);
+
 		*dst++ = compress(outL);
-		*dst++ = compress(outR);
+		if (fsk_out_active) {
+			*dst++ = diag_fsk_next_sample();
+		} else {
+			*dst++ = compress(outR);
+		}
 	}
 
-	if (audio_in_sum < AUDIO_GATE_THRESHOLD) {
-		if (++audio_gate_ctr >= AUDIO_GATE_DEBOUNCE_LENGTH) { audio_in_gate = 1; audio_gate_ctr = 0; }
-	} else audio_in_gate = 0;
+	{
+		uint32_t dur = DWT->CYCCNT - audio_isr_start_cycles;
+		if (dur > diag_audio_isr_peak_cycles)
+			diag_audio_isr_peak_cycles = dur;
+		diag_log(DIAG_EVT_AUDIOISR, dur);
+	}
 }
 
 
 void update_oscillators(void){
-	int8_t chan;
 
-	check_reset_navigation();
-	update_wt();
-	read_all_keymodes();
+	extern volatile uint32_t diag_osc_tim_peak_cycles;
+	uint32_t osc_tim_start_cycles = DWT->CYCCNT;
 
-	combine_transpose_spread();
-	compute_transpositions();
-	update_transpose_cv();
+	/* Pattern advance + trigger arming lives here rather than in the
+	 * main loop: OSC_TIM's fixed ~1.8 kHz tick bounds the jitter between
+	 * a clock edge and the hit landing, which the superloop (variable
+	 * period, flash I/O in it) cannot. */
+	update_drum_triggers();
 
-	read_ext_trigs();
-
-	for (chan = 0; chan < NUM_CHANNELS; chan++){
-
-		if ((ui_mode != SELECT_PARAMS) && (ui_mode != RGB_COLOR_ADJUST)) {
-
-			read_noteon(chan);
-
-			if(ui_mode == PLAY)
-			{
-				read_lfomode(chan);
-				read_lfoto_vca_vco (chan);
-			}
-		}
-		update_pitch (chan);
-
-		if (ui_mode == PLAY)
-			update_noise(chan);
+	{
+		uint32_t dur = DWT->CYCCNT - osc_tim_start_cycles;
+		if (dur > diag_osc_tim_peak_cycles)
+			diag_osc_tim_peak_cycles = dur;
+		diag_log(DIAG_EVT_OSCTIM, dur);
 	}
-
 }
 
 void start_osc_updates(void){
 	start_timer_IRQ(OSC_TIM_number, &update_oscillators);
 }
 
-void update_sphere_wt(void){
-	render_full_sphere();
-	update_wt_interp();
-}
-
-void start_osc_interp_updates(void){
-	start_timer_IRQ(WT_INTERP_TIM_number, &update_sphere_wt);
-}
-
-void init_wt_osc(void) {
-	uint8_t  i, j;
-
-	for (i=0;i<NUM_CHANNELS;i++){
-		wt_osc.buffer_sel[i] 					= 0;
-		wt_osc.wt_interp_request[i]				= WT_INTERP_REQ_FORCE;
-
-		// Init standard playback state
-	
-		for (j=0; j<MAX_UNISON_VOICES; j++){
-			wt_osc.wt_head_pos[i][j] 		= 0;
-			wt_osc.wt_head_pos_inc[i][j]	= 3.0; //meaningless default
-			wt_osc.rh0[i][j]				= 0;
-			wt_osc.rh1[i][j]				= 0;
-			wt_osc.rhd[i][j]				= 0;
-			wt_osc.rhd_inv[i][j]			= 0;
-			wt_osc.rhd[i][j]				= 0;
-			wt_osc.rhd_inv[i][j]			= 0;
-		}
-
-		wt_osc.coherence_dc_I[i] = 0.0f;
-		wt_osc.coherence_dc_Q[i] = 0.0f;
-		wt_osc.coherence_env[i] = 0.0f;
-		wt_osc.plaits_last_cv_input[i] = 0.0f;
-		wt_osc.plaits_refractory_timer[i] = 0;
-	}
-
-	Plaits_Init();
-	Shim_LPG_Init();
-}

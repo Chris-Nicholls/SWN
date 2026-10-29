@@ -34,7 +34,7 @@
 #define FORCE_HW_TEST 0
 
 extern o_rotary 	rotary[NUM_ROTARIES];
-extern o_button 	button[NUM_ROTARIES];
+extern o_button 	button[NUM_BUTTONS];
 
 
 static inline uint8_t key_combo_enter_hardwaretest(void)

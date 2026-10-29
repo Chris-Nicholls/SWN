@@ -54,9 +54,6 @@
 #define XFADE_TIME_SEC					0.001
 #define XFADE_INC						(1.0/(F_SAMPLERATE * XFADE_TIME_SEC))
 
-#define AUDIO_GATE_THRESHOLD 			(-50000000.0)
-#define AUDIO_GATE_DEBOUNCE_LENGTH 		4
-
 // DISPLAY TIMERS: specified in # of tick
 #define OSC_PARAM_LOCK_TIMER_LIMIT		700
 #define WT_POS_LOCK_TIMER_LIMIT			2000
@@ -119,8 +116,6 @@ enum MuteNoteKeyStates {
 	ksw_MUTE,
 	ksw_NOTE,
 	ksw_KEYS,
-	ksw_KEYS_EXT_TRIG,
-	ksw_KEYS_EXT_TRIG_SUSTAIN,
 
 	NUM_MUTE_NOTE_KEY_STATES
 };
@@ -130,6 +125,11 @@ enum MuteNoteKeyStates {
 #define FW_V2X_ADDED_PARAMS_SIZE (sizeof(float) + sizeof(float)*2)  // pregain + resonator envelope
 #define FW_UNISON_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(uint8_t)*NUM_CHANNELS)
 #define FW_V2X2_EQ_PARAMS_SIZE (sizeof(uint16_t) * 6)  // 6 EQ slider values
+#define FW_CHORD_WEIGHTS_SIZE (sizeof(float) * 7)  // 7 overtone weights for chord generation
+#define FW_REVERB_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS + sizeof(float)*5)  // reverb_send[6] + time + diffusion + lp + input_gain + output_level
+/* Halo per-channel encoder bases: 4 floats (damping, noise_level,
+ * noise_color, wt_attack) + 1 int8_t (lpf_cutoff harmonic index). */
+#define FW_HALO_PARAMS_SIZE (sizeof(float)*NUM_CHANNELS*4 + sizeof(int8_t)*NUM_CHANNELS)
 
 // Soft clip pregain constants
 #define DEFAULT_SOFT_CLIP_PREGAIN 0.05f
@@ -142,8 +142,6 @@ enum PanStates {
 	pan_PANNING,
 	pan_CACHED_LEVEL,
 };
-
-#include "plaits_shim.h"
 
 typedef struct o_calc_params{
 	uint8_t		wtsel 					[NUM_CHANNELS];
@@ -220,17 +218,18 @@ typedef struct o_params{
 	uint8_t		wtsel_lock				[NUM_CHANNELS];	//For v1.0 this is always the same as osc_param_lock
 
 	//v1.2:
-	uint8_t		enabled_spheres			[14]; // Fixed at 14 bytes to match 112/8 range or similar legacy size
-	// Note: NUM_WAVETABLES is 100, so 13-14 bytes is sufficient.
-	// We keep this fixed to avoid breaking preset alignment when MAX_TOTAL_SPHERES changes.
+	uint8_t		enabled_spheres			[14]; // Fixed at 14 bytes; NUM_WAVETABLES is 100,
+	                                          // so 13-14 bytes is sufficient.  Kept fixed to
+	                                          // preserve preset alignment across MAX_TOTAL_SPHERES bumps.
 
 	//v2.0
 	float		pan						[NUM_CHANNELS];
 
-	// Resonator envelope
 	float		soft_clip_pregain;				// Pre-clipping gain for output soft clipper
-	float		resonator_attack_freq;				// Attack frequency in Hz (higher = faster)
-	float		resonator_decay_freq;				// Decay frequency in Hz (higher = faster)
+	/* Reserved slots — preserved to keep the preset binary layout
+	 * stable.  Reusing requires a preset version bump. */
+	float		_reserved_param_a;
+	float		_reserved_param_b;
 
 	// Unison mode (v2.x3)
 	float		unison_spread_amt		[NUM_CHANNELS];		// Detune amount (0.0 to 1.0)
@@ -240,12 +239,28 @@ typedef struct o_params{
 	// EQ settings (v2.x2)
 	uint16_t	eq_slider_values[6];				// EQ slider positions (2048 = flat)
 
-	// Plaits Params (v2.x3)
-	PlaitsParams plaits_params		[NUM_CHANNELS];
+	// Chord generation overtone weights (v2.x4)
+	float		chord_overtone_weights[7];			// Weights for fundamental + 6 overtones (0.0 to 1.0)
 
-	#define FW_PLAITS_PARAMS_SIZE (sizeof(PlaitsParams)*NUM_CHANNELS) 
+	// Reverb params (vF)
+	float		reverb_send			[NUM_CHANNELS];	// Per-channel send to reverb (0=dry, 1=wet)
+	float		reverb_time;						// Decay time [0,1]
+	float		reverb_diffusion;					// Allpass smearing [0,1]
+	float		reverb_lp;							// HF damping [0,1] (lower = darker)
+	float		reverb_input_gain;					// Pre-tanh drive [0,4] (1=unity, >1=saturate)
+	float		reverb_output_level;				// Output gain [0,2] (multiplied by fixed 6x boost)
 
-	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_PLAITS_PARAMS_SIZE];
+	/* Halo encoder bases (vH).  These are the per-channel "knob"
+	 * positions; the live physics value is base + CV-jack offset and is
+	 * recomputed every poll cycle in update_wt() (see params_update.c).
+	 * Saving the base keeps the encoder/CV split intact across recall. */
+	float		halo_damping			[NUM_CHANNELS];
+	float		halo_noise_level		[NUM_CHANNELS];
+	float		halo_noise_color		[NUM_CHANNELS];
+	float		halo_wt_attack		[NUM_CHANNELS];
+	int8_t		halo_lpf_cutoff		[NUM_CHANNELS];	// Harmonic index 1..42
+
+	uint8_t		PADDING					[FW_V1_PADDING - FW_V2_ADDED_PARAMS_SIZE - FW_V2X_ADDED_PARAMS_SIZE - FW_V2X2_EQ_PARAMS_SIZE - FW_UNISON_PARAMS_SIZE - FW_CHORD_WEIGHTS_SIZE - FW_REVERB_PARAMS_SIZE - FW_HALO_PARAMS_SIZE];
 } o_params;
 
 void 		check_reset_navigation(void);
@@ -258,7 +273,6 @@ void 		init_calc_params(void);
 void 		set_pitch_params_to_ttone(void);
 
 void 		read_noteon(uint8_t i);
-void 		read_ext_trigs(void);
 void 		read_level_and_pan(uint8_t chan);
 float		default_pan(uint8_t chan);
 void 		set_master_gain(void);
@@ -280,6 +294,9 @@ void 		update_wt_head_pos_inc(uint8_t chan);
 void 		update_noise(uint8_t chan);
 
 void 		read_freq(void);
+
+// --------- CHORD MODE ---------
+uint8_t 	is_channel_in_chord_mode(uint8_t chan);
 
 
 // --------- LOCK ---------

@@ -204,7 +204,7 @@ void update_rotary_presses(uint32_t elapsed_time){
 	uint8_t 			i;
 	uint16_t 			t;
 	static uint16_t 	rotary_state_c_buf[NUM_ROTARIES] = {0xffff};
-	static uint32_t 	detection_tmr[NUM_BUTTONS] = {0};
+	static uint32_t 	detection_tmr[NUM_ROTARIES] = {0};
 
 	for (i = 0; i < NUM_ROTARIES; i++){
 

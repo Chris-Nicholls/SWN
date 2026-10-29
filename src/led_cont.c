@@ -44,21 +44,16 @@
 #include "drivers/mono_led_driver.h"
 #include "system_settings.h"
 #include "ui_modes.h"
-#include "wavetable_editing.h"
 #include "key_combos.h"
+#include "drum_ui.h"
+#include "drum_preset.h"
 
 #include "drivers/leds_pwm.h"
-#include "eq.h"
-#include "wavetable_recording.h"
-#include "wavetable_editing.h"
-#include "wavetable_saveload.h"
 #include "quantz_scales.h"
 #include "calibrate_voct.h"
-#include "wavetable_saveload_UI.h"
 #include "flash_params.h"
 #include "timekeeper.h"
 #include "ui_modes.h"
-#include "wavetable_play_export.h"
 #include "oscillator.h"
 #include "hardware_controls.h"
 #include "oscillator.h"
@@ -78,9 +73,7 @@ extern 		o_params 			params;
 extern		o_calc_params		calc_params;
 extern 		o_lfos				lfos;
 extern		o_preset_manager	preset_mgr;
-extern 		o_spherebuf	 		spherebuf;
 extern		o_systemSettings	system_settings;
-extern		o_wt_osc			wt_osc;
 
 // Hardware
 extern 		o_monoLed   		monoLed[NUM_MONO_LED];
@@ -99,7 +92,6 @@ const uint8_t OCT_OUTRING_MAP[NUM_LED_OUTRING] 		    	= { 9, 10, 11, 12, 13, 14,
 // Color palettes
 extern uint32_t colorPalette[NUM_LED_COLORS][NUM_PALETTE_COLORS];
 extern const enum colorCodes qtz_scale_colors[NUM_QTZ_SCALES];
-extern const enum colorCodes fx_colors[NUM_FX];
 
 // TABLES
 extern const float 	exp_1voct_10_41V[4096];
@@ -207,46 +199,48 @@ void init_led_cont(void)
 	key_sw_mode_colors[ksw_MUTE] = ledc_WHITE;
 	key_sw_mode_colors[ksw_NOTE] = ledc_PINK;
 	key_sw_mode_colors[ksw_KEYS] = ledc_PURPLE;
-	key_sw_mode_colors[ksw_KEYS_EXT_TRIG] = ledc_GOLD;
-	key_sw_mode_colors[ksw_KEYS_EXT_TRIG_SUSTAIN] = ledc_BUTTERCUP;
 }
 
 void update_display_at_encoder_press(void)
 {
-	if (rotary_pressed(rotm_TRANSPOSE))
-	{
-		if (switch_pressed(FINE_BUTTON))
-			start_ongoing_display_finetune();
-		else
-			start_ongoing_display_transpose();
-	}
+	/* TRANSPOSE-held and OCT-held used to show the wavetable engine's
+	 * transpose/finetune/octave/scale overlays -- but on drum-station,
+	 * both encoders are entirely owned by drum_ui.c's own push+turn
+	 * controls now (TRANSPOSE -> humanize, OCT -> chaos/ghost), which
+	 * arm their own ONGOING_DISPLAY_DRUM_PARAM overlay via
+	 * start_ongoing_display_drum_param() on every encoder tick. This
+	 * legacy code ran unconditionally alongside that, since it's keyed
+	 * off nothing but the raw button-held state -- it doesn't fire once
+	 * per turn like drum_ui's own display call, it fires every single
+	 * LED-update tick for as long as the button is held, so it kept
+	 * re-arming the wavetable-engine overlay (a solid red/green octave
+	 * gradient, or a per-channel-colour transpose ring) over whatever
+	 * drum_ui had just shown, drowning out humanize/ghost/chaos
+	 * feedback almost completely. Left removed rather than gated, since
+	 * these two encoders have no other job left to protect here. */
 
-	if (rotary_pressed(rotm_OCT) && !switch_pressed(FINE_BUTTON) && (led_cont.ongoing_display != ONGOING_DISPLAY_SCALE))
-		start_ongoing_display_octave();
-
-	else if (rotary_pressed(rotm_OCT) && switch_pressed(FINE_BUTTON))
-		start_ongoing_display_scale();
-
-	if (!UIMODE_IS_WT_RECORDING_EDITING(ui_mode) && rotary_pressed(rotm_WAVETABLE))
-		start_ongoing_display_sphere_sel();
-
-	static uint8_t cpu_toggle_handled = 0;
-	if (rotary_pressed(rotm_LFOSPEED) == SHORT_PRESSED) {
-		if (!cpu_toggle_handled) {
-			cpu_toggle_handled = 1;
-			if (led_cont.ongoing_display == ONGOING_DISPLAY_CPU_USAGE)
-				led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
-			else
-				start_ongoing_display_cpu_usage();
-		}
-	} else {
-		cpu_toggle_handled = 0;
-	}
+	/* Holding LFOSPEED used to toggle the CPU-usage debug display here,
+	 * which also silently rerouted the right output channel to debug
+	 * FSK audio instead of the kit (see fsk_out_active in
+	 * process_audio_block_codec(), oscillator.c) -- surprising on a
+	 * drum station, where holding LFOSPEED is now a normal gesture (it
+	 * arms the density->CV-target hold in read_voice_encoders(), and is
+	 * about to be turned for step count via its push+turn). Removed
+	 * rather than gated, same as the TRANSPOSE/OCT overlays above --
+	 * there's no drum-station use for this debug toggle to protect. */
 }
 
 void update_led_flash(void)
 {
 	led_cont.flash_state = (HAL_GetTick()/TICKS_PER_MS) & 0x080; //128ms flash period
+
+	/* Age the per-channel hit flashes here rather than in the button
+	 * renderer, so they still expire while an ongoing-display overlay
+	 * owns the button LEDs. */
+	for (uint8_t c = 0; c < NUM_CHANNELS; c++) {
+		if (drum_trig_flash[c])
+			drum_trig_flash[c]--;
+	}
 }
 
 void update_button_leds(void){
@@ -269,7 +263,25 @@ void update_button_leds(void){
 
 			if (i<NUM_CHANNELS){
 
-				if(led_cont.ongoing_display){
+				if (drum_ui_performance_mode()) {
+					/* Performance mode: buttons show mute state instead
+					 * of selection -- lit for "will sound", dark for
+					 * "muted". Takes priority over any lingering
+					 * ongoing_display/global-edit-mode overlay below,
+					 * since none of what drives those is reachable here
+					 * anyway (read_drum_ui() locks all of it out while
+					 * this switch is flipped). A pending FINE+press
+					 * toggle (queued for the next bar boundary) blinks
+					 * between its current and target state, so a cued
+					 * change reads differently from one that already
+					 * landed. */
+					uint8_t muted = drum_chan[i].muted;
+					if (drum_ui_mute_pending(i) && led_cont.flash_state)
+						muted = !muted;
+					set_rgb_color_by_array(&led_cont.button[i], CH_COLOR_MAP[i], muted ? 0.03f : 0.5f);
+				}
+
+				else if(led_cont.ongoing_display){
 
 					if (params.osc_param_lock[i] && lock_flash_state())
 						lock_brightness = 0;
@@ -333,15 +345,12 @@ void update_button_leds(void){
 							tri_period = LFO_MODE_FLASH_PERIOD;
 							tri_phase = (now + animation_phase + ((tri_period*2*(NUM_CHANNELS-i))/NUM_CHANNELS)) % (tri_period*2);
 
-							if (lfos.mode[i]==lfot_TRIG){
-								brightness = (tri_phase < (tri_period/NUM_CHANNELS)) ? 1.0 : 0.05;
-								color = ledc_AQUA;
+							if (lfos.mode[i]==lfot_LPG){
+								// LPG mode: show envelope state - bright flash on trigger, decay
+								brightness = lfos.out_lpf[i];
+								color = ledc_FUSHIA;
 							}
-							else if (lfos.mode[i]==lfot_GATE){
-								brightness = (tri_phase > tri_period) ? 1.0 : 0.0;
-								color = ledc_LIGHT_BLUE;
-							}
-							else{ //lfot_SHAPE
+							else{ //lfot_LFO (standard LFO mode)
 								tri_wave = _FOLD_F(tri_phase, tri_period);
 								brightness = (float)(tri_wave/tri_period);
 								color = ledc_BLUE;
@@ -350,7 +359,7 @@ void update_button_leds(void){
 
 						} else {
 							brightness = 0.2;
-							color = ledc_BLUE;
+							color = (lfos.mode[i]==lfot_LPG) ? ledc_FUSHIA : ledc_BLUE;
 						}
 						set_rgb_color_brightness(&led_cont.button[i], color, brightness);
 					}
@@ -359,27 +368,24 @@ void update_button_leds(void){
 					}
 				}
 
+				else if (drum_global_edit_mode) {
+					/* Every channel button pulses the same way while a
+					 * knob edit hits all of them at once -- there's no
+					 * single "selected" channel to distinguish here.
+					 * Slow pulse via the existing flash clock so it
+					 * reads as a distinct mode, not just "all selected". */
+					brightness = led_cont.flash_state ? 0.5f : 0.15f;
+					set_rgb_color_brightness(&led_cont.button[i], ledc_WHITE, brightness);
+				}
+
 				else { //no ongoing_display
 
-					if (params.key_sw[i] == ksw_MUTE)
-					{
-						if (params.osc_param_lock[i] && lock_flash_state())
-							brightness = 0;
-						else
-							brightness = F_MAX_BRIGHTNESS;
-
-						if (!params.note_on[i])
-							brightness = F_MAX_BRIGHTNESS - brightness;
-					}
-					else{
-
-						if (params.osc_param_lock[i] && lock_flash_state())
-							brightness = 0;
-						else
-							brightness = 0.30 + lfos.out_lpf[i]/2.0;
-					}
-
-					set_rgb_color_brightness(&led_cont.button[i], key_sw_mode_colors[params.key_sw[i]], brightness);
+					/* Drum play: a steady mid glow for the edit-focus
+					 * channel, dim otherwise. No flash-on-hit -- with
+					 * six channels firing independently this read as
+					 * distracting noise more than useful feedback. */
+					brightness = (i == drum_selected_chan) ? 0.35f : 0.08f;
+					set_rgb_color_by_array(&led_cont.button[i], CH_COLOR_MAP[i], brightness);
 				}
 			}
 
@@ -392,7 +398,16 @@ void update_button_leds(void){
 					color = (system_settings.selbus_can_save == SELBUS_SAVE_ENABLED) ? ledc_MED_RED : ledc_DIM_RED;
 					set_rgb_color(&led_cont.button[butm_LFOMODE_BUTTON], color);
 				}
-				else 
+				else if (i == butm_LFOVCA_BUTTON) {
+					/* This button doubles as the pattern-engine toggle
+					 * (read_pattern_engine_button() in drum_ui.c), so its
+					 * own LED is the natural place for a steady reminder
+					 * of which mode is active -- same palette as the
+					 * brief whole-ring flash on the moment it's pressed
+					 * (see display_drum_engine()). */
+					set_rgb_color(&led_cont.button[i], (drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? ledc_GOLD : ledc_AQUA);
+				}
+				else
 				{
 					if (!calc_params.keymode_pressed)
 					{
@@ -417,42 +432,6 @@ void update_button_leds(void){
 
 		} //if (ui_mode==PLAY)
 
-		// WT RECORDING / EDITING
-		else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode)){
-
-			// mute
-			if (i < NUM_CHANNELS){
-				brightness = spherebuf.fx[i][(uint8_t)(calc_params.wt_pos[0][0])][(uint8_t)(calc_params.wt_pos[1][0])][(uint8_t)(calc_params.wt_pos[2][0])];
-				brightness = exp_1voct_10_41V[_SCALE_F2U16(brightness, 0.0, 1.0, 2700, 4095)] / 1370.0;
-
-				set_rgb_color_brightness(&led_cont.button[i], fx_colors[i], brightness);
-			}
-
-			// rec button
-			else if (i==butm_LFOVCA_BUTTON){
-				if (ui_mode==WTREC_WAIT)		brightness = ((HAL_GetTick()/TICKS_PER_MS) & 0x040) ? 1 : 0;
-				else if (ui_mode==WTRECORDING) 	brightness = 1;
-				else 							brightness = led_cont.flash_state;
-
-				set_rgb_color_brightness(&led_cont.button[i], ledc_RED, brightness);
-			}
-
-			// monitor button
-			else if (i==butm_LFOMODE_BUTTON){
-
-				if (ui_mode==WTTTONE) 			color = ledc_PURPLE;
-				else if (ui_mode==WTREC_WAIT) 	color = ledc_OFF;
-				else 							color = ledc_GREEN;
-
-				if (ui_mode == WTEDITING)
-					brightness = led_cont.flash_state;
-				else
-					brightness = 1;
-
-				set_rgb_color_brightness(&led_cont.button[i], color, brightness);
-			}
-		}
-
 		else if (ui_mode==VOCT_CALIBRATE)
 		{
 			color = ledc_OFF;
@@ -468,6 +447,7 @@ void update_button_leds(void){
 			}
 			set_rgb_color(&led_cont.button[i], color);
 		}
+
 		set_pwm_led(led_button_map[i], &led_cont.button[i]);
 	}
 }
@@ -478,9 +458,6 @@ void update_encoder_leds(void){
 
 	if (led_cont.ongoing_display == ONGOING_DISPLAY_RECORD)
 		color = ledc_FUSHIA;
-
-	else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode))
-		color = ledc_GOLD;
 
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_TRANSPOSE)
 		color = ledc_FUSHIA;
@@ -506,7 +483,6 @@ void update_encoder_leds(void){
 void update_mono_leds(void){
 	uint8_t i;
 	static uint32_t slider_pwm=0;
-	float exp;
 
 	// SLIDERS
 
@@ -519,30 +495,6 @@ void update_mono_leds(void){
 		mono_led_off(mledm_SLIDER_E);
 		mono_led_off(mledm_SLIDER_F);
 	}
-	else if (switch_pressed(FINE_BUTTON))
-	{
-		// Fine held: LEDs show stored EQ position relative to center
-		// LED brightness indicates how far EQ is from flat (50%)
-		if (slider_pwm-- == 0)
-		{
-			slider_pwm = 32;  // 32 steps of brightness
-			for (i = 0; i < NUM_CHANNELS; i++) {
-				mono_led_off(i);
-			}
-		}
-		else
-		{
-			// Calculate brightness for each slider based on distance from center
-			for (i = 0; i < NUM_CHANNELS; i++) {
-				int16_t eq_val = (int16_t)params.eq_slider_values[i];
-				float distance = fabsf((float)(eq_val - EQ_SLIDER_MID)) / (float)EQ_SLIDER_MID;
-				float brightness = distance * system_settings.global_brightness;
-				if (brightness > 0.01f && (brightness * 32.0f > (32 - slider_pwm))) {
-					mono_led_on(i);
-				}
-			}
-		}
-	}
 	else {
 
 		if (slider_pwm-- == 0)
@@ -554,16 +506,23 @@ void update_mono_leds(void){
 			}
 		}
 		else{
+			/* Software-PWM breathing pulse (~1.4s period) for any
+			 * slider currently in "pickup" -- drum_ui.c is ignoring it
+			 * until it's physically moved back to match a just-loaded
+			 * preset's k/density, so its LED doesn't show the real
+			 * value right now (see drum_ui_request_slider_pickup()).
+			 * Non-pending sliders stay dark: this loop used to dim
+			 * them by the old EQ-level system, which no longer means
+			 * anything post-drum-station and would otherwise just
+			 * sit here doing nothing useful. */
+			uint32_t phase_ms = (HAL_GetTick() / TICKS_PER_MS) % 1400;
+			float tri = (phase_ms < 700) ? (float)phase_ms / 700.0f
+			                              : (float)(1400 - phase_ms) / 700.0f;
+			uint32_t pulse_threshold = (uint32_t)(tri * 32.0f);
+
 			for (i=0;i<NUM_CHANNELS;i++) {
-				uint32_t level = (uint32_t)calc_params.level[i];
-
-				if (calc_params.adjusting_pan_state[i] == pan_CACHED_LEVEL && cached_param_flash_state())
-					level = level < 3000 ? 4095 : 0;
-
-				exp = exp_1voct_10_41V[level] * system_settings.global_brightness;
-				if ((level > 50) && (exp > (slider_pwm*43))){
+				if (drum_ui_slider_pickup_pending(i) && slider_pwm < pulse_threshold)
 					mono_led_on(i);
-				}
 			}
 		}
 	}
@@ -626,20 +585,7 @@ void update_audioin_led(void)
 
 	o_rgb_led rgb;
 
-	if (ui_mode == WTREC_WAIT)
-		set_rgb_color_brightness(&rgb, ledc_RED, led_cont.flash_state);
-
-	else if (jack_unplugged(WAVEFORMIN_SENSE))
-		set_rgb_color(&rgb, ledc_OFF);
-
-	else if (ui_mode == WTRECORDING)
-		set_rgb_color(&rgb, ledc_RED);
-
-	else if ((ui_mode == WTMONITORING) || (ui_mode == WTTTONE))
-		set_rgb_color(&rgb, ledc_GREEN);
-
-	else
-		set_rgb_color(&rgb, ledc_OFF);
+	set_rgb_color(&rgb, ledc_OFF);
 
 	set_pwm_led(ledm_AUDIOIN, &rgb);
 
@@ -680,22 +626,11 @@ void calculate_lfo_leds(void)
 {
 	uint8_t chan=0;
 	float brightness;
-	uint8_t resonator_mode_active;
-
-	// Check if resonator mode is active (waveform input jack plugged)
-	resonator_mode_active = jack_plugged(WAVEFORMIN_SENSE) && (ui_mode == PLAY);
 
 	for (chan = 0; chan < NUM_CHANNELS; chan++)
 	{
-		// Resonator mode: show coherence levels when LFO->VCA is enabled
-		// Square to match VCA response curve
-		if (resonator_mode_active && lfos.to_vca[chan]) {
-			float coh = wt_osc.coherence_env[chan];
-			brightness = coh * coh * RESONATOR_LED_SCALE;
-			if (brightness > 1.0f) brightness = 1.0f;
-		}
 		// Audio rate and shape selection- -> LFO static brightness
-		else if  ( (params.key_sw[chan] == ksw_MUTE) && (lfos.audio_mode[chan] || led_cont.lfoshape_timeout[chan]) ){
+		if  ( (params.key_sw[chan] == ksw_MUTE) && (lfos.audio_mode[chan] || led_cont.lfoshape_timeout[chan]) ){
 			brightness 	= lfos.gain[chan];
 		}
 		else
@@ -726,31 +661,7 @@ void calculate_led_ring(void){
 
 	update_ongoing_display_timers();
 
-	if (ui_mode == WTRECORDING) {
-		display_wt_recbuff_fill_outring();
-		display_wtpos_inring();
-	}
-	else if (ui_mode == WTREC_WAIT) {
-		display_wt_rec_wait();
-		display_wtpos_inring();
-	}
-
-	else if (UIMODE_IS_WT_RECORDING_EDITING(ui_mode)) {
-		if (led_cont.ongoing_display == ONGOING_DISPLAY_SOFT_CLIP) {
-		display_soft_clip();
-		return;
-	}	else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_SAVE) {
-			display_sphere_save();
-		}
-		else if (led_cont.ongoing_display == ONGOING_DISPLAY_SPHERE_PLAYEXPORT) {
-			display_sphere_play_export();
-		}
-		else {
-			display_wt_recbuf_sel_outring();
-			display_wtpos_inring();
-		}
-	}
-	else if (ui_mode==VOCT_CALIBRATE) {
+	if (ui_mode==VOCT_CALIBRATE) {
 		turn_outring_off();
 
 		for (i = 0; i < NUM_LED_INRING; i++){
@@ -776,26 +687,366 @@ void calculate_led_ring(void){
 				display_preset();
 				break;
 
-
-
-			case ONGOING_DISPLAY_SPHERE_SEL:
-				display_sphere_sel();
-				break;
-
-			case ONGOING_DISPLAY_UNISON:
-				display_unison();
-				break;
-
 			case ONGOING_DISPLAY_CPU_USAGE:
 				display_cpu_usage();
 				break;
 
+			case ONGOING_DISPLAY_DRUM_PARAM:
+				display_drum_param();
+				break;
+
+			case ONGOING_DISPLAY_DRUM_PRESET:
+				display_drum_preset();
+				break;
+
+			case ONGOING_DISPLAY_DRUM_ENGINE:
+				display_drum_engine();
+				break;
+
+			case ONGOING_DISPLAY_DRUM_CV_MODE:
+				display_drum_cv_mode();
+				break;
+
+			case ONGOING_DISPLAY_DRUM_VOICE:
+				display_drum_voice();
+				break;
+
+			case ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET:
+				display_drum_automation_target();
+				break;
+
 			default:
-				display_wt_pos();
-				flash_wt_lock();
+				display_drum_pattern();
 				break;
 		}
 	}
+}
+
+/* Outer ring = the selected channel's euclidean pattern, 1 LED per step:
+ * ring position i is step i for i<n, and stays off for i>=n (e.g. an
+ * 8-step pattern lights only 8 of the 18 LEDs -- no stretching to fill
+ * the ring).  Active steps lit dim, playhead bright.  Inner ring = one
+ * LED per channel, lit while that channel is flashing from a hit.
+ * In Grids mode a Grids-driven channel gets its own outer-ring view
+ * instead (32 steps mapped proportionally onto the 18 LEDs); Crash/
+ * Other, which have no Grids data, keep the euclidean view in both
+ * modes. */
+void display_drum_pattern(void)
+{
+	const EuclidChannelState *e = &drum_chan[drum_selected_chan].euclid;
+	int8_t grids_part = (drum_pattern_engine == PATTERN_ENGINE_GRIDS)
+	                  ? drum_chan_grids_part(drum_selected_chan) : -1;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+		float bri = 0.0f;
+		enum ledColors color = ledc_AQUA;
+
+		/* Grids' 32 steps don't fit the 18-LED ring one-per-step, so
+		 * each LED stands for the step it lands on proportionally,
+		 * with brightness from that step's interpolated level rather
+		 * than a binary on/off. */
+		if (grids_part >= 0) {
+			uint8_t step = (uint8_t)((uint16_t)i * GRIDS_NUM_STEPS / NUM_LED_OUTRING);
+			uint8_t playhead = (uint8_t)((uint16_t)grids_state.step * NUM_LED_OUTRING / GRIDS_NUM_STEPS);
+
+			if (i == playhead) {
+				bri = F_MAX_BRIGHTNESS;
+				color = ledc_WHITE;
+			} else {
+				uint8_t level = grids_read_map((uint8_t)grids_part, step, grids_x, grids_y);
+				bri = F_MAX_BRIGHTNESS * (0.02f + 0.23f * (level / 255.0f));
+			}
+
+			set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+			continue;
+		}
+
+		if (i < e->n) {
+			if (i == e->current_step) {
+				bri = F_MAX_BRIGHTNESS;
+				color = ledc_WHITE;
+			} else if (euclid_step_active(e, i)) {
+				bri = F_MAX_BRIGHTNESS * 0.25f;
+			} else {
+				bri = F_MAX_BRIGHTNESS * 0.02f;
+			}
+		}
+
+		set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+	}
+
+	for (i = 0; i < NUM_LED_INRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_INRING);
+		float bri = 0.0f;
+		if (i < NUM_CHANNELS)
+			bri = drum_trig_flash[i] ? F_MAX_BRIGHTNESS : 0.05f;
+		set_rgb_color_brightness(&led_cont.inring[j],
+		                         (i == drum_selected_chan) ? ledc_WHITE : ledc_AQUA,
+		                         bri);
+	}
+}
+
+/* Outer ring bar-graph for whichever of filter/decay/other is being
+ * turned: floor(value*18) LEDs solid, the next one partially lit for
+ * sub-step resolution, colour-coded per param so Depth/Latitude/
+ * Longitude are visually distinct at a glance. */
+void display_drum_param(void)
+{
+	const o_drum_chan *d = &drum_chan[drum_selected_chan];
+	float value;
+	enum ledColors color;
+	uint8_t i;
+
+	switch (led_cont.ongoing_drum_param) {
+		case DRUM_PARAM_DISP_DECAY: value = d->decay; color = ledc_YELLOW; break;
+		case DRUM_PARAM_DISP_OTHER: value = d->other; color = ledc_PURPLE; break;
+		case DRUM_PARAM_DISP_SPEED:
+			/* clock_divmult_id ranges LFO_MIN_DIVMULT_ID..LFO_MAX_DIVMULT_ID,
+			 * not 0..1 like the other three -- normalize it so the same
+			 * bar-graph code works unchanged. Unity (LFO_UNITY_DIVMULT_ID)
+			 * lands well left of center since the multiply range above it
+			 * is much wider than the divide range below it. Grids mode
+			 * shows the one shared rate instead of the selected channel's
+			 * own (which isn't what's actually being turned there) --
+			 * except for channels E/F, which have no Grids data and keep
+			 * turning their own rate even in Grids mode (see
+			 * kChanGridsPart / drum_chan_grids_part()). */
+			{
+				uint8_t chan_grids_driven = (drum_pattern_engine == PATTERN_ENGINE_GRIDS)
+				                          && (drum_chan_grids_part(drum_selected_chan) >= 0);
+				float divmult_id = chan_grids_driven
+				                  ? grids_clock_divmult_id : d->clock_divmult_id;
+				value = (divmult_id - LFO_MIN_DIVMULT_ID) / (float)(LFO_MAX_DIVMULT_ID - LFO_MIN_DIVMULT_ID);
+			}
+			color = ledc_MED_GREEN;
+			break;
+		case DRUM_PARAM_DISP_HUMANIZE: value = d->humanize; color = ledc_CORAL; break;
+		case DRUM_PARAM_DISP_GHOST:  value = d->ghost_amount;      color = ledc_LIGHT_GREEN; break;
+		case DRUM_PARAM_DISP_CHAOS:
+			/* Grids has one shared chaos; Euclid's is per-channel --
+			 * see chaos_amount's doc comment in drum_ui.h. */
+			value = (float)((drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? pattern_chaos : d->chaos_amount) / 255.0f;
+			color = ledc_RED;
+			break;
+		case DRUM_PARAM_DISP_FILTER_RANDOM: value = d->filter_random; color = ledc_DEEP_BLUE;  break;
+		case DRUM_PARAM_DISP_DECAY_RANDOM:  value = d->decay_random;  color = ledc_BUTTERCUP;  break;
+		case DRUM_PARAM_DISP_OTHER_RANDOM:  value = d->other_random;  color = ledc_BRIGHTPINK; break;
+		case DRUM_PARAM_DISP_GRIDS_X:     value = (float)grids_x     / 255.0f; color = ledc_BLUE;   break;
+		case DRUM_PARAM_DISP_GRIDS_Y:     value = (float)grids_y     / 255.0f; color = ledc_FUSHIA;  break;
+		default:                    value = d->filter; color = ledc_AQUA;  break;
+	}
+
+	float lit_f = _CLAMP_F(value, 0.0f, 1.0f) * NUM_LED_OUTRING;
+	uint8_t lit_full = (uint8_t)lit_f;
+	float   lit_frac = lit_f - (float)lit_full;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+		float bri;
+
+		if (i < lit_full)
+			bri = F_MAX_BRIGHTNESS;
+		else if (i == lit_full)
+			bri = F_MAX_BRIGHTNESS * lit_frac;
+		else
+			bri = 0.0f;
+
+		set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+	}
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_param(enum drumParamDisplay which)
+{
+	led_cont.ongoing_display     = ONGOING_DISPLAY_DRUM_PARAM;
+	led_cont.ongoing_drum_param  = which;
+	led_cont.ongoing_timeout     = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Outer ring = preset slots, one LED per slot (DRUM_PRESET_NUM_SLOTS=16
+ * fits directly onto the 18-LED ring with 2 spare, unlit positions):
+ * filled slots dim yellow, the selected slot bright -- white while just
+ * browsing, green right after a load, red right after a save. */
+void display_drum_preset(void)
+{
+	uint8_t selected = drum_preset_selected_slot();
+	uint8_t i;
+
+	enum ledColors hover_color;
+	switch (led_cont.ongoing_drum_preset_activity) {
+		case DRUM_PRESET_DISP_LOADED: hover_color = ledc_MED_GREEN; break;
+		case DRUM_PRESET_DISP_SAVED:  hover_color = ledc_RED;       break;
+		default:                      hover_color = ledc_WHITE;     break;
+	}
+
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		uint8_t j = rotate_origin(i, NUM_LED_OUTRING);
+		float bri = 0.0f;
+		enum ledColors color = ledc_YELLOW;
+
+		if (i == selected) {
+			bri = F_MAX_BRIGHTNESS;
+			color = hover_color;
+		} else if (i < DRUM_PRESET_NUM_SLOTS && drum_preset_slot_filled(i)) {
+			bri = F_MAX_BRIGHTNESS * 0.2f;
+		}
+
+		set_rgb_color_brightness(&led_cont.outring[j], color, bri);
+	}
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], hover_color, 0.0f);
+}
+
+void start_ongoing_display_drum_preset(enum drumPresetDisplay activity)
+{
+	led_cont.ongoing_display              = ONGOING_DISPLAY_DRUM_PRESET;
+	led_cont.ongoing_drum_preset_activity = activity;
+	led_cont.ongoing_timeout              = DRUM_PRESET_DISPLAY_TIMER_LIMIT;
+}
+
+/* Brief whole-ring flash confirming the kit-wide pattern algorithm just
+ * changed: aqua (the colour the euclidean ring already uses) for
+ * euclidean, gold for Grids. No parameter to read off it -- it exists
+ * purely so a press of an otherwise silent button is visibly
+ * acknowledged. */
+void display_drum_engine(void)
+{
+	enum ledColors color = (drum_pattern_engine == PATTERN_ENGINE_GRIDS) ? ledc_GOLD : ledc_AQUA;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, F_MAX_BRIGHTNESS);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_engine(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_ENGINE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* One colour per DrumParamId, shared by display_drum_cv_mode() and
+ * display_drum_automation_target() below -- reusing the exact colour
+ * display_drum_param() already shows that same parameter's own
+ * bar-graph wherever one exists, so a flash reads as "that parameter"
+ * at a glance rather than an arbitrary new colour to memorize. */
+static const enum ledColors kDrumParamColor[NUM_DRUM_PARAMS] = {
+	ledc_AQUA,		/* DRUM_PARAM_FILTER */
+	ledc_DEEP_BLUE,	/* DRUM_PARAM_FILTER_RANDOM */
+	ledc_YELLOW,	/* DRUM_PARAM_DECAY */
+	ledc_BUTTERCUP,	/* DRUM_PARAM_DECAY_RANDOM */
+	ledc_PURPLE,	/* DRUM_PARAM_OTHER */
+	ledc_BRIGHTPINK,/* DRUM_PARAM_OTHER_RANDOM */
+	ledc_GOLD,		/* DRUM_PARAM_PITCH */
+	ledc_CORAL,		/* DRUM_PARAM_HUMANIZE */
+	ledc_LIGHT_GREEN,/* DRUM_PARAM_GHOST */
+	ledc_RED,		/* DRUM_PARAM_CHAOS */
+	ledc_MED_GREEN,	/* DRUM_PARAM_SPEED */
+	ledc_BLUE,		/* DRUM_PARAM_DENSITY */
+	ledc_FUSHIA,	/* DRUM_PARAM_ROTATION */
+	ledc_MED_BLUE,	/* DRUM_PARAM_STEPS */
+};
+
+/* Actually flashes (on/off, via led_cont.flash_state -- the same
+ * ~256ms-period toggle the mute/pending-slider blinks already use)
+ * rather than a solid hold, confirming a channel's CV target just got
+ * routed by holding it and turning a control (see
+ * assign_cv_target_if_held() in drum_ui.c). Outer ring only --
+ * display_drum_automation_target() below is the same idiom but also
+ * flashes the inner ring, so the two are visually distinguishable at a
+ * glance even though they can share a colour. Shows the held channel,
+ * not drum_selected_chan -- the two can differ (holding one channel
+ * while a knob still edits whichever channel is selected). Falls back
+ * to drum_selected_chan if nothing's held (shouldn't happen -- this is
+ * only ever armed from inside a hold -- but avoids reading a stale
+ * channel's mode if it ever does). */
+void display_drum_cv_mode(void)
+{
+	int8_t held = drum_ui_held_chan();
+	uint8_t chan = (held >= 0) ? (uint8_t)held : drum_selected_chan;
+	uint8_t cv_mode = drum_chan[chan].cv_mode;
+	enum ledColors color = (cv_mode == DRUM_CV_TARGET_TRIGGER) ? ledc_WHITE : kDrumParamColor[cv_mode - 1];
+	float bri = led_cont.flash_state ? F_MAX_BRIGHTNESS : 0.0f;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, bri);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_cv_mode(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_CV_MODE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Same flash idiom as display_drum_cv_mode() above, for automation's
+ * own independent target (see assign_automation_target_if_held() and
+ * automation_target's doc comment in drum_ui.h) -- but flashes *both*
+ * rings, not just the outer one, so routing automation reads visibly
+ * different from routing CV even when they land on the same parameter
+ * (and colour). No DRUM_CV_TARGET_TRIGGER-equivalent case here --
+ * automation_target is always some real DrumParamId. */
+void display_drum_automation_target(void)
+{
+	int8_t held = drum_ui_held_chan();
+	uint8_t chan = (held >= 0) ? (uint8_t)held : drum_selected_chan;
+	enum ledColors color = kDrumParamColor[drum_chan[chan].automation_target];
+	float bri = led_cont.flash_state ? F_MAX_BRIGHTNESS : 0.0f;
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, bri);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, bri);
+}
+
+void start_ongoing_display_drum_automation_target(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
+}
+
+/* Brief whole-ring flash confirming the selected channel's voice just
+ * cycled, colour-coded by DSP family (the "sound engine" the LFOMODE
+ * button now cycles within -- see read_voice_select_button() in
+ * drum_ui.c) rather than by individual voice, since a category can
+ * hold far more voices than there are easily-distinguishable colours.
+ * Same one-shot idiom as display_drum_engine()/display_drum_cv_mode(). */
+void display_drum_voice(void)
+{
+	static const enum ledColors kEngineColor[NUM_DRUM_ENGINES] = {
+		ledc_YELLOW,	/* DRUM_ENGINE_MPUMP */
+		ledc_PURPLE,	/* DRUM_ENGINE_DELUGE */
+		ledc_MED_GREEN,	/* DRUM_ENGINE_CHIP */
+		ledc_CORAL,		/* DRUM_ENGINE_ROLLER */
+		ledc_AQUA,		/* DRUM_ENGINE_PLAITS */
+	};
+	DrumVoiceEngine engine = drum_voice_engine_of(drum_chan[drum_selected_chan].ops);
+	enum ledColors color = kEngineColor[engine];
+	uint8_t i;
+
+	for (i = 0; i < NUM_LED_OUTRING; i++)
+		set_rgb_color_brightness(&led_cont.outring[rotate_origin(i, NUM_LED_OUTRING)], color, F_MAX_BRIGHTNESS);
+
+	for (i = 0; i < NUM_LED_INRING; i++)
+		set_rgb_color_brightness(&led_cont.inring[rotate_origin(i, NUM_LED_INRING)], color, 0.0f);
+}
+
+void start_ongoing_display_drum_voice(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_DRUM_VOICE;
+	led_cont.ongoing_timeout = DRUM_PARAM_DISPLAY_TIMER_LIMIT;
 }
 
 void turn_outring_off(void)
@@ -936,6 +1187,106 @@ void display_wt_pos(void)
 	}
 }
 
+void display_wt_seed_pos(void)
+{
+	uint8_t i, j;
+
+	/* Start with all outring LEDs dark, then accumulate per-channel
+	 * split cursors.  Saturate at 4095 to avoid wrap on overlap. */
+	for (i = 0; i < NUM_LED_OUTRING; i++) {
+		led_cont.outring[i].c_red   = 0;
+		led_cont.outring[i].c_green = 0;
+		led_cont.outring[i].c_blue  = 0;
+		led_cont.outring[i].brightness = F_MAX_BRIGHTNESS;
+	}
+
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		/* Read the live glided position (updated every OSC_TIM tick
+		 * by the morph bed) rather than wt_osc.pending_seed_pos[]
+		 * (only refreshed once per ~16-tick dispatcher pass) — gives
+		 * continuous visual tracking as the encoder turns. */
+		float pos = params.wt_browse_step_pos_enc[i];
+		/* Wrap into [0, NUM_WAVEFORMS_IN_SPHERE) defensively.  The
+		 * PLAY-mode browse handler wraps on encoder turn, but a CV
+		 * offset or a mode transition could briefly push pos outside
+		 * the range. */
+		while (pos < 0.0f)
+			pos += (float)NUM_WAVEFORMS_IN_SPHERE;
+		while (pos >= (float)NUM_WAVEFORMS_IN_SPHERE)
+			pos -= (float)NUM_WAVEFORMS_IN_SPHERE;
+
+		/* Map 0..NUM_WAVEFORMS_IN_SPHERE → 0..NUM_LED_OUTRING with a
+		 * float index.  Using the un-decremented counts on both sides
+		 * (27 and 18) means 1.5 wavetable positions per LED and
+		 * wrap closes cleanly: pos=27 ≡ pos=0 → LED 18 ≡ LED 0. */
+		float led_f = pos * (float)NUM_LED_OUTRING
+		              / (float)NUM_WAVEFORMS_IN_SPHERE;
+		if (led_f < 0.0f) led_f = 0.0f;
+		if (led_f >= (float)NUM_LED_OUTRING)
+			led_f -= (float)NUM_LED_OUTRING;
+
+		uint8_t led_a = (uint8_t)led_f;
+		if (led_a >= NUM_LED_OUTRING) led_a = 0;
+		uint8_t led_b = (uint8_t)(led_a + 1);
+		if (led_b >= NUM_LED_OUTRING) led_b = 0;
+		float fled = led_f - (float)led_a;
+
+		o_rgb_led ch_color;
+		get_wt_color(params.wt_bank[i], &ch_color);
+
+		/* Distribute the cursor colour between the two adjacent LEDs
+		 * in proportion to (1-fled) and fled.  At integer positions
+		 * (fled=0) led_a gets the full colour and led_b gets nothing,
+		 * matching the old discrete-cursor look.  Mid-glide the
+		 * cursor visibly slides between LEDs. */
+		float wa = 1.0f - fled;
+		float wb = fled;
+
+		uint8_t ja = rotate_origin(led_a, NUM_LED_OUTRING);
+		uint8_t jb = rotate_origin(led_b, NUM_LED_OUTRING);
+
+		uint32_t ra = (uint32_t)led_cont.outring[ja].c_red
+		              + (uint32_t)((float)ch_color.c_red   * wa);
+		uint32_t ga = (uint32_t)led_cont.outring[ja].c_green
+		              + (uint32_t)((float)ch_color.c_green * wa);
+		uint32_t ba = (uint32_t)led_cont.outring[ja].c_blue
+		              + (uint32_t)((float)ch_color.c_blue  * wa);
+		if (ra > 4095) ra = 4095;
+		if (ga > 4095) ga = 4095;
+		if (ba > 4095) ba = 4095;
+		led_cont.outring[ja].c_red   = (uint16_t)ra;
+		led_cont.outring[ja].c_green = (uint16_t)ga;
+		led_cont.outring[ja].c_blue  = (uint16_t)ba;
+
+		uint32_t rb = (uint32_t)led_cont.outring[jb].c_red
+		              + (uint32_t)((float)ch_color.c_red   * wb);
+		uint32_t gb = (uint32_t)led_cont.outring[jb].c_green
+		              + (uint32_t)((float)ch_color.c_green * wb);
+		uint32_t bb = (uint32_t)led_cont.outring[jb].c_blue
+		              + (uint32_t)((float)ch_color.c_blue  * wb);
+		if (rb > 4095) rb = 4095;
+		if (gb > 4095) gb = 4095;
+		if (bb > 4095) bb = 4095;
+		led_cont.outring[jb].c_red   = (uint16_t)rb;
+		led_cont.outring[jb].c_green = (uint16_t)gb;
+		led_cont.outring[jb].c_blue  = (uint16_t)bb;
+	}
+
+	/* Inner ring: per-channel sphere color so each channel's bank is
+	 * legible at a glance independent of seed-position cursors. */
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		j = rotate_origin(i, NUM_CHANNELS);
+		led_cont.inring[j].brightness = F_MAX_BRIGHTNESS;
+		get_wt_color(params.wt_bank[i], &led_cont.inring[j]);
+	}
+}
+
+/* Single-parameter bar-graph helper used by the RS param overlays.
+ *   value: 0..1 fill ratio for the outring bar (channel 0 representative).
+ *   per_channel: NUM_CHANNELS-long array of per-channel values for the
+ *     inring tint (captures CV-offset divergence across channels).
+ *   r_w/g_w/b_w: per-channel weights (0..255) for the bar color.
+ */
 void display_firmware_version(void)
 {
 	uint8_t i, j;
@@ -1195,19 +1546,6 @@ void display_soft_clip(void) {
 	}
 }
 
-void display_fx(void)
-{
-	uint8_t slot_i, led;
-	enum colorCodes led_color;
-
-	for (slot_i = 0; slot_i < NUM_LED_OUTRING; slot_i++)
-	{
-		led = rotate_origin(slot_i, NUM_LED_OUTRING);
-		led_color = animate_fx_level(slot_i);
-		set_rgb_color(&led_cont.outring[led], led_color);
-	}
-
-}
 
 
 void display_preset(void)
@@ -1238,113 +1576,7 @@ void display_preset(void)
 	}
 }
 
-void display_sphere_save(void)
-{
-	uint8_t slot_i, bank_i, led;
 
-	uint16_t hover_bank;
-	uint8_t slot_color = ledc_OFF;
-
-	uint8_t hover_slot = get_sphere_hover();
-
-	if (hover_slot >= NUM_FACTORY_SPHERES)
-		hover_bank = (hover_slot - NUM_FACTORY_SPHERES) / NUM_LED_OUTRING;
-	else
-		hover_bank = 0xFF;
-
-	for (slot_i = 0; slot_i < NUM_LED_OUTRING; slot_i++)
-	{
-		led = rotate_origin(slot_i, NUM_LED_OUTRING);
-		animate_wt_saving_ledring(slot_i, &led_cont.outring[led]);
-	}
-	for ( bank_i = 0; bank_i < NUM_CHANNELS; bank_i++)
-	{
-		led = rotate_origin(bank_i, NUM_CHANNELS);
-
-		if (hover_bank>=NUM_CHANNELS) 	slot_color = ledc_WHITE;
-		else if (bank_i==hover_bank)	slot_color = ledc_WHITE;
-		else							slot_color = ledc_OFF;
-
-		set_rgb_color(&led_cont.inring[led], slot_color);
-	}
-}
-
-void display_sphere_play_export(void)
-{
-	uint8_t slot_i, bank_i;//, led;
-
-	for (slot_i = 0; slot_i < NUM_LED_OUTRING; slot_i++)
-	{
-		// led = rotate_origin(slot_i, NUM_LED_OUTRING);
-		animate_play_export_ledring(slot_i, &led_cont.outring[slot_i]);
-	}
-	for ( bank_i = 0; bank_i < NUM_CHANNELS; bank_i++)
-	{
-		set_rgb_color(&led_cont.inring[bank_i], ledc_OFF);
-	}
-
-}
-void display_sphere_sel(void)
-{
-	uint8_t i, led, chan;
-
-	uint8_t overlap[NUM_LED_OUTRING][NUM_CHANNELS];
-	uint8_t overlap_num[NUM_LED_OUTRING];
-	static uint8_t overlap_ctr[NUM_LED_OUTRING]={0};
-	uint8_t pos[NUM_CHANNELS];
-
-	uint8_t do_advance_overlap = 0;
-	static uint32_t last_advance_overlap_tmr=0;
-	uint32_t now = HAL_GetTick()/TICKS_PER_MS;
-
-	if ((now - last_advance_overlap_tmr) > 300)
-	{
-		do_advance_overlap = 1;
-		last_advance_overlap_tmr = now;
-	}
-
-	for (i = 0; i < NUM_LED_OUTRING; i++){
-		led_cont.outring[i].brightness = 0;
-		overlap_num[i] = 0;
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-			overlap[i][chan] = 99;
-	}
-
-	// Create overlap[led_position][channels_occupying_position] = channel#
-	for (i = 0; i < NUM_CHANNELS; i++)
-	{
-		pos[i] = rotate_origin(calc_params.wtsel[i] % NUM_LED_OUTRING, NUM_LED_OUTRING);
-		led = rotate_origin(i, NUM_CHANNELS);
-
-		get_wt_color(params.wt_bank[i], &led_cont.inring[led]);
-
-		if (params.osc_param_lock[i] && lock_flash_state())
-			led_cont.inring[led].brightness = 0;
-		else
-			led_cont.inring[led].brightness = F_MAX_BRIGHTNESS;
-
-		overlap[ pos[i] ][ overlap_num[pos[i]] ] = i;
-		overlap_num[ pos[i] ]++;
-	}
-
-	for (i = 0; i<NUM_LED_OUTRING; i++)
-	{
-		if (do_advance_overlap) {
-			overlap_ctr[i]++;
-			if (overlap_ctr[i] >= overlap_num[i]) overlap_ctr[i]=0;
-		}
-
-		chan = overlap[i][overlap_ctr[i]];
-		if (chan<=NUM_CHANNELS)  {
-			get_wt_color(params.wt_bank[chan], &led_cont.outring[i]);
-
-			if (params.osc_param_lock[chan] && lock_flash_state())
-				led_cont.outring[i].brightness = 0;
-			else
-				led_cont.outring[i].brightness = F_MAX_BRIGHTNESS;
-		}
-	}
-}
 
 void display_octave(void)
 {
@@ -1458,6 +1690,36 @@ void update_ongoing_display_timers(void){
 	else if (led_cont.ongoing_display == ONGOING_DISPLAY_UNISON && !rotary_pressed(rotm_TRANSPOSE))
 		tick_down = 1;
 
+	/* Unconditional: start_ongoing_display_drum_param() re-arms the full
+	 * timeout on every encoder tick, so sustained turning keeps this
+	 * alive on its own; ticking down unconditionally just lets it fade
+	 * out shortly after the user stops. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_PARAM)
+		tick_down = 1;
+
+	/* Same idiom: start_ongoing_display_drum_preset() re-arms this on
+	 * every turn and on every load/save, so it only actually counts
+	 * down once the user stops touching the PRESET encoder. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_PRESET)
+		tick_down = 1;
+
+	/* One-shot flash on the mode-toggle press, so it always times out
+	 * on its own -- nothing re-arms it while the button is held. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_ENGINE)
+		tick_down = 1;
+
+	/* Same one-shot idiom for the CV-mode-cycle flash. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_CV_MODE)
+		tick_down = 1;
+
+	/* Same one-shot idiom for the voice-cycle flash. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_VOICE)
+		tick_down = 1;
+
+	/* Same one-shot idiom for the automation-target-routing flash. */
+	else if (led_cont.ongoing_display == ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET)
+		tick_down = 1;
+
 	if (!tick_down)
 		return;
 
@@ -1538,6 +1800,14 @@ void start_ongoing_display_soft_clip(void) {
 	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 
+/* Cancel any transient parameter overlay so the caller's own display
+ * (or the default drum-pattern view) takes over immediately. */
+void stop_all_displays(void)
+{
+	led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
+	led_cont.ongoing_timeout = 0;
+}
+
 void start_ongoing_display_sphere_sel(void){
 	led_cont.ongoing_display = ONGOING_DISPLAY_SPHERE_SEL;
 	led_cont.ongoing_timeout = SPHERE_SEL_TIMER_LIMIT;
@@ -1553,52 +1823,197 @@ void start_ongoing_display_unison(void) {
 	led_cont.ongoing_timeout = FINETUNE_TIMER_LIMIT;
 }
 
-void stop_all_displays(void){
-	led_cont.ongoing_display = ONGOING_DISPLAY_NONE;
-	led_cont.ongoing_timeout = 0;
-}
-
-uint16_t return_display_timer(void){
-	return led_cont.ongoing_timeout;
-}
+/* Calibration sweep state: on entry to CPU-usage mode, light the inner
+ * ring LEDs one at a time in index order so the user can map their
+ * clock-position observations to inring[0..5] unambiguously.  Set by
+ * start_ongoing_display_cpu_usage(), consumed by display_cpu_usage(). */
+static uint32_t cpu_usage_entry_tick = 0;
+static uint8_t  cpu_usage_calibration_active = 0;
+/* Step time in *real* milliseconds.  HAL_GetTick() returns values at
+ * TICKS_PER_MS (8x) the rate of wall-clock ms, so the arithmetic below
+ * multiplies by TICKS_PER_MS when comparing elapsed ticks. */
+#define CPU_USAGE_CAL_STEP_MS 700u
+#define CPU_USAGE_CAL_STEPS   NUM_LED_INRING
 
 void start_ongoing_display_cpu_usage(void)
 {
 	led_cont.ongoing_display = ONGOING_DISPLAY_CPU_USAGE;
 	led_cont.ongoing_timeout = 0;
+	cpu_usage_entry_tick = HAL_GetTick();
+	cpu_usage_calibration_active = 1;
 }
 
 void display_cpu_usage(void)
 {
-	extern uint32_t cpu_usage_cycles;
-	static uint32_t cpu_peak = 0;
-	static uint32_t peak_expiry = 0;
+	/* Temporary diagnostic layout, refined second pass.
+	 *
+	 *   OUTER RING (18 LEDs) — main-loop iteration peak period.
+	 *       Each LED = 10 ms. 0–4 = green, 5–9 = yellow, 10+ = red.
+	 *
+	 *   INNER RING (6 LEDs) — identified by calibration sweep as
+	 *   starting at 1 o'clock (inring[0]) and running clockwise:
+	 *     inring[0] ( 1 o'clock) : read_freq() peak (coarse).
+	 *     inring[1] ( 3 o'clock) : OSC_TIM TOTAL peak — FINE thresholds
+	 *                               (budget = 555 µs @ 1.8 kHz).
+	 *     inring[2] ( 5 o'clock) : process_audio_block_codec() peak —
+	 *                               FINE thresholds (budget = 1 ms).
+	 *     inring[3] ( 7 o'clock) : halo_advance_cycle() peak —
+	 *                               FINE thresholds.  Physics-only cost
+	 *                               for a single channel (no trigger
+	 *                               path).  Primary suspect for OSC_TIM
+	 *                               overrun after refresh_ring_seed_caches
+	 *                               was cleared.
+	 *     inring[4] ( 9 o'clock) : OSC_TIM per-channel loop peak —
+	 *                               FINE thresholds.  Covers the 6×
+	 *                               update_pitch+halo_tick pass.
+	 *     inring[5] (11 o'clock) : single halo_tick() peak —
+	 *                               FINE thresholds.  Worst case one
+	 *                               channel's physics + seed-lerp.
+	 *                               Should track inring[3] closely in
+	 *                               steady state; diverges on note change
+	 *                               if the seed_lerp path is slow.
+	 *
+	 *   Main-loop peak (outer ring) and retrigger/recalc counts are
+	 *   still tracked in globals for debugger inspection.
+	 *
+	 *   Coarse peak units (LED 0): off <1 ms / dim <5 ms / green
+	 *   <20 ms / yellow <50 ms / red ≥50 ms.
+	 *   Fine peak units  (LEDs 1–5): off <200 µs / dim <500 µs /
+	 *   green <1 ms / yellow <2 ms / red ≥2 ms. */
+	extern volatile uint32_t diag_main_loop_peak_cycles;
+	extern volatile uint32_t diag_osc_tim_peak_cycles;
+	extern volatile uint32_t diag_read_freq_peak_cycles;
+	extern volatile uint32_t diag_audio_isr_peak_cycles;
+	extern volatile uint32_t diag_reverb_peak_cycles;
+	extern volatile uint32_t diag_osc_refresh_peak_cycles;
+	extern volatile uint32_t diag_osc_chanloop_peak_cycles;
+	extern volatile uint32_t diag_osc_ringtick_peak_cycles;
+	extern volatile uint32_t diag_advance_cycle_peak_cycles;
+	extern volatile uint32_t diag_seed_lerp_peak_cycles;
+
+	/* ── Calibration sweep ──────────────────────────────────────────────
+	 * For the first NUM_LED_INRING × 300 ms after entering CPU-usage
+	 * mode, light ONE inner LED at a time in index order with a
+	 * distinctive per-index colour.  Mapping key:
+	 *   inring[0] → WHITE   (read_freq peak)
+	 *   inring[1] → RED     (OSC_TIM peak)
+	 *   inring[2] → GREEN   (audio ISR peak)
+	 *   inring[3] → BLUE    (Reverb peak)
+	 *   inring[4] → YELLOW  (starvation)
+	 *   inring[5] → PURPLE  (chord recalc count)
+	 * After the sweep, the normal diagnostic display takes over. */
+	if (cpu_usage_calibration_active) {
+		/* HAL_GetTick() counts at TICKS_PER_MS (8×) real ms, so
+		 * scale the per-step duration accordingly. */
+		uint32_t elapsed = HAL_GetTick() - cpu_usage_entry_tick;
+		uint32_t step = elapsed / (CPU_USAGE_CAL_STEP_MS * TICKS_PER_MS);
+		if (step >= CPU_USAGE_CAL_STEPS) {
+			cpu_usage_calibration_active = 0;
+			/* Reset all peak counters so the first real window
+			 * isn't polluted by spikes during the sweep. */
+			diag_main_loop_peak_cycles      = 0;
+			diag_osc_tim_peak_cycles        = 0;
+			diag_read_freq_peak_cycles      = 0;
+			diag_audio_isr_peak_cycles      = 0;
+			diag_reverb_peak_cycles         = 0;
+			diag_osc_refresh_peak_cycles    = 0;
+			diag_osc_chanloop_peak_cycles   = 0;
+			diag_osc_ringtick_peak_cycles   = 0;
+			diag_advance_cycle_peak_cycles  = 0;
+			diag_seed_lerp_peak_cycles      = 0;
+			/* fall through to normal display below */
+		} else {
+			static const uint8_t cal_colors[CPU_USAGE_CAL_STEPS] = {
+				ledc_WHITE,   /* inring[0] → read_freq */
+				ledc_RED,     /* inring[1] → OSC_TIM total */
+				ledc_GREEN,   /* inring[2] → audio ISR */
+				ledc_BLUE,    /* inring[3] → advance_cycle */
+				ledc_YELLOW,  /* inring[4] → OSC_TIM chan-loop */
+				ledc_PURPLE,  /* inring[5] → halo_tick single */
+			};
+			for (uint8_t c = 0; c < NUM_LED_INRING; c++) {
+				if (c == step)
+					set_rgb_color(&led_cont.inring[c], cal_colors[c]);
+				else
+					led_cont.inring[c].brightness = 0;
+			}
+			for (uint8_t i = 0; i < NUM_LED_OUTRING; i++)
+				led_cont.outring[i].brightness = 0;
+			return;
+		}
+	}
+
+	/* Slow decay so a single spike lingers ≈1 s, but trends fade.
+	 * Called at the LED refresh rate (≈500 Hz from timekeeper); decay
+	 * only every 50 real ms (= 400 HAL ticks at TICKS_PER_MS=8) to make
+	 * the decay rate independent of caller. */
+	static uint32_t last_decay_tick = 0;
 	uint32_t now = HAL_GetTick();
-
-	// Update peak
-	if (cpu_usage_cycles > cpu_peak) {
-		cpu_peak = cpu_usage_cycles;
-		peak_expiry = now + 100; // Hold peak for 60ms
-	} else if (now > peak_expiry) {
-		cpu_peak = (cpu_peak * 127) >> 7; // Slow decay
+	if (now - last_decay_tick >= (50u * TICKS_PER_MS)) {
+		last_decay_tick = now;
+		diag_main_loop_peak_cycles      = (diag_main_loop_peak_cycles      * 63) >> 6;
+		diag_osc_tim_peak_cycles        = (diag_osc_tim_peak_cycles        * 63) >> 6;
+		diag_read_freq_peak_cycles      = (diag_read_freq_peak_cycles      * 63) >> 6;
+		diag_audio_isr_peak_cycles      = (diag_audio_isr_peak_cycles      * 63) >> 6;
+		diag_reverb_peak_cycles         = (diag_reverb_peak_cycles         * 63) >> 6;
+		diag_osc_refresh_peak_cycles    = (diag_osc_refresh_peak_cycles    * 63) >> 6;
+		diag_osc_chanloop_peak_cycles   = (diag_osc_chanloop_peak_cycles   * 63) >> 6;
+		diag_osc_ringtick_peak_cycles   = (diag_osc_ringtick_peak_cycles   * 63) >> 6;
+		diag_advance_cycle_peak_cycles  = (diag_advance_cycle_peak_cycles  * 63) >> 6;
+		diag_seed_lerp_peak_cycles      = (diag_seed_lerp_peak_cycles      * 63) >> 6;
 	}
 
-	// Normalization: 100% = 1ms = 216,000 cycles
-	// 18 LEDs, so 12,000 cycles per LED
-	uint16_t fill = cpu_peak / 12000;
-	if (fill > NUM_LED_OUTRING) fill = NUM_LED_OUTRING;
+	/* 1 ms at 216 MHz = 216 000 cycles. */
+	const uint32_t CYCLES_PER_MS   = 216000u;
+	const uint32_t CYCLES_PER_10MS = 2160000u;
 
-	// Scale color from Green to Red based on load
-	uint8_t color = (fill >= 15) ? ledc_RED : ledc_LIGHT_GREEN; // >= ~83% load is red
-
-	for (uint8_t i = 0; i < NUM_LED_OUTRING; i++)
-	{
-		if (i < fill)
+	/* OUTER RING — main-loop peak period (1 LED per 10 ms). */
+	uint16_t ml_fill = diag_main_loop_peak_cycles / CYCLES_PER_10MS;
+	if (ml_fill > NUM_LED_OUTRING) ml_fill = NUM_LED_OUTRING;
+	for (uint8_t i = 0; i < NUM_LED_OUTRING; i++) {
+		if (i < ml_fill) {
+			uint8_t color;
+			if (i >= 10)      color = ledc_RED;
+			else if (i >= 5)  color = ledc_YELLOW;
+			else              color = ledc_LIGHT_GREEN;
 			set_rgb_color(&led_cont.outring[i], color);
-		else
+		} else {
 			led_cont.outring[i].brightness = 0;
+		}
 	}
 
-	for (uint8_t i = 0; i < NUM_LED_INRING; i++)
-		set_rgb_color(&led_cont.inring[i], ledc_OFF);
+	/* INNER RING. LED 0 coarse; LEDs 1–5 fine sub-ms thresholds so
+	 * we can tell "at budget" from "4x over budget". */
+	uint32_t inring_vals[6];
+	inring_vals[0] = diag_read_freq_peak_cycles;
+	inring_vals[1] = diag_osc_tim_peak_cycles;
+	inring_vals[2] = diag_audio_isr_peak_cycles;
+	inring_vals[3] = diag_advance_cycle_peak_cycles;
+	inring_vals[4] = diag_osc_chanloop_peak_cycles;
+	inring_vals[5] = diag_osc_ringtick_peak_cycles;
+
+	for (uint8_t c = 0; c < NUM_LED_INRING && c < 6; c++) {
+		uint32_t v = inring_vals[c];
+		uint8_t color;
+		if (c == 0) {
+			/* Coarse thresholds for read_freq (this call can
+			 * legitimately take 1–50 ms on a chord recalc). */
+			if      (v <  1u * CYCLES_PER_MS) color = ledc_OFF;
+			else if (v <  5u * CYCLES_PER_MS) color = ledc_DIM_GREEN;
+			else if (v < 20u * CYCLES_PER_MS) color = ledc_LIGHT_GREEN;
+			else if (v < 50u * CYCLES_PER_MS) color = ledc_YELLOW;
+			else                               color = ledc_RED;
+		} else {
+			/* Fine thresholds for all OSC_TIM/ISR sub-items. */
+			if      (v < (CYCLES_PER_MS / 5))   color = ledc_OFF;        /* <200 µs */
+			else if (v < (CYCLES_PER_MS / 2))   color = ledc_DIM_GREEN;  /* <500 µs */
+			else if (v < (1u * CYCLES_PER_MS))  color = ledc_LIGHT_GREEN;/* <1 ms   */
+			else if (v < (2u * CYCLES_PER_MS))  color = ledc_YELLOW;     /* <2 ms   */
+			else                                color = ledc_RED;        /* ≥2 ms   */
+		}
+		if (color == ledc_OFF)
+			led_cont.inring[c].brightness = 0;
+		else
+			set_rgb_color(&led_cont.inring[c], color);
+	}
 }

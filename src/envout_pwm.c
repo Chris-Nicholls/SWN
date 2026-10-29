@@ -30,7 +30,6 @@
 #include "globals.h"
 #include "params_update.h"
 #include "params_lfo.h"
-#include "plaits_shim.h"
 #include "led_cont.h"
 #include "gpio_pins.h"
 #include "timekeeper.h"
@@ -38,6 +37,7 @@
 #include "lfo_wavetable_bank.h"
 #include "oscillator.h"
 #include "ui_modes.h"
+#include "drum_ui.h"
 
 extern o_params 	params;
 extern o_lfos 		lfos;
@@ -167,80 +167,82 @@ void start_envout_pwm(void)
 
 void update_envout_pwm(void){
 
+	/* Temporary: PWM_OUTS_TIM runs at 7.2 kHz (138 µs period) at priority
+	 * 0,3 — higher than OSC_TIM — so anything here preempts the physics
+	 * tick.  A rogue blocking call here would show on inner LED 3 as a
+	 * per-call peak.  Remove once the 200 ms main-loop spike is
+	 * diagnosed. */
+	extern volatile uint32_t diag_pwm_out_peak_cycles;
+	uint32_t pwm_out_start_cycles = DWT->CYCCNT;
+
 	uint8_t j;
 	uint32_t envout_buf;
-	static float vca_trig[NUM_CHANNELS] = {1.0};
-	const uint8_t GATE_THRESHOLD = 127;
 
 	extern float lfo_phase_multiplier;
 	update_lfos(lfo_phase_multiplier);
 
+	/* Compute REAL elapsed PWM ticks since the last ISR call.
+	 *
+	 * NVIC_PRIORITYGROUP_2 puts SAI (0,0) and PWM_OUTS_TIM (0,3) in
+	 * the same preemption level, so SAI cannot be preempted by us
+	 * but it CAN delay us — and SAI runs ~250-300 µs every 500 µs,
+	 * which is longer than the 138.9 µs PWM tick.  When SAI runs
+	 * over two consecutive PWM tick boundaries the timer's update-
+	 * interrupt flag stays asserted and the NVIC pending bit
+	 * coalesces the two events into a single deferred ISR call;
+	 * the second tick is silently lost.
+	 *
+	 * If we naively decrement lfos.lpg_trigger_delay[] by 1 per ISR
+	 * call, those lost ticks make the strum schedule lag by 1-2
+	 * ticks (~140-280 µs) at random points.  Whether that lag falls
+	 * between voice-N firing and voice-(N+1) firing depends on
+	 * where SAI happens to be in its block — bar-to-bar dependent —
+	 * so the inter-voice spacing audibly speeds up and slows down
+	 * even with a perfectly stable Pam's clock.
+	 *
+	 * Fix: read the free-running DWT cycle counter (216 MHz, immune
+	 * to ISR scheduling), divide by the known PWM period of 30000
+	 * cycles, and decrement by the *actual* number of ticks elapsed.
+	 * Voices whose deadline is now in the past fire on this call;
+	 * voices still ahead of the deadline get the precise wall-clock
+	 * decrement.  Wall-clock spacing between voices then depends
+	 * only on the schedule that was committed in read_freq() and
+	 * the (rock-stable) hardware timer — not on which ISRs ran in
+	 * between. */
+	static uint32_t prev_pwm_cycles      = 0;
+	static uint8_t  pwm_elapsed_inited   = 0;
+	uint32_t now_cycles    = DWT->CYCCNT;
+	uint32_t elapsed_ticks;
+	if (!pwm_elapsed_inited) {
+		/* First call: we have no prior reference.  Treat as a
+		 * single normal tick so any boot-time pending delay (there
+		 * shouldn't be one) progresses by 1 instead of by some wild
+		 * value derived from CYCCNT == 0 at reset. */
+		elapsed_ticks      = 1u;
+		pwm_elapsed_inited = 1;
+	} else {
+		uint32_t elapsed_cycles = now_cycles - prev_pwm_cycles; /* uint32 wrap is fine */
+		elapsed_ticks = elapsed_cycles / 30000u;        /* 216 MHz / 7.2 kHz */
+		if (elapsed_ticks == 0u) elapsed_ticks = 1u;    /* never go backwards */
+		if (elapsed_ticks > 65535u) elapsed_ticks = 65535u;
+	}
+	prev_pwm_cycles = now_cycles;
+
 	for (j=0;j<NUM_CHANNELS;j++)
-	{		
-		envout_buf = lfos.preload[j];
-
-		// GLOBAL TRIGGER DETECTION (Runs for all modes)
-		// Detects rising edge crossing 50%
-		if (envout_buf <= PWM_MAX/2)
-			lfos.trig_armed[j]=1;
-		
-		else if ((envout_buf > PWM_MAX/2) && lfos.trig_armed[j])
-		{
-			lfos.trigout[j] = 1;
-			// vca_trig is used for TRIG mode's envelope generation
-			vca_trig[j] = F_TRIGVCADUR;
-			
-			lfos.trig_armed[j]++;
-			if (lfos.trig_armed[j] == TRIG_DURATION)
-				lfos.trig_armed[j] = 0;
-		}
-		else{
-			lfos.trigout[j]=0;
+	{
+		/* ENV OUT jacks are gate outputs for the drum station: full
+		 * scale for DRUM_GATE_TICKS after that channel fires (set in
+		 * drum_ui.c's fire(), called from OSC_TIM), rather than the
+		 * old LFO/LPG waveform. */
+		if (drum_gate_ticks[j] > 0) {
+			drum_gate_ticks[j]--;
+			envout_buf = PWM_MAX;
+		} else {
+			envout_buf = 0;
 		}
 
-		if (ui_mode == WTRECORDING && j>=3)
-		{ 						
-			//Do not apply gain or LFO mode to trigger outputs for WT Rec Sync
-			lfos.envout_pwm[j] = envout_buf; 													
-			lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-		}
-		else if (lfos.mode[j] == lfot_GATE)
-		{
-			lfos.envout_pwm[j] = envout_buf > GATE_THRESHOLD ? PWM_MAX : 0;	
-
-			lfos.out_lpf[j] = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-			lfos.envout_pwm[j] *= lfos.gain[j];
-		}
-				
-		else if (lfos.mode[j] == lfot_TRIG)
-		{
-			// Trigger logic handled globally above.
-			// Just handle the VCA envelope generation for the specific TRIG mode output behavior.
-									
-			if(vca_trig[j]>0) 	vca_trig[j]--;
-			else				vca_trig[j]=0;
-						
-			lfos.out_lpf[j] *= (1-LFO_TRIG_LPF);
-			lfos.out_lpf[j] += LFO_TRIG_LPF * vca_trig[j] / F_TRIGVCADUR;			
-							
-			lfos.envout_pwm[j] = lfos.trigout[j] * PWM_MAX * lfos.gain[j];
-		} 
-
-		else if (lfos.mode[j] == lfot_LPG)
-		{
-			float env_val = Shim_LPG_GetEnvelope(j);
-			
-			// Apply LFO Gain scaling if desired (usually 1.0 in LPG mode, but lfos.gain handles level)
-			lfos.envout_pwm[j] = (uint32_t)(env_val * PWM_MAX * lfos.gain[j]);
-			lfos.out_lpf[j] = env_val * lfos.gain[j];
-		} 
-
-		else //lfos.mode[j] == lfot_SHAPE
-		{
-			lfos.envout_pwm[j] = envout_buf;
-			lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
-			lfos.envout_pwm[j] *= lfos.gain[j];
-		}
+		lfos.envout_pwm[j] = envout_buf;
+		lfos.out_lpf[j]  = (float)(lfos.envout_pwm[j]) / (float)(PWM_MAX);
 	}
 
 	//ENVOUTs A,B are higher res (12 bits)
@@ -250,4 +252,11 @@ void update_envout_pwm(void){
 	ENVOUT_PWM_TIM_DEF->ENVOUT_PWM_CC_D = lfos.envout_pwm[3];
 	ENVOUT_PWM_TIM_DEF->ENVOUT_PWM_CC_E = lfos.envout_pwm[4];
 	ENVOUT_PWM_TIM_DEF->ENVOUT_PWM_CC_F = lfos.envout_pwm[5];
+
+	/* ── Temporary: commit PWM_OUTS_TIM peak duration. ── */
+	{
+		uint32_t dur = DWT->CYCCNT - pwm_out_start_cycles;
+		if (dur > diag_pwm_out_peak_cycles)
+			diag_pwm_out_peak_cycles = dur;
+	}
 }

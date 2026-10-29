@@ -56,8 +56,39 @@ enum ongoingDisplays{
 	ONGOING_DISPLAY_UNISON,
 	ONGOING_DISPLAY_SOFT_CLIP,
 	ONGOING_DISPLAY_CPU_USAGE,
+	ONGOING_DISPLAY_DRUM_PARAM,
+	ONGOING_DISPLAY_DRUM_PRESET,
+	ONGOING_DISPLAY_DRUM_ENGINE,
+	ONGOING_DISPLAY_DRUM_CV_MODE,
+	ONGOING_DISPLAY_DRUM_VOICE,
+	ONGOING_DISPLAY_DRUM_AUTOMATION_TARGET,
 
 	NUM_ONGOING_DISPLAYS
+};
+
+/* Which of the per-voice knobs display_drum_param() is showing; stored
+ * in o_led_cont.ongoing_drum_param. */
+enum drumParamDisplay{
+	DRUM_PARAM_DISP_FILTER,	// rotm_DEPTH
+	DRUM_PARAM_DISP_DECAY,	// rotm_LATITUDE
+	DRUM_PARAM_DISP_OTHER,	// rotm_LONGITUDE
+	DRUM_PARAM_DISP_SPEED,	// rotm_LFOSHAPE push+turn (sec_LFOPHASE) -- clock_divmult_id, not a plain 0..1
+	DRUM_PARAM_DISP_HUMANIZE,	// rotm_TRANSPOSE push+turn (sec_OSC_SPREAD)
+	DRUM_PARAM_DISP_GHOST,	// rotm_OCT turn
+	DRUM_PARAM_DISP_CHAOS,	// rotm_OCT push+turn (sec_SCALE) -- Grids-shared or Euclid-per-channel
+	DRUM_PARAM_DISP_FILTER_RANDOM,	// rotm_DEPTH push+turn (sec_DISPERSION)
+	DRUM_PARAM_DISP_DECAY_RANDOM,	// rotm_LATITUDE push+turn (sec_DISPPATT)
+	DRUM_PARAM_DISP_OTHER_RANDOM,	// rotm_LONGITUDE push+turn (sec_WTSEL_SPREAD)
+	DRUM_PARAM_DISP_GRIDS_X,	// browse-encoder turn, Grids mode
+	DRUM_PARAM_DISP_GRIDS_Y,	// browse-encoder push+turn, Grids mode
+};
+
+/* What display_drum_preset() is showing right now; stored in
+ * o_led_cont.ongoing_drum_preset_activity. */
+enum drumPresetDisplay{
+	DRUM_PRESET_DISP_BROWSE,	// just turning -- hover slot, no action yet
+	DRUM_PRESET_DISP_LOADED,	// pushbutton released after a short press
+	DRUM_PRESET_DISP_SAVED,		// pushbutton released after a long press
 };
 
 
@@ -74,6 +105,9 @@ typedef struct o_led_cont{
 
 	uint8_t	 	ongoing_lfoshape[NUM_CHANNELS];
 	uint16_t	lfoshape_timeout[NUM_CHANNELS];
+
+	enum drumParamDisplay ongoing_drum_param;
+	enum drumPresetDisplay ongoing_drum_preset_activity;
 
 	uint8_t 	waiting_for_clockin;
 	float 		clockin_wait_progress;
@@ -110,6 +144,20 @@ void 		turn_outring_off(void);
 void 		display_wtpos_inring(void);
 void 		flash_wt_lock(void);
 void 		display_wt_pos(void);
+void 		display_drum_pattern(void);
+void 		display_drum_param(void);
+void 		start_ongoing_display_drum_param(enum drumParamDisplay which);
+void 		display_drum_preset(void);
+void 		start_ongoing_display_drum_preset(enum drumPresetDisplay activity);
+void 		display_drum_engine(void);
+void 		start_ongoing_display_drum_engine(void);
+void 		display_drum_cv_mode(void);
+void 		start_ongoing_display_drum_cv_mode(void);
+void 		display_drum_voice(void);
+void 		start_ongoing_display_drum_voice(void);
+void 		display_drum_automation_target(void);
+void 		start_ongoing_display_drum_automation_target(void);
+void 		display_wt_seed_pos(void);
 void 		display_transpose(void);
 void 		display_finetune(void);
 void 		display_octave(void);

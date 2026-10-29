@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wavetable Karplus-Strong Explorer</title>
+    <style>
+        *,
+        *::before,
+        *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #0e0e1a;
+            --panel: #161625;
+            --border: #2a2a45;
+            --text: #d8d8e8;
+            --dim: #7878a0;
+            --accent: #00d4aa;
+            --accent2: #ff6b6b;
+            --bar1: #00d4aa;
+            --bar2: #ffcc00;
+            --bar3: #ff6b6b;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', -apple-system, system-ui, sans-serif;
+            line-height: 1.5;
+        }
+
+        h1 {
+            color: var(--accent);
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        h2 {
+            color: var(--accent);
+            font-size: 13px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .app {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 10px;
+        }
+
+        .row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .col {
+            flex: 1;
+            min-width: 280px;
+        }
+
+        canvas {
+            display: block;
+            border-radius: 4px;
+            background: #0a0a14;
+            width: 100%;
+        }
+
+        .presets {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin-bottom: 6px;
+        }
+
+        .presets button {
+            padding: 3px 10px;
+            font-size: 11px;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            align-items: flex-end;
+        }
+
+        .cg {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        /* Section header inside the dynamic registry-generated params panel */
+        .dynSection {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .8px;
+            margin: 8px 0 2px;
+            padding-bottom: 2px;
+            border-bottom: 1px solid var(--border, #333);
+            width: 100%;
+        }
+
+        .cg label {
+            font-size: 10px;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            white-space: nowrap;
+        }
+
+        .cg .val {
+            font-size: 11px;
+            color: var(--accent);
+            font-family: monospace;
+            min-width: 48px;
+            text-align: right;
+        }
+
+        select,
+        button {
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 5px 10px;
+            font-size: 12px;
+            outline: none;
+            cursor: pointer;
+        }
+
+        select:focus,
+        button:focus {
+            border-color: var(--accent);
+        }
+
+        button:hover {
+            background: var(--border);
+        }
+
+        button.primary {
+            background: var(--accent);
+            color: var(--bg);
+            border-color: var(--accent);
+            font-weight: 700;
+            padding: 8px 28px;
+            font-size: 14px;
+        }
+
+        button.primary:hover {
+            background: #00b894;
+        }
+
+        button.stop {
+            background: var(--accent2);
+            color: var(--bg);
+            border-color: var(--accent2);
+            font-weight: 600;
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            height: 5px;
+            background: var(--border);
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+            min-width: 100px;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 13px;
+            height: 13px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: grab;
+        }
+
+        .algo-params {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Ring Coupler X grid layout */
+        .rcx-rings-viz {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .rcx-ring-wrap {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .rcx-ring-wrap canvas {
+            width: 100%;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 3px;
+            display: block;
+        }
+
+        .rcx-ring-lbl {
+            font-size: 10px;
+            font-family: monospace;
+            text-align: center;
+        }
+
+        .rcx-section-label {
+            font-size: 10px;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            margin-bottom: 4px;
+        }
+
+        .rcx-fir {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+            align-items: flex-end;
+            margin-bottom: 12px;
+        }
+
+        .rcx-grid {
+            display: grid;
+            grid-template-columns: 46px repeat(12, minmax(55px, 1fr));
+            column-gap: 8px;
+            row-gap: 6px;
+            align-items: end;
+        }
+
+        .rcx-grid .rgh {
+            font-size: 9px;
+            color: var(--dim);
+            text-transform: uppercase;
+            letter-spacing: .4px;
+            line-height: 1.2;
+            white-space: normal;
+            padding-bottom: 3px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .rcx-grid .rgl {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--accent);
+            padding-top: 4px;
+        }
+
+        .rcx-grid .rgc {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+        }
+
+        .rcx-grid .rgc input[type=range] {
+            width: 100%;
+        }
+
+        .rcx-grid .rgc .val {
+            font-size: 10px;
+            color: var(--accent);
+            font-family: monospace;
+            text-align: right;
+        }
+
+        .status {
+            font-size: 11px;
+            color: var(--dim);
+            font-family: monospace;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .header-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .tab-bar {
+            display: flex;
+            gap: 2px;
+        }
+
+        .tab-bar button {
+            border-radius: 4px 4px 0 0;
+            font-size: 11px;
+            padding: 4px 12px;
+        }
+
+        .tab-bar button.active {
+            background: var(--accent);
+            color: var(--bg);
+            border-color: var(--accent);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app">
+        <div class="header-row">
+            <h1>Wavetable Karplus-Strong Explorer</h1>
+            <span class="status" id="statusText">Draw harmonics, then pluck.</span>
+            <span class="status" id="kbdOctave" title="Keyboard octave (−/= to shift)"
+                style="margin-left:12px; color:var(--accent); font-weight:600; cursor:default;">Oct 3</span>
+        </div>
+
+        <!-- Harmonic Editor + Waveform Preview -->
+        <div class="row">
+            <div class="col" style="flex:2; min-width:400px;">
+                <div class="panel">
+                    <h2>Harmonic Editor</h2>
+                    <div class="presets">
+                        <button onclick="app.preset('saw')">Saw</button>
+                        <button onclick="app.preset('square')">Square</button>
+                        <button onclick="app.preset('triangle')">Triangle</button>
+                        <button onclick="app.preset('sine')">Sine</button>
+                        <button onclick="app.preset('buzz')">Buzz</button>
+                        <button onclick="app.preset('random')">Random</button>
+                        <button onclick="app.preset('clear')">Clear</button>
+                        <span style="width:12px"></span>
+                        <button id="btnEditMode" onclick="app.toggleEditMode()" style="font-weight:600">Editing:
+                            Amplitude</button>
+                        <button onclick="app.resetPhases()" style="font-size:10px">Reset phases</button>
+                        <button onclick="app.randomisePhases()" style="font-size:10px">Randomise phases</button>
+                    </div>
+                    <canvas id="cvHarmonics" height="180"></canvas>
+                </div>
+                <div class="panel">
+                    <h2>FFT (buffer spectrum)</h2>
+                    <canvas id="cvFFT" height="140"></canvas>
+                </div>
+            </div>
+            <div class="col" style="max-width:340px;">
+                <div class="panel">
+                    <h2>Wavetable (1 cycle)</h2>
+                    <canvas id="cvWavetable" height="100"></canvas>
+                </div>
+                <div class="panel">
+                    <h2>Live Buffer</h2>
+                    <canvas id="cvBuffer" height="100"></canvas>
+                </div>
+                <div class="panel" id="panelVelocity" style="display:none;">
+                    <h2>Velocity Buffer</h2>
+                    <canvas id="cvVelocity" height="100"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="panel">
+            <div class="controls">
+                <div class="cg">
+                    <label>Note</label>
+                    <select id="selNote"></select>
+                </div>
+                <div class="cg">
+                    <label>Fine tune (cents)</label>
+                    <input type="range" id="slFineTune" min="-100" max="100" value="0" step="1">
+                    <span class="val" id="valFineTune">0</span>
+                </div>
+                <div class="cg">
+                    <label>Frequency</label>
+                    <span class="val" id="valFreq" style="font-size:14px;">440.0 Hz</span>
+                </div>
+
+                <div class="cg">
+                    <label>Noise mix</label>
+                    <input type="range" id="slNoise" min="0" max="1" value="0" step="0.01">
+                    <span class="val" id="valNoise">0.00</span>
+                </div>
+                <div class="cg">
+                    <label>Noise color</label>
+                    <input type="range" id="slNoiseColor" min="0" max="1" value="0" step="0.01">
+                    <span class="val" id="valNoiseColor">white</span>
+                </div>
+                <div class="cg">
+                    <label>Cycle LP</label>
+                    <input type="range" id="slCycleLP" min="0" max="1" value="0" step="0.01">
+                    <span class="val" id="valCycleLP">0.00</span>
+                </div>
+                <div class="cg">
+                    <label>Cycle HP</label>
+                    <input type="range" id="slCycleHP" min="0" max="0.003" value="0" step="0.0001">
+                    <span class="val" id="valCycleHP">0.000</span>
+                </div>
+                <div class="cg">
+                    <label>Volume</label>
+                    <input type="range" id="slVolume" min="0" max="1" value="0.5" step="0.01">
+                    <span class="val" id="valVolume">0.50</span>
+                </div>
+                <div class="cg">
+                    <label>&nbsp;</label>
+                    <div style="display:flex;gap:6px;">
+                        <button class="primary" id="btnPluck" onclick="app.pluck()">Pluck</button>
+                        <button class="stop" onclick="app.stop()">Stop</button>
+                    </div>
+                </div>
+                <div class="cg">
+                    <label>
+                        <input type="checkbox" id="chkAutoPluck" checked> Auto-pluck
+                    </label>
+                </div>
+            </div>
+
+            <div style="margin-top:10px;">
+                <div class="controls">
+                    <div class="cg">
+                        <label>Algorithm</label>
+                        <select id="selAlgo">
+                        </select>
+                    </div>
+                    <div class="cg" id="cgSymmetric" style="display:none">
+                        <label>Buffer mode</label>
+                        <select id="selBufferMode">
+                            <option value="normal">Normal</option>
+                            <option value="pingpong">Pingpong</option>
+                            <option value="flip">Flip-invert</option>
+                            <option value="shift">Shift (DC-corrected)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- LP params -->
+                <div class="algo-params" id="paramsLP">
+                    <h2 style="margin-top:4px;">Convolution Kernel</h2>
+                    <div class="presets" style="margin-bottom:4px;">
+                        <button onclick="app.kernelPreset('box')">Box</button>
+                        <button onclick="app.kernelPreset('triangle')">Triangle</button>
+                        <button onclick="app.kernelPreset('gaussian')">Gaussian</button>
+                        <button onclick="app.kernelPreset('ks')">Classic KS</button>
+                        <button onclick="app.kernelPreset('sharp')">Sharp</button>
+                        <button onclick="app.kernelPreset('custom')">Custom</button>
+                    </div>
+                    <div class="controls" style="margin-bottom:6px;">
+                        <div class="cg">
+                            <label>Kernel width</label>
+                            <input type="range" id="slKernelWidth" min="1" max="31" value="3" step="2">
+                            <span class="val" id="valKernelWidth">3</span>
+                        </div>
+                        <div class="cg">
+                            <label>Normalize</label>
+                            <input type="checkbox" id="chkKernelNorm" checked>
+                        </div>
+                        <div class="cg" id="cgConvEdge" style="display:none">
+                            <label>Edge mode</label>
+                            <select id="selConvEdge">
+                                <option value="zero" selected>Zero-pad</option>
+                                <option value="reflect">Reflect</option>
+                                <option value="repeat">Repeat (clamp)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <canvas id="cvKernel" height="100"></canvas>
+                    <div class="status" id="kernelInfo" style="margin-top:2px;">kernel: [0.25, 0.50, 0.25]</div>
+                </div>
+
+                <!-- Dynamic registry-based params (lattice synths etc.) -->
+                <div class="algo-params hidden" id="paramsDynamic">
+                    <div class="controls" id="dynamicControls"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Visualizations -->
+        <div class="row">
+            <div class="col" style="flex:2; min-width:400px;">
+                <div class="panel">
+                    <h2>Buffer Evolution (waterfall)</h2>
+                    <canvas id="cvWaterfall" height="240"></canvas>
+                </div>
+            </div>
+            <div class="col" style="max-width:340px;">
+                <div class="panel">
+                    <h2>Envelope (peak per cycle)</h2>
+                    <canvas id="cvEnvelope" height="110"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="synths.js"></script>
+    <script src="driver.js"></script>
+    <script src="ui.js"></script>
+</body>
+
+</html>

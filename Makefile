@@ -33,11 +33,40 @@ SOURCES  += $(wildcard $(CORE)/src/*.s)
 
 # Plaits & Stmlib
 # Note: Excluding plaits/plaits.cc (main) and stmlib/system (hardware specific)
+
+# Set INCLUDE_PLAITS_ENGINES=0 to exclude Plaits synthesis engines from the binary.
+# The LPG (low-pass gate) is always included. Browsing Plaits "spheres" still works
+# but rendering will output silence.
+INCLUDE_PLAITS_ENGINES ?= 0
+
+ifeq ($(INCLUDE_PLAITS_ENGINES),1)
 SOURCES  += $(wildcard src/plaits/dsp/*.cc)
 SOURCES  += $(wildcard src/plaits/dsp/*/*.cc)
 SOURCES  += src/plaits/resources.cc
+ARCH_CFLAGS += -DINCLUDE_PLAITS_ENGINES
+endif
+
+# Plaits' purpose-built drum engines are always built: they back the
+# drum_voice_plaits_* voices in the drum-station registry, and are tiny
+# compared to the full INCLUDE_PLAITS_ENGINES melodic set above.
+# (The hi-hat is a header-only template, driven directly by
+# src/drum_voice_plaits_hihat.cpp -- no hi_hat_engine.cc needed.)
+# resources.cc is pulled in for lut_sine, which the drum models' sine
+# oscillator indexes; --gc-sections drops the rest of its tables.
+SOURCES  += src/plaits/dsp/engine/bass_drum_engine.cc
+SOURCES  += src/plaits/dsp/engine/snare_drum_engine.cc
+SOURCES  += src/plaits/resources.cc
+
+# stmlib is always needed (LPG uses stmlib DSP utilities)
 SOURCES  += $(wildcard src/stmlib/dsp/*.cc)
 SOURCES  += $(wildcard src/stmlib/utils/*.cc)
+
+# CMSIS-DSP
+CMSIS_DSP_DIR = src/stmlib/third_party/STM/CMSIS/DSP_Lib
+SOURCES += $(CMSIS_DSP_DIR)/BasicMathFunctions/arm_add_f32.c \
+           $(CMSIS_DSP_DIR)/BasicMathFunctions/arm_mult_f32.c \
+           $(CMSIS_DSP_DIR)/BasicMathFunctions/arm_scale_f32.c \
+           $(CMSIS_DSP_DIR)/FilteringFunctions/arm_biquad_cascade_df1_f32.c
 
 OBJECTS   = $(addprefix $(BUILDDIR)/, $(addsuffix .o, $(sort $(basename $(SOURCES)))))
 
@@ -49,7 +78,8 @@ INCLUDES += -I$(DEVICE)/include \
 			-I inc \
 			-I inc/drivers \
 			-I inc/tests \
-			-I src
+			-I src \
+			-I src/stmlib/third_party/STM/CMSIS/CM3_h7xx
 
 ELF 	= $(BUILDDIR)/$(BINARYNAME).elf
 HEX 	= $(BUILDDIR)/$(BINARYNAME).hex
@@ -70,7 +100,9 @@ SZOPTS 	= -d
 CPU = -mcpu=cortex-m7 
 FPU = -mfpu=fpv5-d16
 FLOAT-ABI = -mfloat-abi=hard 
-MCU = $(CPU) -mthumb -mlittle-endian $(FPU) $(FLOAT-ABI) 
+MCU = $(CPU) -mthumb -mlittle-endian $(FPU) $(FLOAT-ABI)
+TUNE_FLAGS = -mtune=cortex-m7 -mno-unaligned-access
+ADVANCED_OPTIMIZATIONS = -fno-math-errno -fno-trapping-math -fno-signed-zeros -fassociative-math -fmerge-all-constants
 
 ARCH_CFLAGS = 	-DARM_MATH_CM7 \
 				-D'__FPU_PRESENT=1' \
@@ -78,11 +110,12 @@ ARCH_CFLAGS = 	-DARM_MATH_CM7 \
 				-DSTM32F765xx
 
 # Default optimization for release (Speed)
-OPTFLAG ?= -O3 -flto -ffast-math
+OPTFLAG ?= -Ofast -flto -fuse-linker-plugin -fwhole-program 
 DEBUG_FLAG ?= -g3
 
 CFLAGS = $(DEBUG_FLAG) -Wall \
-	$(ARCH_CFLAGS) $(MCU) \
+	-fsingle-precision-constant \
+	$(ARCH_CFLAGS) $(MCU) $(TUNE_FLAGS) $(ADVANCED_OPTIMIZATIONS) \
 	-I. $(INCLUDES) \
 	-fno-common \
 	-fdata-sections -ffunction-sections \
@@ -108,10 +141,10 @@ LDSCRIPT = $(DEVICE)/$(LOADFILE)
 
 LFLAGS =  -Wl,-Map,build/main.map,--cref \
 	-Wl,--gc-sections \
-	-flto \
+	-flto=8 \
 	$(MCU) \
+	-specs=nano.specs \
 	-T $(LDSCRIPT)
-	-specs=nano.specs -T $(LDSCRIPT) \
 
 # build/src/hardware_tests.o: OPTFLAG = -O0
 
@@ -148,7 +181,18 @@ LFLAGS =  -Wl,-Map,build/main.map,--cref \
 # build/src/analog_conditioning.o: OPTFLAG = -O0
 # build/src/UI_conditioning.o: OPTFLAG = -O0
 # build/src/quantz_scales.o: OPTFLAG = -O0
-# build/src/led_cont.o: OPTFLAG = -O0
+
+# Not a performance concern (LED-ring refresh only needs to keep up with a
+# 60Hz redraw), and needed as a workaround: -Ofast -flto -fwhole-program
+# together miscompile display_drum_param() in a way that hard-faults on
+# boot -- confirmed by bisecting the drum-station's chaos/ghost/randomization
+# feature work down to this file specifically (every other file at full
+# -Ofast, this one alone dropped to -O0 fixes it outright), and ruled out
+# jump-table codegen as the specific mechanism (rewriting the switch as an
+# equivalent if-else chain made no difference). Root GCC-internals cause
+# not identified; this is the same escape hatch a previous run into this
+# already apparently used, going by the line having existed here already.
+build/src/led_cont.o: OPTFLAG = -O0
 # build/src/ui_modes.o: OPTFLAG = -O0
 
 
@@ -277,3 +321,11 @@ release: wav
 dev: OPTFLAG = -Os -flto
 dev: DEBUG_FLAG = -g1
 dev: all
+
+# Size-optimised build + wav for audio flashing (~124KB instead of ~227KB)
+.PHONY: small small-wav
+small: OPTFLAG = -Os -flto -fuse-linker-plugin -fwhole-program
+small: all
+
+small-wav: OPTFLAG = -Os -flto -fuse-linker-plugin -fwhole-program
+small-wav: wav

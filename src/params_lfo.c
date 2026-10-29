@@ -41,13 +41,10 @@
 #include "system_settings.h"
 #include "analog_conditioning.h"
 #include "ui_modes.h"
-#include "wavetable_recording.h"
-#include "wavetable_editing.h"
 #include "oscillator.h"
 
 
 extern o_params params;
-extern o_wt_osc wt_osc;
 extern o_calc_params calc_params;
 extern o_led_cont led_cont;
 extern o_macro_states 	macro_states;
@@ -56,7 +53,48 @@ extern o_analog analog[NUM_ANALOG_ELEMENTS];
 extern enum UI_Modes ui_mode;
 
 o_lfos   lfos;
-uint16_t divmult_cv;
+
+/* Discrete musical-subdivision ladder for the unified phase-spread.
+ * Indexed [PHASE_SPREAD_IDX_MIN..PHASE_SPREAD_IDX_MAX] mapped to
+ * [0..PHASE_SPREAD_LADDER_LEN-1] (= idx + PHASE_SPREAD_NUM_STOPS_PER_SIDE).
+ * Values are per-channel offsets in clock-period units.
+ *
+ *   idx     0    ±1     ±2     ±3     ±4     ±5     ±6    ±7    ±8   ±9   ±10
+ *   offset  0  1/96   1/48   1/24   1/12   1/6   1/3   1/2   1    2    3
+ *
+ * Reading the table at idx=+8 (or -8) gives ±1.0 — each voice on the
+ * next clock beat (the rhythmic transition).  ±9 / ±10 are sparse
+ * rhythmic patterns (2/3 beats per voice).  Tighter values (±1..±5)
+ * are pure strum territory. */
+const float phase_spread_ladder[PHASE_SPREAD_LADDER_LEN] = {
+	-3.0f,             /* idx -10 */
+	-2.0f,             /* idx -9  */
+	-1.0f,             /* idx -8  rhythmic, reverse */
+	-(1.0f / 2.0f),    /* idx -7  */
+	-(1.0f / 3.0f),    /* idx -6  */
+	-(1.0f / 6.0f),    /* idx -5  */
+	-(1.0f / 12.0f),   /* idx -4  */
+	-(1.0f / 24.0f),   /* idx -3  */
+	-(1.0f / 48.0f),   /* idx -2  */
+	-(1.0f / 96.0f),   /* idx -1  tightest reverse strum */
+	 0.0f,             /* idx  0  unison */
+	 (1.0f / 96.0f),   /* idx +1  tightest strum */
+	 (1.0f / 48.0f),
+	 (1.0f / 24.0f),
+	 (1.0f / 12.0f),
+	 (1.0f / 6.0f),
+	 (1.0f / 3.0f),
+	 (1.0f / 2.0f),
+	 1.0f,             /* idx +8  rhythmic */
+	 2.0f,
+	 3.0f,             /* idx +10 sparse rhythmic */
+};
+
+static inline float phase_spread_for_idx(int8_t idx) {
+	if (idx < PHASE_SPREAD_IDX_MIN) idx = PHASE_SPREAD_IDX_MIN;
+	if (idx > PHASE_SPREAD_IDX_MAX) idx = PHASE_SPREAD_IDX_MAX;
+	return phase_spread_ladder[(int)idx + PHASE_SPREAD_NUM_STOPS_PER_SIDE];
+}
 
 // const float LFO_PHASE_TABLE[LFO_PHASE_TABLELEN]	= {0, 1.0/8.0, 1.0/7.0, 1.0/6.0, 1.0/5.0, 1.0/4.0, 2.0/7.0, 1.0/3.0, 3.0/8.0, 2.0/5.0, 3.0/7.0, 1.0/2.0, 4.0/7.0, 3.0/5.0, 5.0/8.0, 2.0/3.0, 5.0/7.0, 3.0/4.0, 4.0/5.0, 5.0/6.0, 6.0/7.0, 7.0/8.0};
 
@@ -85,23 +123,15 @@ void init_lfos(void)
 {
 	uint8_t i;
 
-	// init phase (60deg)
-	// if (!lfos.locked[0]) lfos.phase_id[0] =  0;
-	// if (!lfos.locked[1]) lfos.phase_id[1] =  19;
-	// if (!lfos.locked[2]) lfos.phase_id[2] =  15;
-	// if (!lfos.locked[3]) lfos.phase_id[3] =  11;
-	// if (!lfos.locked[4]) lfos.phase_id[4] =  7;
-	// if (!lfos.locked[5]) lfos.phase_id[5] =  3;	
-
-	if (!lfos.locked[0]) lfos.phase_id[0] =  0;
-	if (!lfos.locked[1]) lfos.phase_id[1] =  20;
-	if (!lfos.locked[2]) lfos.phase_id[2] =  16;
-	if (!lfos.locked[3]) lfos.phase_id[3] =  12;
-	if (!lfos.locked[4]) lfos.phase_id[4] =  8;
-	if (!lfos.locked[5]) lfos.phase_id[5] =  4;	
-
+	// Start with unison (all phases = 0)
+	for (i = 0; i < NUM_CHANNELS; i++) {
+		if (!lfos.locked[i]) lfos.phase_id[i] = 0;
+	}
 
 	lfos.phase_switch = 0;
+	lfos.phase_spread_idx = 0;
+	lfos.phase_spread     = phase_spread_for_idx(0);  // unison
+	lfos.global_vca_level = 1.0f;  // Full level (no attenuation)
 
 	if (!lfos.use_ext_clock)
 	{
@@ -115,6 +145,7 @@ void init_lfos(void)
 	{
 		if (!lfos.locked[i])
 		{
+			// LFO parameters
 			lfos.shape[i]			= 0;
 			lfos.gain[i]			= LFO_INIT_GAIN; 
 			lfos.cycle_pos[i]		= 0;
@@ -124,10 +155,15 @@ void init_lfos(void)
 			lfos.preload[i]			= 0;
 			lfos.trigout[i]			= 0;
 			lfos.audio_mode[i]		= 0;
-
 			lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
-
 			lfos.trig_armed[i] = 0;
+			lfos.lfo_reset_pending[i] = 0;
+
+			// LPG parameters
+			lfos.lpg_decay[i]		= 0.5f;
+			lfos.lpg_color[i]		= 0.5f;
+			lfos.lpg_gain[i]		= 1.0f;
+			lfos.lpg_trigger_delay[i] = 0;
 		}
 	}
 
@@ -141,7 +177,7 @@ void init_lfos_shape(void)
 		if (!lfos.locked[i])
 		{
 			lfos.shape[i] = 0;
-			lfos.mode[i] = lfot_SHAPE;
+			lfos.mode[i] = lfot_LFO;
 		}
 	}
 }
@@ -165,13 +201,13 @@ void init_lfo_speed(void){
 void init_lfo_object(o_lfos *t_lfo){
 	uint8_t i;
 
-	// init phase (60deg)
+	// init phase with unison (spread = 0)
 	t_lfo->phase_id[0] =  0;
-	t_lfo->phase_id[1] =  20;
-	t_lfo->phase_id[2] =  16;
-	t_lfo->phase_id[3] =  12;
-	t_lfo->phase_id[4] =  8;
-	t_lfo->phase_id[5] =  4;
+	t_lfo->phase_id[1] =  0;
+	t_lfo->phase_id[2] =  0;
+	t_lfo->phase_id[3] =  0;
+	t_lfo->phase_id[4] =  0;
+	t_lfo->phase_id[5] =  0;
 
 	for (i = 0; i < NUM_CHANNELS; i++)
 	{
@@ -182,9 +218,14 @@ void init_lfo_object(o_lfos *t_lfo){
 		t_lfo->shape[i]						= 0;
 		t_lfo->gain[i]						= LFO_INIT_GAIN; 
 		t_lfo->locked[i]					= 0;
-		t_lfo->mode[i] 						= 0;
+		t_lfo->mode[i] 						= lfot_LFO;
 		t_lfo->to_vca[i] 					= 0;
 		t_lfo->muted[i] 					= 0;
+
+		// LPG-specific parameters (independent from LFO params)
+		t_lfo->lpg_decay[i]					= 0.5f;
+		t_lfo->lpg_color[i]					= 0.5f;
+		t_lfo->lpg_gain[i]					= 1.0f;
 
 		t_lfo->out_lpf[i] 					= 1;
 		t_lfo->envout_pwm[i]				= 0;
@@ -199,16 +240,20 @@ void init_lfo_object(o_lfos *t_lfo){
 
 		// flags
 		t_lfo->trig_armed[i] 				= 0;
+		t_lfo->lpg_trigger_delay[i]			= 0;
 
 		t_lfo->to_vca_buf[i] 				= t_lfo->to_vca[i];
 	}
 
 	t_lfo->phase_switch 		= 0;
+	t_lfo->phase_spread_idx		= 0;
+	t_lfo->phase_spread			= phase_spread_for_idx(0);		// Start in unison
 
 	t_lfo->divmult_id[GLO_CLK] 	= LFO_UNITY_DIVMULT_ID;
 	t_lfo->cycle_pos[GLO_CLK] 	= 0;
 
 	t_lfo->use_ext_clock 		= 0;
+	t_lfo->global_vca_level		= 1.0f;		// Full level (no attenuation)
 
 	t_lfo->period[REF_CLK] 		= LFO_INIT_PERIOD;
 	t_lfo->divmult_id[REF_CLK] 	= LFO_UNITY_DIVMULT_ID;
@@ -224,44 +269,7 @@ void update_lfo_sample(void)
 	float 			lfo_frac, pos_in_table;
 	uint16_t		rh0, rh1;
 	uint8_t			chan;
-	uint32_t		recbuf_pos;
 
-	if (ui_mode == WTRECORDING)
-	{
-		recbuf_pos = get_recbuf_wh();
-
-		// 1 ramp for full buffer x many spheres: clamp at highest point when we're recording the extra smoothing buffer on the end
-		lfos.preload[0] = _CLAMP_F(recbuf_pos * WT_REC_RAMP_AMPLITUDE / NUM_SAMPLES_IN_RECBUF, 0, WT_REC_RAMP_AMPLITUDE);
-
-		// 1 ramp per sphere: clamp at highest point when we're recording the extra smoothing buffer on the end
-		lfos.preload[1] = _WRAP_F(NUM_SPHERES_IN_RECBUF * recbuf_pos * WT_REC_RAMP_AMPLITUDE / NUM_SAMPLES_IN_RECBUF, 0, WT_REC_RAMP_AMPLITUDE);
-		
-		// 1 ramp per waveform
-		lfos.preload[2] =  _WRAP_F(recbuf_pos * WT_REC_RAMP_AMPLITUDE / WT_TABLELEN, 0, WT_REC_RAMP_AMPLITUDE);	
-		
-		// 1 trigger at start, as wide as one WT (~11.6ms)
-		lfos.preload[3] = (recbuf_pos < WT_TABLELEN) ? WT_REC_TRIGGER_AMPLITUDE : 0;
-
-		// 1 trigger per sphere, as wide as one WT (~11.6ms), clamp low when we're recording the extra smoothing buffer on the end
-		if ( ((recbuf_pos % NUM_SAMPLES_IN_SPHERE) < WT_TABLELEN) && (recbuf_pos<(NUM_SAMPLES_IN_RECBUF)) )  
-			lfos.preload[4] = WT_REC_TRIGGER_AMPLITUDE;
-		else
-			lfos.preload[4] = 0;
-
-		// 1 trigger per waveform, 50% duty cycle, clamp low when we're recording the extra smoothing buffer on the end
-		if ( ((recbuf_pos & (WT_TABLELEN-1)) < (WT_TABLELEN>>1)) && (recbuf_pos<(NUM_SAMPLES_IN_RECBUF+WT_TABLELEN)) )  
-			lfos.preload[5] = WT_REC_TRIGGER_AMPLITUDE;
-		else
-			lfos.preload[5] = 0;
-
-	}
-	else if (ui_mode == WTMONITORING || ui_mode == WTTTONE || ui_mode == WTREC_WAIT)
-	{
-		for (chan=0; chan<NUM_CHANNELS; chan++)
-			lfos.preload[chan] = 0;
-	}
-
-	else 
 	{
 		for (chan=0; chan<NUM_CHANNELS; chan++)
 		{
@@ -290,9 +298,20 @@ void update_lfo_params(void)
 {
 	apply_lfo_reset();
 	read_LFO_phase();
-	read_LFO_shape();
-	read_LFO_speed_gain();
-	read_lfo_cv();
+	/* read_LFO_shape() and read_LFO_speed_gain() used to live here,
+	 * popping pec_LFOSHAPE/pec_LFOSPEED at 7.2 kHz (this runs off
+	 * PWM_OUTS_TIM) -- they raced drum_ui.c's own, much-lower-rate
+	 * reads of the same queues (main loop) and always won, so the
+	 * drum engine's per-channel voice-cycle and clock divide/multiply
+	 * never actually saw a turn. Their own side effects
+	 * (lfos.shape[]/lfos.gain[]/lfos.lpg_decay[]/lfos.divmult_id[])
+	 * were also live in the background; none of that is read by the
+	 * drum engine, so removed rather than reconciled.
+	 *
+	 * read_lfo_cv() (Global VCA ducking off the LFO CV jack) used to
+	 * live here too -- that jack is now the pattern-reset trigger
+	 * instead (see read_reset_trigger() in drum_ui.c), so the two uses
+	 * would have fought over the same physical input. */
 }
 
 
@@ -424,15 +443,23 @@ void update_lfo_gain(int16_t turn)
 
 	turn_amt = turn * (switch_pressed(FINE_BUTTON) ? F_SCALING_FINE_LFO_GAIN : F_SCALING_LFO_GAIN);
 
+	// Build array of current gains based on mode
 	for (i=0; i<NUM_CHANNELS; i++)
-		gain[i] = lfos.gain[i];
+		gain[i] = (lfos.mode[i] == lfot_LPG) ? lfos.lpg_gain[i] : lfos.gain[i];
 
 	channels_changed = change_param_f(gain, turn_amt);
 
 	for (i=0; i<NUM_CHANNELS; i++)
 	{
-		if (channels_changed & (1<<i))
-			lfos.gain[i] = _CLAMP_F(gain[i] + turn_amt, F_SCALING_LFO_GAIN, 1.0);
+		if (channels_changed & (1<<i)) {
+			if (lfos.mode[i] == lfot_LPG) {
+				// LPG mode: adjust LPG peak level
+				lfos.lpg_gain[i] = _CLAMP_F(lfos.lpg_gain[i] + turn_amt, F_SCALING_LFO_GAIN, 1.0);
+			} else {
+				// LFO mode: adjust LFO gain
+				lfos.gain[i] = _CLAMP_F(lfos.gain[i] + turn_amt, F_SCALING_LFO_GAIN, 1.0);
+			}
+		}
 	}
 }
 
@@ -442,18 +469,15 @@ void read_lfo_speed(int16_t turn)
 	uint8_t i;
 	uint8_t fine_pressed;
 	float turn_amt, test_divmult_id;
+	uint8_t any_lpg_mode = 0;
 
 	if (!turn) return;
 
-	// Hold LFO->VCA + turn LFO Speed = adjust resonator attack
-	if (button_pressed(butm_LFOVCA_BUTTON)) {
-		float factor = powf(1.2f, (float)turn);
-		params.resonator_attack_freq *= factor;
-		params.resonator_attack_freq = _CLAMP_F(params.resonator_attack_freq, 10.0f, 2000.0f);
-		calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 1;
-		return;
+	// Check if any unlocked channel is in LPG mode (for global behavior)
+	for (i=0; i<NUM_CHANNELS; i++) {
+		if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG)
+			any_lpg_mode = 1;
 	}
-
 
 	// FINE
 	turn_amt = turn;
@@ -465,24 +489,25 @@ void read_lfo_speed(int16_t turn)
 	// GLOBAL
 	if (macro_states.all_af_buttons_released)
 	{
-		test_divmult_id = lfos.divmult_id[GLO_CLK] + turn_amt;
-		if (!fine_pressed) test_divmult_id = (int8_t)(test_divmult_id);
+		// LFO mode: adjust divmult_id
+		if (!any_lpg_mode) {
+			test_divmult_id = lfos.divmult_id[GLO_CLK] + turn_amt;
+			if (!fine_pressed) test_divmult_id = (int8_t)(test_divmult_id);
 
-		lfos.divmult_id[GLO_CLK] = _CLAMP_F(test_divmult_id, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
+			lfos.divmult_id[GLO_CLK] = _CLAMP_F(test_divmult_id, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
 
-		flag_all_lfos_recalc();
+			flag_all_lfos_recalc();
 
-
-		if (lfos.use_ext_clock)
-			stage_resync_lfos();
-
-		// LPG OVERRIDE: Global Decay
-		for (i=0; i<NUM_CHANNELS; i++) {
-			if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
-			}
+			if (lfos.use_ext_clock)
+				stage_resync_lfos();
 		}
 
+		// LPG mode: adjust lpg_decay for all LPG channels
+		for (i=0; i<NUM_CHANNELS; i++) {
+			if (!lfos.locked[i] && lfos.mode[i] == lfot_LPG) {
+				lfos.lpg_decay[i] = _CLAMP_F(lfos.lpg_decay[i] + (turn_amt / 20.0f), 0.0f, 1.0f);
+			}
+		}
 	}
 
 	// INDIVIDUAL
@@ -492,18 +517,19 @@ void read_lfo_speed(int16_t turn)
 			{
 				calc_params.already_handled_button[i] = 1; 
 
-				lfos.divmult_id[i] = _CLAMP_F(lfos.divmult_id[i] + turn_amt, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
-				
-				flag_lfo_recalc(i);
+				if (lfos.mode[i] == lfot_LPG) {
+					// LPG mode: adjust lpg_decay for this channel
+					lfos.lpg_decay[i] = _CLAMP_F(lfos.lpg_decay[i] + (turn_amt / 20.0f), 0.0f, 1.0f);
+				} else {
+					// LFO mode: adjust divmult_id for this channel
+					lfos.divmult_id[i] = _CLAMP_F(lfos.divmult_id[i] + turn_amt, LFO_MIN_DIVMULT_ID, LFO_MAX_DIVMULT_ID);
+					
+					flag_lfo_recalc(i);
 
-				if (lfos.use_ext_clock) {
-					stage_resync(i);
+					if (lfos.use_ext_clock) {
+						stage_resync(i);
+					}
 				}
-			}
-			
-			// LPG OVERRIDE: Individual Decay
-			if (button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-				params.plaits_params[i].lpg_decay = _CLAMP_F(params.plaits_params[i].lpg_decay + (turn_amt / 255.0f), 0.0f, 1.0f);
 			}
 		}
 	}
@@ -545,77 +571,86 @@ void read_LFO_phase(void)
 	enc_pressed = rotary_pressed(rotm_LFOSHAPE);
 	fine = switch_pressed(FINE_BUTTON);
 
-	if (enc_turn && rotary_pressed(rotm_LFOSPEED))
-	{
-		// LPG COLOR CONTROL (Speed + Phase)
-		// GLOBAL
-		if (macro_states.all_af_buttons_released){
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if (!lfos.locked[i] && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
-				}
-			}
-		} 
-		// INDIVIDUAL
-		else {
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if(button_pressed(i) && (params.wt_bank[i] >= 100 || lfos.mode[i] == lfot_LPG)) {
-					params.plaits_params[i].lpg_color = _CLAMP_F(params.plaits_params[i].lpg_color + (enc_turn / 255.0f), 0.0f, 1.0f);
-					calc_params.already_handled_button[i] = 1;
-				}
-			}
-		}
-		return; // Don't process phase change
-	}
-
+	/* PHASE SPREAD CONTROL (knob pressed + turned)
+	 *
+	 * The encoder steps a discrete musical ladder (phase_spread_ladder
+	 * in this file): each click moves the index by ±1.  Index 0 is
+	 * unison; positive walks 1/96-of-a-beat → 1/6 → on-the-beat → 3
+	 * beats apart; negative mirrors the same ladder with reversed
+	 * voice order.  The cached float `lfos.phase_spread` is the
+	 * resolved per-voice offset in clock periods, used directly by
+	 * the LPG strum scheduler and indirectly (via apply_phase_spread)
+	 * by the LFO mode channels. */
 	if (enc_pressed)
 	{
-		if (!disable_phase_sync)
-			stage_phase_sync=1;
-	} else
+		if (enc_turn) {
+			/* Each encoder click moves the ladder index by ±1; FINE has
+			 * no effect because the ladder stops are already musical. */
+			int new_idx = (int)lfos.phase_spread_idx + (int)(-enc_turn);
+			if (new_idx < PHASE_SPREAD_IDX_MIN) new_idx = PHASE_SPREAD_IDX_MIN;
+			if (new_idx > PHASE_SPREAD_IDX_MAX) new_idx = PHASE_SPREAD_IDX_MAX;
+			lfos.phase_spread_idx = (int8_t)new_idx;
+			lfos.phase_spread     = phase_spread_for_idx(lfos.phase_spread_idx);
+
+			/* Bulk-apply to LFO-mode channels.  LPG-mode channels read
+			 * lfos.phase_spread directly inside the chord-strum
+			 * scheduler, so they need no per-channel state here. */
+			apply_phase_spread();
+
+			disable_phase_sync = 1;
+		} else {
+			// Knob pressed but not turned - stage for sync
+			if (!disable_phase_sync)
+				stage_phase_sync=1;
+		}
+	}
+	else  // Knob not pressed
 	{
-		if (!enc_turn && stage_phase_sync)
+		// If knob was just released and sync was staged, sync all LFOs
+		if (!enc_turn && stage_phase_sync) {
 			sync_LFO_phase();
+		}
 		stage_phase_sync = 0;
 		disable_phase_sync = 0;
-	}
 
-	if (enc_turn)
-	{
-		disable_phase_sync = 1;
-		stage_phase_sync = 0;
-		if (fine)
-			enc_amount = -enc_turn * F_SCALING_FINE_LFO_PHASE;
-		else
-			enc_amount = -enc_turn;
+		/* INDIVIDUAL PHASE NUDGE (knob not pressed + turned).
+		 * Only meaningful for LFO-mode channels: lets the user offset
+		 * one voice's free-running phase relative to the spread baseline.
+		 * LPG-mode channels are timed entirely by phase_spread + the
+		 * clock, so individual nudge does not apply. */
+		if (enc_turn)
+		{
+			if (fine)
+				enc_amount = -enc_turn * F_SCALING_FINE_LFO_PHASE;
+			else
+				enc_amount = -enc_turn;
 
-		// GLOBAL
-		if (macro_states.all_af_buttons_released){
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if (!lfos.locked[i])
-				{
-					if (!fine)
-						lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-					else
-						lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-
-					lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+			// GLOBAL (no channel buttons held)
+			if (macro_states.all_af_buttons_released){
+				for (i = 0; i < NUM_CHANNELS; i++){
+					if (!lfos.locked[i] && lfos.mode[i] != lfot_LPG)
+					{
+						if (!fine)
+							lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						else
+							lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+					}
 				}
 			}
-		}
+			// INDIVIDUAL (channel button held)
+			else{
+				for (i = 0; i < NUM_CHANNELS; i++){
+					if(button_pressed(i) && lfos.mode[i] != lfot_LPG)
+					{
+						if (!fine)
+							lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						else
+							lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
+						lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
 
-		// INDIVIDUAL
-		else{
-			for (i = 0; i < NUM_CHANNELS; i++){
-				if(button_pressed(i))
-				{
-					if (!fine)
-						lfos.phase_id[i] = _WRAP_I16(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-					else
-						lfos.phase_id[i] = _WRAP_F(lfos.phase_id[i] + enc_amount, 0, LFO_PHASE_TABLELEN);
-
-					calc_params.already_handled_button[i] = 1;
-					lfos.phase[i] = calc_lfo_phase(lfos.phase_id[i]);
+						calc_params.already_handled_button[i] = 1;
+					}
 				}
 			}
 		}
@@ -631,24 +666,18 @@ void read_LFO_shape(void)
 
 	if(enc)
 	{
-		// Hold LFO->VCA + turn LFO Shape = adjust resonator decay
-		if (button_pressed(butm_LFOVCA_BUTTON)) {
-			float factor = powf(1.2f, (float)enc);
-			params.resonator_decay_freq *= factor;
-			params.resonator_decay_freq = _CLAMP_F(params.resonator_decay_freq, 1.0f, 1000.0f);
-			calc_params.already_handled_button[butm_LFOVCA_BUTTON] = 1;
-			return;
-		}
-
-
 		if (macro_states.all_af_buttons_released)
 		{
 			for (i = 0; i < NUM_CHANNELS; i++){
 				if (!lfos.locked[i])
 				{
-					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
-					if (lfos.mode[i] == lfot_LPG)
-						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					if (lfos.mode[i] == lfot_LPG) {
+						// LPG mode: adjust lpg_color (resonance)
+						lfos.lpg_color[i] = _CLAMP_F(lfos.lpg_color[i] + (enc / 20.0f), 0.0f, 1.0f);
+					} else {
+						// LFO mode: adjust shape
+						lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					}
 
 					led_cont.ongoing_lfoshape[i] = 1;
 					led_cont.lfoshape_timeout[i] = params.key_sw[i]!=ksw_MUTE;								
@@ -661,9 +690,13 @@ void read_LFO_shape(void)
 			for (i=0; i < NUM_CHANNELS; i++){ 
 				if(button_pressed(i))
 				{
-					lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
-					if (lfos.mode[i] == lfot_LPG)
-						params.plaits_params[i].lpg_decay = (float)lfos.shape[i] / (float)NUM_LFO_SHAPES;
+					if (lfos.mode[i] == lfot_LPG) {
+						// LPG mode: adjust lpg_color (resonance)
+						lfos.lpg_color[i] = _CLAMP_F(lfos.lpg_color[i] + (enc / 20.0f), 0.0f, 1.0f);
+					} else {
+						// LFO mode: adjust shape
+						lfos.shape[i] = _WRAP_I16(lfos.shape[i] + enc, 0 , NUM_LFO_SHAPES);
+					}
 
 					calc_params.already_handled_button[i] = 1; 
 
@@ -708,24 +741,70 @@ float calc_lfo_phase(float phase_id)
 }
 
 
+/* ─────────────────────────────────────────────────────────────────────
+ *  Unified phase-spread → per-channel phase_id derivation
+ *
+ *  phase_spread is in clock-period units between adjacent channels.
+ *  For an LFO running at divmult[chan] × GLO_CLK, one clock period
+ *  corresponds to divmult[chan] LFO cycles, so:
+ *
+ *      target_delay_seconds = chan * phase_spread * clock_period
+ *      target_delay_in_lfo_cycles = chan * phase_spread * divmult[chan]
+ *
+ *  The LFO output samples wt_pos = cycle_pos + phase, so positive
+ *  `phase` _advances_ the output (peak arrives sooner).  To delay the
+ *  voice we set phase to a negative offset, then wrap to [0, 1).
+ *  Multiplied by LFO_PHASE_TABLELEN to land in phase_id units.
+ * ───────────────────────────────────────────────────────────────────── */
+float phase_id_from_spread(uint8_t chan)
+{
+	if (chan >= NUM_CHANNELS) return 0.0f;
+	float dm = lfos.divmult[chan];
+	if (dm <= 0.0f || !isfinite(dm)) dm = 1.0f;
+
+	float p = -((float)chan) * lfos.phase_spread * dm * (float)LFO_PHASE_TABLELEN;
+
+	/* Wrap to [0, LFO_PHASE_TABLELEN). */
+	p -= (float)LFO_PHASE_TABLELEN
+	   * floorf(p / (float)LFO_PHASE_TABLELEN);
+	if (p < 0.0f) p = 0.0f;                       /* floor() rounding edge */
+	if (p >= (float)LFO_PHASE_TABLELEN) p = 0.0f; /* same */
+	return p;
+}
+
+void apply_phase_spread(void)
+{
+	for (uint8_t i = 0; i < NUM_CHANNELS; i++) {
+		if (lfos.locked[i]) continue;
+		if (lfos.mode[i] == lfot_LPG) continue;   /* LPG reads spread directly */
+		lfos.phase_id[i] = phase_id_from_spread(i);
+		lfos.phase[i]    = calc_lfo_phase(lfos.phase_id[i]);
+	}
+}
+
+
 void read_lfo_cv(void)
 {
-	static uint16_t last_divmult_cv=0;
-
-	if (system_settings.lfo_cv_mode == LFOCV_SPEED)
-		divmult_cv = (analog[LFO_CV].bracketed_val * NUM_DIVMULTS)>>12;
-	else
-		divmult_cv = 0;
-
-	if (divmult_cv != last_divmult_cv) {
-		// flag_lfo_recalc(GLO_CLK);
-		flag_all_lfos_recalc();
-		last_divmult_cv = divmult_cv;
+	/* LFO CV jack repurposed as Global VCA, INVERTED.
+	 *   0 V (or unplugged)  → full volume  (level = 1.0)
+	 *   5 V                 → silent       (level = 0.0)
+	 *
+	 * The inversion lets the user patch a falling envelope (e.g.
+	 * a decaying LFO/EG output sitting at 0 V at rest, briefly
+	 * rising to 5 V) and have it duck the synth volume rather than
+	 * gate it open — which matches how a "ducker" or sidechain
+	 * input is normally wired in modular setups.
+	 *
+	 * The conditioning chain treats LFO_CV as AP_UNIPOLAR so
+	 * bracketed_val is always 0..4095. */
+	if (analog_jack_plugged(LFO_CV)) {
+		float v = (float)analog[LFO_CV].bracketed_val / 4095.0f;
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+		lfos.global_vca_level = 1.0f - v;
+	} else {
+		lfos.global_vca_level = 1.0f;  // Full volume when unplugged
 	}
-
-	// else if (system_settings.lfo_cv_mode 	== LFOCV_SHAPE){new_cv  = (analog[LFO_CV].bracketed_val * NUM_LFO_SHAPES   / 4095);}
-	// else if (system_settings.lfo_cv_mode 	== LFOCV_GROOVE){new_cv = (analog[LFO_CV].bracketed_val * 100   / 4095);}
-
 }
 
 

@@ -41,6 +41,77 @@ const uint32_t CYCLES_PER_LFO_PERIOD = 30000; // 216M / 7.2kHz
 const float INV_CYCLES_PER_LFO_PERIOD = 1.0f / 30000.0f;
 float lfo_phase_multiplier = 1.0f;
 
+/* ───── Temporary diagnostic timing (remove once 100 ms retrigger
+ *       latency investigation is resolved) ─────
+ *
+ * All values are DWT->CYCCNT cycles at 216 MHz:
+ *   1 µs = 216 cycles    1 ms = 216 000 cycles    100 ms = 21 600 000 cycles
+ *
+ *   diag_osc_tim_peak_cycles     — worst update_oscillators() execution
+ *   diag_main_loop_peak_cycles   — worst main-loop iteration period
+ *                                  (chord trigger latency bound)
+ *   diag_retrigger_peak_cycles[] — per-channel arm→consume delay for
+ *                                  halo_request_trigger()
+ *   diag_trigger_arm_cycle[]     — CYCCNT stamp when the pending flag
+ *                                  was set; consumed by update_oscillators
+ *                                  to compute the peak above. 0 == idle.
+ *
+ * Peaks decay slowly inside display_cpu_usage() so transient spikes stay
+ * visible for ~100 ms and slower trends remain readable. */
+volatile uint32_t diag_osc_tim_peak_cycles    = 0;
+volatile uint32_t diag_main_loop_peak_cycles  = 0;
+volatile uint32_t diag_read_freq_peak_cycles  = 0;  /* read_freq() total */
+volatile uint32_t diag_chord_build_peak_cycles = 0; /* build_harmonic_chord only */
+
+/* Per-step main-loop peaks so we can narrow down which call causes the
+ * ~100 ms spike visible on the outer LED ring. */
+volatile uint32_t diag_ml_switches_peak_cycles   = 0; /* read_switches */
+volatile uint32_t diag_ml_oscparam_peak_cycles   = 0; /* update_osc_param_lock */
+volatile uint32_t diag_ml_selbusbtn_peak_cycles  = 0; /* read_selbus_buttons */
+volatile uint32_t diag_ml_uimode_peak_cycles     = 0; /* check_ui_mode_requests */
+volatile uint32_t diag_ml_loadsave_peak_cycles   = 0; /* read_load_save_encoder */
+volatile uint32_t diag_ml_selbusev_peak_cycles   = 0; /* check_sel_bus_event */
+
+/* Un-measured ISRs that could explain the 200 ms main-loop spike in chord
+ * mode.  All are peak cycles-per-invocation (not per iteration), so they
+ * tell us worst-case execution of one call of the handler.  Cumulative
+ * preemption time is harder to infer but a single invocation that takes
+ * >50 ms would show here immediately. */
+volatile uint32_t diag_audio_isr_peak_cycles     = 0; /* process_audio_block_codec (SAI DMA, priority 0,0) */
+volatile uint32_t diag_pwm_out_peak_cycles       = 0; /* update_envout_pwm (PWM_OUTS_TIM, priority 0,3) */
+volatile uint32_t diag_reverb_peak_cycles        = 0; /* Reverb_Process only — split out of audio ISR */
+
+/* Sub-step timing inside update_oscillators() (OSC_TIM @ 1.8 kHz, 555 µs
+ * budget).  Total OSC_TIM peak is consistently ≥1 ms, so one of these
+ * sub-steps has to be dominating. */
+volatile uint32_t diag_osc_refresh_peak_cycles   = 0; /* refresh_ring_seed_caches (flash I/O spin-wait) */
+volatile uint32_t diag_osc_chanloop_peak_cycles  = 0; /* per-channel loop total (6x update_pitch + halo_tick) */
+volatile uint32_t diag_osc_ringtick_peak_cycles  = 0; /* single halo_tick() call (includes advance_cycle) */
+volatile uint32_t diag_advance_cycle_peak_cycles = 0; /* single halo_advance_cycle() call (physics only) */
+volatile uint32_t diag_seed_lerp_peak_cycles     = 0; /* single halo_seed_lerp() call (trigger path) */
+
+/* Monotonic counter of how many times read_freq() entered the chord-recalc
+ * branch (needs_recalc==1).  Displayed as a *raw per-50 ms-window count* (no
+ * decay) so a sustained red LED can only mean "many recalcs happening right
+ * now", not "one burst 10 s ago that hasn't decayed yet". */
+volatile uint32_t diag_chord_recalc_count        = 0;
+
+/* Main-loop iteration count per 50 ms window.  Lets us distinguish
+ * "one big 200 ms block" (count near zero in a window) from
+ * "CPU starvation" (many short iterations whose gaps are all <1 ms
+ * individually but sum to 200 ms).  Incremented once per iteration in
+ * main(); read and reset by display_cpu_usage() every 50 ms. */
+volatile uint32_t diag_main_loop_iter_count      = 0;
+
+/* Spurious-retrigger diagnostic: count how many times the main-loop
+ * chord path has called halo_request_trigger() per channel.
+ * Strictly monotonic; display_cpu_usage() reads the delta against a
+ * stored snapshot to derive a "retriggers in the last 50 ms" metric. */
+volatile uint32_t diag_retrigger_count [NUM_CHANNELS] = {0};
+
+volatile uint32_t diag_retrigger_peak_cycles [NUM_CHANNELS] = {0};
+volatile uint32_t diag_trigger_arm_cycle     [NUM_CHANNELS] = {0};
+
 
 #define USE_HAL_TIM_REGISTER_CALLBACKS 0
 

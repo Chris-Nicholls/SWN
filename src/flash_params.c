@@ -37,7 +37,6 @@
 
 #include "preset_manager.h"
 #include "calibrate_voct.h"
-#include "sphere_flash_io.h"
 
 
 #include <math.h>
@@ -96,10 +95,6 @@ uint32_t load_flash_params(void)
 
 void firmware_upgrade_post_process(uint8_t old_major, uint8_t old_minor)
 {
-	if (old_major==0 && old_minor<=8)
-	{
-		restore_factory_spheres_to_extflash();
-	}
 	if (old_major==2 && old_minor==1)
 	{
 		system_settings.selbus_can_save = SELBUS_SAVE_DISABLED;	
@@ -124,7 +119,6 @@ void factory_reset(void)
 {	
 	default_system_settings();
 	set_default_voct_calibrate();
-	empty_all_user_spheres();
 	clear_all_presets();
 
 	set_firmware_version();

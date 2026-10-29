@@ -34,62 +34,6 @@
 #include "sphere.h"
 #include "globals.h"
 
-#define RESONATOR_GAIN			32.0f								// Gain applied to coherence VCA
-#define RESONATOR_LED_SCALE		32.0f								// Scale coherence to 0-1 for LED display
 #define MAX_UNISON_VOICES		6									// Maximum number of unison voices per channel
 
-enum WtInterpRequests {
-	WT_INTERP_REQ_NONE,
-	WT_INTERP_REQ_REFRESH,
-	WT_INTERP_REQ_FORCE
-};
-
-
-typedef struct o_wt_osc{
-
-	// Current wavetable for each channel (interpolated from within the sphere)
-	// Two buffers are kept, so we can crossfade when switching wavetables/spheres
-	//
-	float 						mc 						[2][NUM_CHANNELS][WT_TABLELEN];
-	uint8_t						buffer_sel				[NUM_CHANNELS]		;
-
-	// Status of interpolation and crossfade
-	enum WtInterpRequests		wt_interp_request		[NUM_CHANNELS]		;
-	float 						wt_xfade				[NUM_CHANNELS]		;
-
-	// Position within sphere, calculated directly from calc_params.wt_pos[DIM][chan]
-	//
-	uint8_t 					m0						[3][NUM_CHANNELS]	;
-	uint8_t 					m1						[3][NUM_CHANNELS]	;
-	float 						m_frac					[3][NUM_CHANNELS]	;
-	float 						m_frac_inv				[3][NUM_CHANNELS]	;
-
-	// WT READING HEAD
-	float 						wt_head_pos 			[NUM_CHANNELS][MAX_UNISON_VOICES];
-	float						wt_head_pos_inc			[NUM_CHANNELS][MAX_UNISON_VOICES];
-
-	// For standard playback (non-interpolated reading)
-	uint16_t 					rh0						[NUM_CHANNELS][MAX_UNISON_VOICES];
-	uint16_t 					rh1						[NUM_CHANNELS][MAX_UNISON_VOICES];
-	float 						rhd						[NUM_CHANNELS][MAX_UNISON_VOICES]; 
-	float 						rhd_inv					[NUM_CHANNELS][MAX_UNISON_VOICES];
-
-
-	// Resonator mode: quadrature coherence detection (pseudo-Hilbert)
-	float						coherence_dc_I		[NUM_CHANNELS];			// In-phase DC component (slow LPF)
-	float						coherence_dc_Q		[NUM_CHANNELS];			// Quadrature DC component (90° shifted)
-	float						coherence_env		[NUM_CHANNELS];			// Envelope of sqrt(I²+Q²)
-
-	// Unison params (cached here for audio thread performance)
-	float						unison_spread_amt	[NUM_CHANNELS];
-	uint8_t						unison_voice_count	[NUM_CHANNELS];
-
-	// Plaits state
-	float						plaits_last_cv_input[NUM_CHANNELS];
-	uint32_t					plaits_refractory_timer[NUM_CHANNELS];
-	
-} o_wt_osc;
-
-
-void	init_wt_osc(void);
 void 	process_audio_block_codec(int32_t *src, int32_t *dst);
